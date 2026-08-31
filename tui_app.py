@@ -23,6 +23,7 @@ WELCOME_MESSAGE = (
     "🎲 Tabletop AI Assistant запущен. Задайте вопрос по настольным играм. /exit — выход."
 )
 GOODBYE_MESSAGE = "До встречи! История диалога сохранена. 🎲"
+EXIT_BEFORE_START_MESSAGE = "До встречи! 🎲"
 TYPING_CHUNK_SIZE = 3
 TYPING_DELAY = 0.015
 COMMANDS = ["/exit"]
@@ -53,7 +54,15 @@ class TabletopAITUI:
             readline.parse_and_bind("tab: complete")
 
     def run(self) -> None:
-        api_key = self._ensure_api_key()
+        try:
+            api_key = self._ensure_api_key()
+        except KeyboardInterrupt:
+            # Ctrl+C во время ручного ввода API-ключа тоже должен завершать
+            # приложение аккуратно, а не необработанным traceback. Диалогов
+            # ещё не было, поэтому сообщение про сохранённую историю не нужно.
+            self.console.print()
+            self.console.print(f"[bold yellow]{EXIT_BEFORE_START_MESSAGE}[/bold yellow]")
+            return
         self.client = DeepseekAPIClient(api_key)
 
         self.console.print(Panel(APP_TITLE, style="bold cyan"))
@@ -63,31 +72,38 @@ class TabletopAITUI:
             self.console.print(f"[bold yellow]{WELCOME_MESSAGE}[/bold yellow]\n")
         self._print_status_bar()
 
-        while True:
-            try:
-                # Обычный input() без rich-разметки: readline знает точную длину
-                # приглашения и не портит его при удалении введённого текста (backspace).
-                user_input = input("> Введите вопрос (или /exit для выхода): ")
-            except (EOFError, KeyboardInterrupt):
-                self._exit()
-                return
+        try:
+            while True:
+                try:
+                    # Обычный input() без rich-разметки: readline знает точную длину
+                    # приглашения и не портит его при удалении введённого текста (backspace).
+                    user_input = input("> Введите вопрос (или /exit для выхода): ")
+                except EOFError:
+                    self._exit()
+                    return
 
-            user_input = user_input.strip()
-            if not user_input:
-                continue
-            if user_input == "/exit":
-                self._exit()
-                return
+                user_input = user_input.strip()
+                if not user_input:
+                    continue
+                if user_input == "/exit":
+                    self._exit()
+                    return
 
-            if len(user_input) > config.MAX_INPUT_LENGTH:
-                user_input = user_input[: config.MAX_INPUT_LENGTH]
-                self.console.print(
-                    f"[bold yellow]Запрос слишком длинный, обрезан до "
-                    f"{config.MAX_INPUT_LENGTH} символов.[/bold yellow]"
-                )
+                if len(user_input) > config.MAX_INPUT_LENGTH:
+                    user_input = user_input[: config.MAX_INPUT_LENGTH]
+                    self.console.print(
+                        f"[bold yellow]Запрос слишком длинный, обрезан до "
+                        f"{config.MAX_INPUT_LENGTH} символов.[/bold yellow]"
+                    )
 
-            self._handle_question(user_input)
-            self._print_status_bar()
+                self._handle_question(user_input)
+                self._print_status_bar()
+        except KeyboardInterrupt:
+            # Ctrl+C может прийти как во время input(), так и во время ожидания
+            # ответа API или анимации печати — ловим его на уровне всего цикла.
+            self.console.print()
+            self._exit()
+            return
 
     def _ensure_api_key(self) -> str:
         api_key = config.get_api_key()
