@@ -1,11 +1,26 @@
 """Клиент для обращения к Deepseek Chat Completions API."""
 
+import json
+import re
 import time
 from typing import Optional
 
 import requests
 
-import config
+from . import config
+
+_JSON_CODE_BLOCK_RE = re.compile(r"```json\s*(.*?)\s*```", re.DOTALL)
+
+
+def is_valid_json_answer(text: str) -> bool:
+    """Проверяет, что ответ — валидный JSON (в т.ч. внутри блока ```json)."""
+    match = _JSON_CODE_BLOCK_RE.search(text)
+    candidate = match.group(1) if match else text
+    try:
+        json.loads(candidate)
+        return True
+    except (ValueError, TypeError):
+        return False
 
 
 class DeepseekAPIError(Exception):
@@ -16,15 +31,20 @@ class DeepseekAPIClient:
     def __init__(self, api_key: str):
         self.api_key = api_key
 
-    def ask(self, system_message: str, user_message: str) -> str:
+    def ask(
+        self,
+        system_message: str,
+        user_message: str,
+        max_tokens: int = config.max_tokens_for_words(config.DEFAULT_MAX_WORDS),
+    ) -> str:
         payload = {
             "model": config.MODEL_NAME,
             "messages": [
                 {"role": "system", "content": system_message},
-                {"role": "user", "content": f"Вопрос пользователя: {user_message}"},
+                {"role": "user", "content": user_message},
             ],
             "temperature": config.TEMPERATURE,
-            "max_tokens": config.MAX_TOKENS,
+            "max_tokens": max_tokens,
         }
         headers = {
             "Authorization": f"Bearer {self.api_key}",

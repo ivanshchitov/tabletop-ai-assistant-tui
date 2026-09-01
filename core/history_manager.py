@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Dict, List
 
-import config
+from . import config
 
 
 class HistoryManager:
@@ -28,6 +28,10 @@ class HistoryManager:
     def add(self, question: str, answer: str) -> None:
         self.dialogues.append({"question": question, "answer": answer})
         self.dialogues = self.dialogues[-self.limit :]
+        self.save()
+
+    def clear(self) -> None:
+        self.dialogues = []
         self.save()
 
     def save(self) -> None:

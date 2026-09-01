@@ -2,7 +2,7 @@
 
 """Точка входа Tabletop AI Assistant."""
 
-from tui_app import TabletopAITUI
+from ui.tui_app import TabletopAITUI
 
 
 def main() -> None:

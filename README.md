@@ -18,7 +18,32 @@ echo "OPENCODE_API_KEY=sk-ваш_ключ" > .env
 python tabletop-ai-assistant.py
 ```
 
-Единственная команда в приложении — `/exit` (с автодополнением по Tab), выход завершает работу и сохраняет историю в `history.json`.
+Команды приложения (с автодополнением по Tab):
+
+- `/exit` — выход, сохраняет историю в `history.json`.
+- `/settings` — экран настроек ответа: `↑`/`↓` — выбор поля, `←`/`→` — формат ответа
+  (`compact` / `json` / `free`), цифры и `Backspace` — редактирование числовых полей:
+  максимальный объём ответа в словах (10..500) и лимит вариантов в списке-подборке
+  (1..10, например «предложи список настольных игр»), `Esc` — сохранить и выйти на главный экран.
+- `/clear` — очистить историю диалога (в памяти и в `history.json`).
+
+## Структура проекта
+
+```
+tabletop-ai-assistant.py  # Точка входа: python tabletop-ai-assistant.py
+core/                      # Настройки, промпты, API-клиент, история — без rich/терминала
+  config.py                 # Переменные окружения, константы API
+  answer_settings.py         # AnswerFormat, AnswerSettings — настройки формата/объёма/лимита списка
+  prompts.py                  # Сборка системного и user-промпта из assets/
+  api_client.py                # DeepseekAPIClient — запросы к API, retry с backoff
+  history_manager.py           # Сохранение/загрузка истории (history.json)
+ui/                         # Терминальный интерфейс
+  tui_app.py                  # Основной класс TabletopAITUI: rich-интерфейс, /settings, /clear
+  keyboard.py                  # Чтение клавиш для экрана /settings
+assets/                    # system_prompt.md и answer_format_*.md
+history.json               # Сохранённая история (в .gitignore)
+.env                       # OPENCODE_API_KEY=sk-... (в .gitignore)
+```
 
 ## Сценарии использования
 
