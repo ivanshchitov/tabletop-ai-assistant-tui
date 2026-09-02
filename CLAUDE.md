@@ -64,6 +64,14 @@ OpenCode the same six commands are spelled with a dash (`/opsx-propose`, `/opsx-
   worded as "build X" — implementation starts on a separate `/opsx:apply` request.
 - The delta spec is a *diff* against the main spec, not a copy of it. The main specs under
   `openspec/specs/` are only ever written by archive/sync, never edited by hand during a change.
+- `openspec/specs/` holds the master spec (archived from `add-master-spec`, reverse-engineered
+  from the existing code/tests) as eight capabilities, each the target for future `MODIFIED` deltas:
+  `question-answering`, `answer-settings`, `api-integration`, `history-persistence`,
+  `terminal-ui`, `settings-screen`, `configuration`, `test-infrastructure`. It records two
+  deliberate decisions worth knowing before touching related code: the JSON format's refusal
+  reply is a machine-readable `{"error": ...}` object rather than the verbatim refusal phrase used
+  by free/compact (not a bug to fix), and `AnswerSettings` is session-only by design — persisting
+  it across restarts is backlog, not a current requirement.
 - The skills shell out to a bare `openspec` binary (`allowed-tools: Bash(openspec:*)`), so the CLI
   has to be on PATH: `npm i -g @fission-ai/openspec`. `npx @fission-ai/openspec@latest <cmd>` works
   for manual invocations but not from inside the skills.

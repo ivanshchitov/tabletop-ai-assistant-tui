@@ -159,3 +159,8 @@ openspec/
 ```
 
 Дельта-спек в изменении — это описание разницы с основной спецификацией, а не её копия.
+
+`openspec/specs/` уже содержит основную спецификацию проекта — восемь возможностей,
+зафиксированных реверс-инжинирингом действующего кода: `question-answering`, `answer-settings`,
+`api-integration`, `history-persistence`, `terminal-ui`, `settings-screen`, `configuration`,
+`test-infrastructure`. Она — эталон для будущих `MODIFIED`-дельт.
