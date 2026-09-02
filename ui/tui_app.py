@@ -1,5 +1,6 @@
 """TUI-приложение Tabletop AI Assistant на базе rich."""
 
+import os
 import time
 from typing import List, Optional
 
@@ -14,11 +15,18 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 
 from core import config, prompts
-from core.answer_settings import AnswerFormat, AnswerSettings, AnswerSettingsError
-from core.api_client import DeepseekAPIClient, DeepseekAPIError, is_valid_json_answer
+from core.answer_settings import AnswerFormat, AnswerSettings
+from core.api_client import (
+    API_KEY_CHARSET_ERROR,
+    DeepseekAPIClient,
+    DeepseekAPIError,
+    is_valid_api_key,
+    is_valid_json_answer,
+)
 from core.history_manager import HistoryManager
 
-from . import keyboard
+from . import keyboard, settings_screen
+from .settings_screen import SettingsScreenState
 
 APP_TITLE = "🎲 TABLETOP AI ASSISTANT — эксперт по настольным играм"
 WELCOME_MESSAGE = (
@@ -28,12 +36,10 @@ WELCOME_MESSAGE = (
 GOODBYE_MESSAGE = "До встречи! История диалога сохранена. 🎲"
 EXIT_BEFORE_START_MESSAGE = "До встречи! 🎲"
 TYPING_CHUNK_SIZE = 3
-TYPING_DELAY = 0.015
+# Пауза между кадрами анимации печати. Переопределяется через окружение, чтобы e2e-прогон
+# по псевдотерминалу не ждал реального времени набора на каждый ответ.
+TYPING_DELAY = float(os.getenv("TABLETOP_TYPING_DELAY", "0.015"))
 COMMANDS = ["/exit", "/settings", "/clear"]
-SETTINGS_ROW_FORMAT = 0
-SETTINGS_ROW_MAX_WORDS = 1
-SETTINGS_ROW_LIST_LIMIT = 2
-SETTINGS_ROWS_COUNT = 3
 
 FORMAT_LABELS = {
     AnswerFormat.COMPACT: "компактный",
@@ -43,11 +49,22 @@ FORMAT_LABELS = {
 
 
 class TabletopAITUI:
-    def __init__(self) -> None:
-        self.console = Console()
-        self.history = HistoryManager()
+    def __init__(
+        self,
+        console: Optional[Console] = None,
+        history: Optional[HistoryManager] = None,
+        client: Optional[DeepseekAPIClient] = None,
+    ) -> None:
+        """Зависимости необязательны: по умолчанию — реальные консоль, история и клиент.
+
+        Возможность подставить свои нужна тестам (консоль в буфер, история во временном файле,
+        клиент-заглушка); переданный клиент к тому же означает, что API-ключ уже есть и
+        запрашивать его при старте не нужно.
+        """
+        self.console = console if console is not None else Console()
+        self.history = history if history is not None else HistoryManager()
         self.session_count = 0
-        self.client: Optional[DeepseekAPIClient] = None
+        self.client: Optional[DeepseekAPIClient] = client
         self.last_error: Optional[str] = None
         self.settings = AnswerSettings()
         self._setup_autocomplete()
@@ -68,16 +85,17 @@ class TabletopAITUI:
             readline.parse_and_bind("tab: complete")
 
     def run(self) -> None:
-        try:
-            api_key = self._ensure_api_key()
-        except KeyboardInterrupt:
-            # Ctrl+C во время ручного ввода API-ключа тоже должен завершать
-            # приложение аккуратно, а не необработанным traceback. Диалогов
-            # ещё не было, поэтому сообщение про сохранённую историю не нужно.
-            self.console.print()
-            self.console.print(f"[bold yellow]{EXIT_BEFORE_START_MESSAGE}[/bold yellow]")
-            return
-        self.client = DeepseekAPIClient(api_key)
+        if self.client is None:
+            try:
+                api_key = self._ensure_api_key()
+            except KeyboardInterrupt:
+                # Ctrl+C во время ручного ввода API-ключа тоже должен завершать
+                # приложение аккуратно, а не необработанным traceback. Диалогов
+                # ещё не было, поэтому сообщение про сохранённую историю не нужно.
+                self.console.print()
+                self.console.print(f"[bold yellow]{EXIT_BEFORE_START_MESSAGE}[/bold yellow]")
+                return
+            self.client = DeepseekAPIClient(api_key)
 
         self.console.print(Panel(APP_TITLE, style="bold cyan"))
         if self.history.dialogues:
@@ -124,11 +142,19 @@ class TabletopAITUI:
             return
 
     def _ensure_api_key(self) -> str:
+        """Возвращает пригодный ключ, при необходимости спрашивая его у пользователя.
+
+        Ключ проверяется и когда он пришёл из .env: непригодный всё равно оборвал бы первый же
+        запрос, поэтому лучше сказать об этом на старте, чем после первого вопроса.
+        """
         api_key = config.get_api_key()
-        while not api_key:
-            self.console.print(
-                "[bold red]API-ключ не найден. Добавьте OPENCODE_API_KEY в файл .env[/bold red]"
-            )
+        while not is_valid_api_key(api_key or ""):
+            if api_key:
+                self.console.print(f"[bold red]{API_KEY_CHARSET_ERROR}[/bold red]")
+            else:
+                self.console.print(
+                    "[bold red]API-ключ не найден. Добавьте OPENCODE_API_KEY в файл .env[/bold red]"
+                )
             entered = input("Введите OPENCODE_API_KEY вручную: ").strip()
             if entered:
                 config.set_api_key_runtime(entered)
@@ -148,78 +174,45 @@ class TabletopAITUI:
         return False
 
     def _open_settings_screen(self) -> None:
-        """Экран настроек: ↑/↓ — выбор поля, ←/→ — формат, цифры/Backspace — числовые поля, Esc — выход."""
-        format_values = list(AnswerFormat)
-        format_index = format_values.index(self.settings.format)
-        max_words_input = str(self.settings.max_words)
-        list_limit_input = str(self.settings.list_limit)
-        row = SETTINGS_ROW_FORMAT
+        """Экран настроек: ↑/↓ — выбор поля, ←/→ — формат, цифры/Backspace — числовые поля, Esc — выход.
 
-        def render() -> Panel:
-            return self._render_settings_panel(row, format_values, format_index, max_words_input, list_limit_input)
+        Здесь остаётся только цикл «прочитать клавишу — перерисовать»: как именно клавиша меняет
+        экран и что происходит с введёнными значениями на выходе, решает `ui.settings_screen`.
+        """
+        state = settings_screen.initial_state(self.settings)
 
+        # cbreak-режим включается один раз на весь экран, а не вокруг каждого read_key() —
+        # см. пояснение в keyboard.raw_mode().
         with Live(console=self.console, refresh_per_second=30, transient=True) as live, keyboard.raw_mode():
-            live.update(render())
+            live.update(self._render_settings_panel(state))
             while True:
                 key = keyboard.read_key()
                 if key == keyboard.ESC:
                     break
-                elif key in (keyboard.UP, keyboard.DOWN):
-                    row = (row + 1) % SETTINGS_ROWS_COUNT
-                elif row == SETTINGS_ROW_FORMAT and key in (keyboard.LEFT, keyboard.RIGHT):
-                    step = -1 if key == keyboard.LEFT else 1
-                    format_index = (format_index + step) % len(format_values)
-                    self.settings = self.settings.with_format(format_values[format_index])
-                elif row == SETTINGS_ROW_MAX_WORDS and key == keyboard.BACKSPACE:
-                    max_words_input = max_words_input[:-1]
-                elif row == SETTINGS_ROW_MAX_WORDS and key.isdigit():
-                    max_words_input += key
-                elif row == SETTINGS_ROW_LIST_LIMIT and key == keyboard.BACKSPACE:
-                    list_limit_input = list_limit_input[:-1]
-                elif row == SETTINGS_ROW_LIST_LIMIT and key.isdigit():
-                    list_limit_input += key
-                live.update(render())
+                state = settings_screen.apply_key(state, key)
+                live.update(self._render_settings_panel(state))
 
-        if max_words_input.isdigit():
-            try:
-                self.settings = self.settings.with_max_words(int(max_words_input))
-            except AnswerSettingsError as exc:
-                self.console.print(f"[bold red]{exc}[/bold red]")
-        else:
-            self.console.print("[bold red]Максимальный объём ответа: введите число слов.[/bold red]")
+        self.settings, errors = settings_screen.apply_to_settings(state, self.settings)
+        for error in errors:
+            self.console.print(f"[bold red]{error}[/bold red]")
 
-        if list_limit_input.isdigit():
-            try:
-                self.settings = self.settings.with_list_limit(int(list_limit_input))
-            except AnswerSettingsError as exc:
-                self.console.print(f"[bold red]{exc}[/bold red]")
-        else:
-            self.console.print("[bold red]Лимит вариантов в списке: введите число.[/bold red]")
-
-    def _render_settings_panel(
-        self,
-        row: int,
-        format_values: List[AnswerFormat],
-        format_index: int,
-        max_words_input: str,
-        list_limit_input: str,
-    ) -> Panel:
+    def _render_settings_panel(self, state: SettingsScreenState) -> Panel:
         format_line = "   ".join(
-            f"[reverse bold]{FORMAT_LABELS[f]}[/reverse bold]" if i == format_index else FORMAT_LABELS[f]
-            for i, f in enumerate(format_values)
+            f"[reverse bold]{FORMAT_LABELS[f]}[/reverse bold]" if i == state.format_index else FORMAT_LABELS[f]
+            for i, f in enumerate(settings_screen.FORMAT_VALUES)
         )
-        marker_format = "➤" if row == SETTINGS_ROW_FORMAT else " "
-        marker_words = "➤" if row == SETTINGS_ROW_MAX_WORDS else " "
-        marker_list_limit = "➤" if row == SETTINGS_ROW_LIST_LIMIT else " "
+        marker_format = "➤" if state.row == settings_screen.ROW_FORMAT else " "
+        marker_words = "➤" if state.row == settings_screen.ROW_MAX_WORDS else " "
+        marker_list_limit = "➤" if state.row == settings_screen.ROW_LIST_LIMIT else " "
         words_display = (
-            f"[reverse bold]{max_words_input or ' '}[/reverse bold]"
-            if row == SETTINGS_ROW_MAX_WORDS
-            else max_words_input
+            f"[reverse bold]{state.max_words_input or ' '}[/reverse bold]"
+            if state.row == settings_screen.ROW_MAX_WORDS
+            else state.max_words_input
         )
         list_limit_display = (
-            f"[reverse bold]{list_limit_input or ' '}[/reverse bold]"
-            if row == SETTINGS_ROW_LIST_LIMIT
-            else list_limit_input
+            f"[reverse bold]{state.list_limit_input or ' '}[/reverse bold]"
+            if state.row == settings_screen.ROW_LIST_LIMIT
+            else state.list_limit_input
         )
         body = (
             f"{marker_format} Формат ответа: {format_line}\n"

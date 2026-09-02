@@ -23,6 +23,22 @@ def is_valid_json_answer(text: str) -> bool:
         return False
 
 
+def is_valid_api_key(api_key: str) -> bool:
+    """Проверяет, что ключ пригоден для HTTP-заголовка.
+
+    Заголовки кодируются latin-1, поэтому ключ с кириллицей (частая опечатка — набор в русской
+    раскладке) обрывал бы запрос UnicodeEncodeError глубоко внутри requests, то есть падением с
+    traceback вместо понятного сообщения. Проверяем заранее и сами.
+    """
+    return bool(api_key) and api_key.isascii()
+
+
+API_KEY_CHARSET_ERROR = (
+    "API-ключ содержит недопустимые символы. Допустимы только латинские буквы, цифры и знаки "
+    "пунктуации — проверьте раскладку клавиатуры."
+)
+
+
 class DeepseekAPIError(Exception):
     """Ошибка при обращении к Deepseek API."""
 
@@ -37,6 +53,9 @@ class DeepseekAPIClient:
         user_message: str,
         max_tokens: int = config.max_tokens_for_words(config.DEFAULT_MAX_WORDS),
     ) -> str:
+        if not is_valid_api_key(self.api_key):
+            raise DeepseekAPIError(API_KEY_CHARSET_ERROR)
+
         payload = {
             "model": config.MODEL_NAME,
             "messages": [
