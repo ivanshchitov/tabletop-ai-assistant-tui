@@ -1,0 +1,46 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  unit:
+    name: Юнит-тесты (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS включён намеренно: ui/keyboard.py завязан на termios и поведение
+        # псевдотерминала, которое на BSD отличается от Linux.
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.9", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install -r requirements-dev.txt
+      - name: Юнит-тесты с покрытием
+        run: |
+          pytest tests/unit -q \
+            --cov=core --cov=ui --cov-report=term-missing --cov-fail-under=80
+
+  e2e:
+    name: Сценарии в псевдотерминале (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements-dev.txt
+      - name: e2e-прогон
+        # Отдельным job'ом: сценарии поднимают настоящие процессы в pty и идут заметно
+        # дольше юнитов, а их падение диагностируется иначе.
+        run: pytest tests/e2e -q -p no:randomly

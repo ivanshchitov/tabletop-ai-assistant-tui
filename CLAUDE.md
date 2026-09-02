@@ -14,17 +14,39 @@ Off-topic questions get a fixed refusal phrase instead of being answered.
 pip install -r requirements.txt
 echo "OPENCODE_API_KEY=sk-ваш_ключ" > .env   # or set OPENCODE_API_KEY directly
 python tabletop-ai-assistant.py
+
+pip install -r requirements-dev.txt
+pytest                      # everything except the `network` marker
+pytest tests/unit -q        # fast layer, no subprocesses (~1s)
+pytest tests/e2e -q         # real app in a pty against a stub API (~45s)
+pytest --snapshot-update    # rewrite the e2e screen snapshots after a deliberate layout change
+
+pytest tests/e2e/test_live_api.py -m network -q   # drive the app against the real OpenCode Zen
+
+pytest -s --show-tui=live tests/e2e/...     # stream the app's own terminal output while it runs
+pytest -s --show-tui=screen tests/e2e/...   # print the final rendered screen after each test
 ```
 
-There is no test suite, linter, or formatter configured in this repo (no `pytest`, no
-`pyproject.toml`/`ruff`/`black` config). Verify changes by actually running the app.
+`--show-tui` mirrors what the app writes to its pty. `live` writes the raw byte stream to the
+test runner's stdout, so `rich.Live` repaints, the spinner and the colours all show up exactly as
+in a real session; `screen` prints only the final `pyte`-rendered scrollback, which is quieter and
+safe to pipe. Both need `-s` — pytest captures output at the file-descriptor level otherwise, and
+the fixture warns you when the flag would do nothing.
 
-**Manual verification caveat:** the `/settings` screen and any other feature depending on
-`ui/keyboard.py` needs a real TTY — piping input via plain `subprocess`/`Bash` won't exercise the
-`termios`/`tty` raw-mode code path. Drive it through a pseudo-terminal (Python's `pty.fork()`, or
-an equivalent PTY tool) and read the screen with a **fixed wall-clock duration**, not "wait for
-quiet output" — `rich.Live` auto-refreshes ~30x/sec even with no content changes, so a
-quiet-period read loop never terminates while a `Live` screen is open.
+`pytest` is configured in `pyproject.toml`; there is no linter or formatter in this repo. The
+default `addopts` deselects `-m network`, so nothing ever calls the real OpenCode Zen unless
+asked.
+
+**Testing the terminal is the hard part**, and both halves of the solution are load-bearing:
+- Anything touching `ui/keyboard.py` needs a real TTY — piping input via plain `subprocess`
+  won't exercise the `termios`/`tty` raw-mode path. `tests/unit/test_keyboard.py` drives a real
+  `pty.openpty()` with `sys.stdin` swapped for the slave end. Don't compare `termios` attributes
+  bit-for-bit: the kernel sets `PENDIN` itself on a mode switch, so mask it out (see
+  `_stable_attrs`) or assert on `ICANON` instead.
+- Never wait for "quiet output" from the app — `rich.Live` auto-refreshes ~30x/sec even when
+  nothing changes, so a quiet-period read loop never terminates while a `Live` screen is open.
+  Wait on the *rendered screen* instead (`AppSession.wait_for`), or read for a fixed duration
+  (`read_for`) when checking that something is absent.
 
 ## Architecture
 
@@ -39,6 +61,13 @@ import (`from . import keyboard`). The entry point is `tabletop-ai-assistant.py`
 parents up (`Path(__file__).resolve().parent.parent`) rather than one — it has to reach back past
 `core/` to the repo root where `.env`, `assets/`, and `history.json` actually live.
 
+**Environment switches (`core/config.py`):** `OPENCODE_API_URL`, `TABLETOP_HISTORY_FILE`,
+`TABLETOP_REQUEST_TIMEOUT` and `TABLETOP_TYPING_DELAY` (the last one read in `ui/tui_app.py`)
+override the corresponding defaults. They exist so the e2e layer can point the app at a local
+stub server, keep history in a temp file, and collapse the typing animation. `HISTORY_FILE`
+especially: its path derives from `__file__`, not the working directory, so without the override
+*any* run — a test run included — would write to the single real `history.json` in the repo root.
+
 **Settings flow:** `core/answer_settings.AnswerSettings` (`format: AnswerFormat`, `max_words: int`,
 `list_limit: int`) is the single source of truth for response control, held on
 `TabletopAITUI.settings`. Each `with_*` method returns a new validated instance —
@@ -47,6 +76,9 @@ range/enum-invalid input raises `AnswerSettingsError` rather than silently clamp
 last valid value instead. There's no separate command per setting — everything is edited on one
 interactive screen (`/settings`, exits on Esc); don't reintroduce a `/format`-style single-shot
 command without checking whether that's actually wanted, since this was deliberately consolidated.
+The screen's behaviour lives in `ui/settings_screen.py` as a pure reducer (`initial_state` →
+`apply_key` → `apply_to_settings`); `ui/tui_app.py` only runs the read-key/redraw loop around it.
+Keep new key handling in the reducer — that's what makes it testable without a terminal.
 
 **Prompt assembly (`core/prompts.py` + `assets/*.md`):**
 - `assets/system_prompt.md` is the base system prompt; `assets/answer_format_compact.md` and
@@ -91,7 +123,12 @@ there makes `readline` miscompute the prompt's visible width and corrupt it on b
 prompt is deliberately kept as an unstyled literal string. `readline` autocomplete is registered
 from the flat `COMMANDS` list.
 
-**`core/api_client.py`** — retries on timeout with exponential backoff (`config.MAX_RETRIES`), but not
+**`core/api_client.py`** — `ask()` first checks the key with `is_valid_api_key()` (non-empty and
+ASCII) and raises `DeepseekAPIError` before making any request. HTTP headers are latin-1 encoded,
+so a key typed in a Cyrillic keyboard layout used to blow up with `UnicodeEncodeError` from deep
+inside `requests` — a traceback instead of a message. `ui/tui_app.py`'s `_ensure_api_key()` runs the
+same check, including on the key that came from `.env`, so the problem surfaces at startup rather
+than after the first question. Retries on timeout with exponential backoff (`config.MAX_RETRIES`), but not
 on connection errors (treated as a persistent network problem, not transient). `is_valid_json_answer()`
 is used only when `AnswerFormat.JSON` is active, to warn the user client-side if the model didn't
 actually return valid JSON — it doesn't block or alter the displayed answer.
@@ -99,3 +136,37 @@ actually return valid JSON — it doesn't block or alter the displayed answer.
 **`core/history_manager.py`** — `history.json` (gitignored) is loaded once at startup and replayed into
 the log if non-empty; every successful exchange is appended and immediately re-saved, capped at
 `config.HISTORY_LIMIT`. `/clear` empties both the in-memory list and the file.
+
+## Test layout
+
+- `tests/unit/` — no subprocesses, ~1s for the whole layer. `core/` logic, the `/settings`
+  reducer, and `TabletopAITUI` driven through injected dependencies: `TabletopAITUI(console=,
+  history=, client=)` takes a `rich` console writing to a buffer, a `HistoryManager` on
+  `tmp_path`, and a fake client that records what was asked. Passing a client also skips the
+  API-key prompt at startup.
+- `tests/unit/test_keyboard.py` — the only unit file that needs a pty (see above).
+- `tests/e2e/` — the real `tabletop-ai-assistant.py` running in `pty.fork()`, with output fed
+  through `pyte` so assertions read the *rendered* screen rather than a stream of cursor codes.
+  `harness.AppSession` is the driver (`wait_for` searches the scrollback, `wait_on_screen` and
+  `wait_until_gone` search only the current screen — needed when the text also appears earlier in
+  the log, e.g. the input prompt around the `/settings` panel). `stub_api.StubAPI` is a threaded
+  local server that both answers and **records every request**, which is where most of the value
+  is: the tests assert on what actually went to the API (system message per format, the word and
+  list limits in the user prompt, `max_tokens`, the absence of `stop`, the retry count).
+  `_write_all` re-writes what a single `os.write` couldn't fit into the terminal buffer —
+  without it a >2000-character question loses its tail along with the trailing Enter.
+- `tests/e2e/snapshots/` — whole-screen snapshots. The stub server's port is normalized away
+  (`_VOLATILE_PATTERNS` in `harness.py`) because it changes every run and appears inside error text.
+- `tests/e2e/test_live_api.py` — the same app driven against the **real** OpenCode Zen
+  (`live_app` fixture: no stub, no `OPENCODE_API_URL`, key read from `.env` by the app itself;
+  skips when there is no key). It is marked `network`, so it never runs by default. These tests
+  check the prompt, not the plumbing — the verbatim refusal phrase, the JSON and compact formats
+  actually being produced, a question failing to override the configured format, and the word and
+  list limits being honoured. Assertions are deliberately loose (field presence, generous word
+  ceilings) because model output is non-deterministic; assert on the requirement, never on an
+  exact wording. Note that assertions run against the *rendered* screen, so markdown is already
+  gone — rich draws a ```json block as a bordered code block with no backticks left in the text.
+- `tests/e2e/cassettes/` — real `deepseek-v4-flash` answers, recorded once with
+  `pytest tests/e2e/test_recorded_answers.py -m network --record-cassettes` (needs a real key,
+  spends quota) and replayed by the stub afterwards. Tests skip themselves when a cassette is
+  missing, so the repo works without a key.

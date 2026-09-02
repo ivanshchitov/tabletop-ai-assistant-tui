@@ -13,7 +13,10 @@ ENV_PATH = BASE_DIR / ".env"
 
 load_dotenv(dotenv_path=ENV_PATH)
 
-API_URL = "https://opencode.ai/zen/v1/chat/completions"
+# Базовый адрес переопределяется через окружение: это позволяет e2e-тестам поднять
+# локальный stub-сервер вместо обращения к реальному OpenCode Zen.
+DEFAULT_API_URL = "https://opencode.ai/zen/v1/chat/completions"
+API_URL = os.getenv("OPENCODE_API_URL", DEFAULT_API_URL)
 MODEL_NAME = "deepseek-v4-flash"
 TEMPERATURE = 0.7
 
@@ -45,9 +48,15 @@ ASSETS_DIR = BASE_DIR / "assets"
 
 MAX_INPUT_LENGTH = 2000
 HISTORY_LIMIT = 50
-HISTORY_FILE = BASE_DIR / "history.json"
+# Путь к истории тоже переопределяется через окружение. Он выводится из __file__, а не
+# из текущего каталога, поэтому без такого переключателя любой прогон приложения (в том
+# числе тестовый) писал бы в единственный реальный history.json в корне репозитория.
+DEFAULT_HISTORY_FILE = BASE_DIR / "history.json"
+HISTORY_FILE = Path(os.getenv("TABLETOP_HISTORY_FILE", str(DEFAULT_HISTORY_FILE)))
 
-REQUEST_TIMEOUT = 30
+# Таймаут переопределяется через окружение: e2e-сценарию с ретраями нужно, чтобы клиент
+# сдавался за доли секунды, а не ждал полминуты на каждый намеренно зависший ответ.
+REQUEST_TIMEOUT = int(os.getenv("TABLETOP_REQUEST_TIMEOUT", "30"))
 MAX_RETRIES = 3
 
 
