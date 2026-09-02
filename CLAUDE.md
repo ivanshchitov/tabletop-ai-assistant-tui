@@ -47,6 +47,12 @@ asked.
   nothing changes, so a quiet-period read loop never terminates while a `Live` screen is open.
   Wait on the *rendered screen* instead (`AppSession.wait_for`), or read for a fixed duration
   (`read_for`) when checking that something is absent.
+- Keyboard bytes sent before an interactive panel has drawn get consumed by that panel's own
+  key loop, not the main `input()` — for the `/logictask` picker, `tests/e2e/test_strategies.py`
+  waits for the panel hint ("Enter — решить") to appear on screen *before* sending arrows/Enter,
+  and after Esc waits for the panel title to disappear (`wait_until_gone`) before touching the
+  prompt again. `wait_for_prompt()` alone is a false positive there: the prompt is already in
+  scrollback from before the panel opened.
 
 ## Change workflow (OpenSpec)
 
@@ -65,13 +71,13 @@ OpenCode the same six commands are spelled with a dash (`/opsx-propose`, `/opsx-
 - The delta spec is a *diff* against the main spec, not a copy of it. The main specs under
   `openspec/specs/` are only ever written by archive/sync, never edited by hand during a change.
 - `openspec/specs/` holds the master spec (archived from `add-master-spec`, reverse-engineered
-  from the existing code/tests) as eight capabilities, each the target for future `MODIFIED` deltas:
+  from the existing code/tests) as nine capabilities, each the target for future `MODIFIED` deltas:
   `question-answering`, `answer-settings`, `api-integration`, `history-persistence`,
-  `terminal-ui`, `settings-screen`, `configuration`, `test-infrastructure`. It records two
-  deliberate decisions worth knowing before touching related code: the JSON format's refusal
-  reply is a machine-readable `{"error": ...}` object rather than the verbatim refusal phrase used
-  by free/compact (not a bug to fix), and `AnswerSettings` is session-only by design — persisting
-  it across restarts is backlog, not a current requirement.
+  `terminal-ui`, `settings-screen`, `configuration`, `test-infrastructure`, `prompt-strategies`.
+  It records deliberate decisions worth knowing before touching related code: the JSON format's
+  refusal reply is a machine-readable `{"error": ...}` object rather than the verbatim refusal
+  phrase used by free/compact (not a bug to fix), and `AnswerSettings` is session-only by design —
+  persisting it across restarts is backlog, not a current requirement.
 - The skills shell out to a bare `openspec` binary (`allowed-tools: Bash(openspec:*)`), so the CLI
   has to be on PATH: `npm i -g @fission-ai/openspec`. `npx @fission-ai/openspec@latest <cmd>` works
   for manual invocations but not from inside the skills.
@@ -94,8 +100,9 @@ OpenCode the same six commands are spelled with a dash (`/opsx-propose`, `/opsx-
 
 ## Architecture
 
-Two packages: `core/` (settings, prompts, API client, history — no `rich`/terminal dependency) and
-`ui/` (`tui_app.py`, `keyboard.py` — everything that touches the terminal). Modules inside `core/`
+Two packages: `core/` (settings, prompts, API client, history, logictask prompt builders — no
+`rich`/terminal dependency) and `ui/` (`tui_app.py`, `keyboard.py`, `settings_screen.py`,
+`logictask_screen.py` — everything that touches the terminal). Modules inside `core/`
 import each other with relative imports (`from . import config`, `from .answer_settings import
 AnswerFormat`); `ui/` imports from `core` with absolute imports (`from core import config,
 prompts`) since they're sibling packages, and imports its own sibling module with a relative
@@ -123,6 +130,26 @@ command without checking whether that's actually wanted, since this was delibera
 The screen's behaviour lives in `ui/settings_screen.py` as a pure reducer (`initial_state` →
 `apply_key` → `apply_to_settings`); `ui/tui_app.py` only runs the read-key/redraw loop around it.
 Keep new key handling in the reducer — that's what makes it testable without a terminal.
+
+**`/logictask` (`core/logictask.py` + `ui/logictask_screen.py`):** solves one fixed tabletop-themed
+logic puzzle (wolf/goat/cabbage river crossing) with a prompting strategy picked on an interactive
+panel (↑/↓ move, Enter runs, Esc cancels with zero API calls). Deliberate decisions baked in:
+- Exactly four strategies, and "run all in sequence" was explicitly rejected — one invocation
+  solves one strategy (1 request direct/stepwise, 2 for the model-composed-prompt strategy — the
+  composed prompt is fed back verbatim as the *system* message of the second request — and 3 for
+  the expert panel).
+- The three experts (chef, animal psychologist, game theorist) are client-side constants, never
+  requested from the model; each gets a separate request with its role as the system message.
+- Strategy prompts are independent of `AnswerSettings`: no format/word-count/list-limit
+  instructions, and `max_tokens` is pinned to the default (`config.max_tokens_for_words(config.DEFAULT_MAX_WORDS)`)
+  regardless of the session settings.
+- Results never touch `history.json` and don't increment the session dialogue counter.
+- An API error mid-run aborts the rest of the run but not the session.
+- The panel follows the `/settings` pattern: a pure reducer in `ui/logictask_screen.py`
+  (`initial_state` → `apply_key`), with `ui/tui_app.py` only wrapping raw-mode + `Live` and the
+  read-key/redraw loop. The task text and the four options are printed to the permanent log before
+  the transient `Live` panel opens — a non-terminal `Live` (as in unit tests) renders nothing, so
+  anything asserted on in unit tests must go through the permanent prints.
 
 **Prompt assembly (`core/prompts.py` + `assets/*.md`):**
 - `assets/system_prompt.md` is the base system prompt; `assets/answer_format_compact.md` and
@@ -183,11 +210,11 @@ the log if non-empty; every successful exchange is appended and immediately re-s
 
 ## Test layout
 
-- `tests/unit/` — no subprocesses, ~1s for the whole layer. `core/` logic, the `/settings`
-  reducer, and `TabletopAITUI` driven through injected dependencies: `TabletopAITUI(console=,
-  history=, client=)` takes a `rich` console writing to a buffer, a `HistoryManager` on
-  `tmp_path`, and a fake client that records what was asked. Passing a client also skips the
-  API-key prompt at startup.
+- `tests/unit/` — no subprocesses, ~1s for the whole layer. `core/` logic, the `/settings` and
+  `/logictask` reducers, and `TabletopAITUI` driven through injected dependencies:
+  `TabletopAITUI(console=, history=, client=)` takes a `rich` console writing to a buffer, a
+  `HistoryManager` on `tmp_path`, and a fake client that records what was asked. Passing a client
+  also skips the API-key prompt at startup.
 - `tests/unit/test_keyboard.py` — the only unit file that needs a pty (see above).
 - `tests/e2e/` — the real `tabletop-ai-assistant.py` running in `pty.fork()`, with output fed
   through `pyte` so assertions read the *rendered* screen rather than a stream of cursor codes.
