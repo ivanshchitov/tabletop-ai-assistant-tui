@@ -368,3 +368,155 @@ def test_escape_immediately_leaves_settings_untouched(make_app, monkeypatch):
     app.run()
     assert app.settings == before
 
+
+# --- команда /logictask: выбор стратегии и прогон -------------------------------------------
+
+
+def test_logictask_opens_panel_and_runs_chosen_strategy(make_app, recording_console, monkeypatch):
+    """↓ + Enter: выбрана стратегия 2 — ровно один запрос, ответ под её заголовком."""
+    keys = iter([keyboard.DOWN, keyboard.ENTER, keyboard.ESC])
+    monkeypatch.setattr(keyboard, "read_key", lambda: next(keys))
+    monkeypatch.setattr(keyboard, "raw_mode", _noop_context)
+
+    client = FakeClient(["Пошаговый ответ модели"])
+    app = make_app(["/logictask", "/exit"], client)
+    app.run()
+
+    assert len(client.calls) == 1
+    from core import logictask
+
+    assert client.calls[0]["system"] == logictask.STEPWISE_SYSTEM_MESSAGE
+    assert logictask.LOGIC_TASK in client.calls[0]["user"]
+    assert recording_console.contains("Стратегия 2: Пошаговое решение")
+    assert recording_console.contains("Пошаговый ответ модели")
+    assert app.session_count == 0
+
+
+def test_logictask_panel_visible_before_choice(make_app, recording_console, monkeypatch):
+    """Панель с четырьмя стратегиями и описанием задачи; до Enter/Esc запросов нет."""
+    keys = iter([keyboard.ESC])
+    monkeypatch.setattr(keyboard, "read_key", lambda: next(keys))
+    monkeypatch.setattr(keyboard, "raw_mode", _noop_context)
+
+    from core import logictask
+
+    client = FakeClient()
+    app = make_app(["/logictask", "/exit"], client)
+    app.run()
+
+    assert recording_console.contains("Выберите стратегию")
+    for _, title in ((1, "Прямой ответ"), (2, "Пошаговое решение"), (3, "Промпт от модели"), (4, "Панель экспертов")):
+        assert recording_console.contains(title)
+    assert recording_console.contains("волк")
+    assert recording_console.contains("капуст")
+    assert recording_console.contains("Как перевезти всё на другой берег")
+    assert client.calls == []
+
+
+def test_logictask_esc_cancels_without_requests(make_app, monkeypatch):
+    monkeypatch.setattr(keyboard, "read_key", lambda: keyboard.ESC)
+    monkeypatch.setattr(keyboard, "raw_mode", _noop_context)
+
+    from core import logictask
+
+    client = FakeClient()
+    make_app(["/logictask", "Обычный вопрос", "/exit"], client).run()
+
+    # Esc не породил ни одного запроса задачи; обычный вопрос после отмены обработан штатно.
+    assert len(client.calls) == 1
+    assert logictask.LOGIC_TASK not in client.calls[0]["user"]
+    assert "Обычный вопрос" in client.calls[0]["user"]
+
+
+def test_logictask_strategy3_runs_both_steps(make_app, recording_console, monkeypatch):
+    """Выбор стратегии 3: составленный моделью промпт используется во втором запросе."""
+    keys = iter([keyboard.DOWN, keyboard.DOWN, keyboard.ENTER, keyboard.ESC])
+    monkeypatch.setattr(keyboard, "read_key", lambda: next(keys))
+    monkeypatch.setattr(keyboard, "raw_mode", _noop_context)
+
+    client = FakeClient(answers=["СОСТАВЛЕННЫЙ ПРОМПТ", "Решение по промпту"])
+    make_app(["/logictask", "/exit"], client).run()
+
+    assert len(client.calls) == 2
+    assert client.calls[1]["system"] == "СОСТАВЛЕННЫЙ ПРОМПТ"
+    assert recording_console.contains("СОСТАВЛЕННЫЙ ПРОМПТ")
+
+
+def test_logictask_strategy4_runs_three_experts(make_app, monkeypatch):
+    keys = iter(
+        [keyboard.DOWN, keyboard.DOWN, keyboard.DOWN, keyboard.ENTER, keyboard.ESC]
+    )
+    monkeypatch.setattr(keyboard, "read_key", lambda: next(keys))
+    monkeypatch.setattr(keyboard, "raw_mode", _noop_context)
+
+    from core import logictask
+
+    client = FakeClient(answers=["Р1", "Р2", "Р3"])
+    make_app(["/logictask", "/exit"], client).run()
+
+    assert len(client.calls) == 3
+    assert [c["system"] for c in client.calls] == list(logictask.EXPERT_ROLES)
+
+
+def test_logictask_ignores_answer_settings(make_app, monkeypatch):
+    """JSON-формат и объём 80 слов не влияют на запросы прогона: ни инструкций, ни потолка токенов."""
+    keys = iter([keyboard.ENTER, keyboard.ESC])
+    monkeypatch.setattr(keyboard, "read_key", lambda: next(keys))
+    monkeypatch.setattr(keyboard, "raw_mode", _noop_context)
+
+    client = FakeClient(["Ответ стратегии"])
+    app = make_app(["/logictask", "/exit"], client)
+    app.settings = AnswerSettings().with_format(AnswerFormat.JSON).with_max_words(80)
+    app.run()
+
+    assert len(client.calls) == 1
+    call = client.calls[0]
+    assert call["max_tokens"] == config.max_tokens_for_words(config.DEFAULT_MAX_WORDS)
+    assert "JSON" not in call["system"] + call["user"]
+    assert "слов" not in call["user"]
+    assert "вариант" not in call["user"]
+
+
+def test_logictask_run_is_not_in_history(make_app, history, history_path, monkeypatch):
+    keys = iter([keyboard.ENTER, keyboard.ESC])
+    monkeypatch.setattr(keyboard, "read_key", lambda: next(keys))
+    monkeypatch.setattr(keyboard, "raw_mode", _noop_context)
+
+    app = make_app(["/logictask", "/exit"], FakeClient(["Ответ стратегии"]))
+    app.run()
+
+    assert history.dialogues == []
+    assert json.loads(history_path.read_text(encoding="utf-8")) == []
+    assert app.session_count == 0
+
+
+def test_logictask_error_stops_step_but_session_continues(
+    make_app, recording_console, history, monkeypatch
+):
+    """Ошибка на втором шаге стратегии 3: остаток не выполняется, сессия живёт."""
+    keys = iter([keyboard.DOWN, keyboard.DOWN, keyboard.ENTER, keyboard.ESC])
+    monkeypatch.setattr(keyboard, "read_key", lambda: next(keys))
+    monkeypatch.setattr(keyboard, "raw_mode", _noop_context)
+
+    class TwoStepClient(FakeClient):
+        def ask(self, system_message, user_message, max_tokens=0):
+            self.calls.append({"system": system_message, "user": user_message})
+            if len(self.calls) == 2:
+                raise DeepseekAPIError("Тестовая ошибка API.")
+            return "СОСТАВЛЕННЫЙ ПРОМПТ"
+
+    client = TwoStepClient()
+    app = make_app(["/logictask", "Обычный вопрос", "/exit"], client)
+    app.run()
+
+    assert len(client.calls) == 3  # 2 шага стратегии (второй упал) + обычный вопрос
+    assert recording_console.contains("Тестовая ошибка API.")
+    assert app.session_count == 1
+    assert [d["question"] for d in history.dialogues] == ["Обычный вопрос"]
+
+
+def test_logictask_is_a_known_command(make_app, recording_console):
+    make_app(["/exit"], FakeClient()).run()
+    assert "/logictask" in tui_app.COMMANDS
+    assert recording_console.contains("Команды: /exit, /settings, /clear, /logictask")
+

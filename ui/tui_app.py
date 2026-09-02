@@ -14,7 +14,7 @@ from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
 
-from core import config, prompts
+from core import config, logictask, prompts
 from core.answer_settings import AnswerFormat, AnswerSettings
 from core.api_client import (
     API_KEY_CHARSET_ERROR,
@@ -25,7 +25,7 @@ from core.api_client import (
 )
 from core.history_manager import HistoryManager
 
-from . import keyboard, settings_screen
+from . import keyboard, logictask_screen, settings_screen
 from .settings_screen import SettingsScreenState
 
 APP_TITLE = "🎲 TABLETOP AI ASSISTANT — эксперт по настольным играм"
@@ -39,7 +39,7 @@ TYPING_CHUNK_SIZE = 3
 # Пауза между кадрами анимации печати. Переопределяется через окружение, чтобы e2e-прогон
 # по псевдотерминалу не ждал реального времени набора на каждый ответ.
 TYPING_DELAY = float(os.getenv("TABLETOP_TYPING_DELAY", "0.015"))
-COMMANDS = ["/exit", "/settings", "/clear"]
+COMMANDS = ["/exit", "/settings", "/clear", "/logictask"]
 
 FORMAT_LABELS = {
     AnswerFormat.COMPACT: "компактный",
@@ -171,7 +171,94 @@ class TabletopAITUI:
             self.history.clear()
             self.console.print("[bold green]История диалога очищена.[/bold green]")
             return True
+        if command == "/logictask":
+            self._run_logictask()
+            return True
         return False
+
+    def _run_logictask(self) -> None:
+        """Прогон фиксированной задачи выбранной стратегией промптинга.
+
+        Экспериментальный режим: результаты не пишутся в историю и не считаются диалогами.
+        Панель выбора работает по той же схеме, что экран `/settings`: логика клавиш — в
+        редьюсере `logictask_screen`, здесь только raw_mode, Live и read-key/redraw.
+        Ошибка API прерывает остаток прогона, но не сессию.
+        """
+        self.console.print("[bold cyan]Выберите стратегию решения логической задачи:[/bold cyan]")
+        self.console.print(logictask.LOGIC_TASK)
+        for number, title in logictask_screen.STRATEGY_OPTIONS:
+            self.console.print(f"  {number}. {title}")
+        state = logictask_screen.initial_state()
+        with Live(console=self.console, refresh_per_second=30, transient=True) as live, keyboard.raw_mode():
+            live.update(self._render_logictask_panel(state))
+            while True:
+                key = keyboard.read_key()
+                if key == keyboard.ESC:
+                    return
+                if key == keyboard.ENTER:
+                    break
+                state = logictask_screen.apply_key(state, key)
+                live.update(self._render_logictask_panel(state))
+
+        number, title = state.selected
+        self._run_strategy(number, title)
+
+    def _render_logictask_panel(self, state: logictask_screen.LogictaskScreenState) -> Panel:
+        lines = []
+        for index, (number, title) in enumerate(logictask_screen.STRATEGY_OPTIONS):
+            if index == state.selected_index:
+                lines.append(f"➤ [reverse bold]{number}. {title}[/reverse bold]")
+            else:
+                lines.append(f"  {number}. {title}")
+        body = "\n".join(lines) + "\n\n[dim]↑/↓ — выбор, Enter — решить, Esc — отмена[/dim]"
+        return Panel(body, title="Логическая задача", style="cyan")
+
+    def _run_strategy(self, number: int, title: str) -> None:
+        self.last_error = None
+        assert self.client is not None
+
+        def _call(system: str, user: str):
+            # Потолок токенов фиксируется от объёма по умолчанию: настройки ответа сессии
+            # (формат, объём, лимит списка) к прогонам /logictask не применяются.
+            max_tokens = config.max_tokens_for_words(config.DEFAULT_MAX_WORDS)
+            with self.console.status("[bold yellow]● Отправка...[/bold yellow]", spinner="dots"):
+                try:
+                    return self.client.ask(system, user, max_tokens=max_tokens)
+                except DeepseekAPIError as exc:
+                    self.last_error = str(exc)
+                    self.console.print(f"[bold red]{exc}[/bold red]")
+                    self.console.print("[bold red]Попробуйте повторить запрос.[/bold red]")
+                    return None
+
+        self.console.print(f"[bold cyan]Стратегия {number}: {title}[/bold cyan]")
+        if number == 1:
+            answer = _call(*logictask.build_direct_prompts())
+            if answer is None:
+                return
+            self._print_typing(answer)
+        elif number == 2:
+            answer = _call(*logictask.build_stepwise_prompts())
+            if answer is None:
+                return
+            self._print_typing(answer)
+        elif number == 3:
+            composed = _call(*logictask.build_prompt_compose_prompts())
+            if composed is None:
+                return
+            self.console.print("[dim]Составленный моделью промпт:[/dim]")
+            self._print_typing(composed)
+            answer = _call(*logictask.build_solve_with_prompt_prompts(composed))
+            if answer is None:
+                return
+            self._print_typing(answer)
+        else:
+            for role in logictask.EXPERT_ROLES:
+                expert_answer = _call(*logictask.build_expert_prompts(role))
+                if expert_answer is None:
+                    return
+                self.console.print(f"[dim]{role}[/dim]")
+                self._print_typing(expert_answer)
+        self.console.rule(style="dim")
 
     def _open_settings_screen(self) -> None:
         """Экран настроек: ↑/↓ — выбор поля, ←/→ — формат, цифры/Backspace — числовые поля, Esc — выход.
