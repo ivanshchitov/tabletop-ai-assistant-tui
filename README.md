@@ -47,6 +47,7 @@ tests/                      # Тесты
 assets/                    # system_prompt.md и answer_format_*.md
 openspec/                  # Спецификации и активные изменения (OpenSpec)
 .claude/                   # Команды и скиллы /opsx:* для Claude Code
+.opencode/                 # Те же команды и скиллы /opsx-* для OpenCode
 history.json               # Сохранённая история (в .gitignore)
 .env                       # OPENCODE_API_KEY=sk-... (в .gitignore)
 ```
@@ -124,20 +125,29 @@ pytest tests/e2e/test_recorded_answers.py -m network --record-cassettes
 сначала спецификация, потом код. Мелкие правки вроде опечатки этого не требуют.
 
 ```bash
-npm i -g @fission-ai/openspec   # CLI нужен на PATH: команды /opsx:* вызывают его напрямую
+npm i -g @fission-ai/openspec   # CLI нужен на PATH: команды агентов вызывают его напрямую
 openspec list                   # активные изменения
 ```
 
-Цикл работы (слэш-команды Claude Code, установленные в `.claude/`):
+Цикл работы — это набор слэш-команд агента. Подключены два агента, оба работают с одним и тем же
+каталогом `openspec/`: **Claude Code** (файлы в `.claude/`, команды через двоеточие) и **OpenCode**
+(файлы в `.opencode/`, те же команды через дефис).
 
-| Команда | Что делает |
-| --- | --- |
-| `/opsx:explore` | Обсудить идею и прояснить требования до того, как что-то писать. |
-| `/opsx:propose "…"` | Создать `openspec/changes/<id>/` с `proposal.md`, дельта-спеками, `design.md` и `tasks.md`. Код при этом не трогается. |
-| `/opsx:update` | Пересобрать артефакты изменения после новых решений. |
-| `/opsx:apply` | Реализовать изменение по задачам из `tasks.md`. |
-| `/opsx:archive` | Влить дельта-спеки в основные спеки `openspec/specs/` и закрыть изменение. |
-| `/opsx:sync` | То же вливание, но без закрытия изменения. |
+| Claude Code | OpenCode | Что делает |
+| --- | --- | --- |
+| `/opsx:explore` | `/opsx-explore` | Обсудить идею и прояснить требования до того, как что-то писать. |
+| `/opsx:propose "…"` | `/opsx-propose "…"` | Создать `openspec/changes/<id>/` с `proposal.md`, дельта-спеками, `design.md` и `tasks.md`. Код при этом не трогается. |
+| `/opsx:update` | `/opsx-update` | Пересобрать артефакты изменения после новых решений. |
+| `/opsx:apply` | `/opsx-apply` | Реализовать изменение по задачам из `tasks.md`. |
+| `/opsx:archive` | `/opsx-archive` | Влить дельта-спеки в основные спеки `openspec/specs/` и закрыть изменение. |
+| `/opsx:sync` | `/opsx-sync` | То же вливание, но без закрытия изменения. |
+
+Файлы агентов сгенерированы и правятся не вручную, а перегенерацией:
+
+```bash
+openspec init --tools claude     # обновить .claude/
+openspec init --tools opencode   # обновить .opencode/
+```
 
 Структура каталога:
 
