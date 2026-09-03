@@ -120,7 +120,7 @@ especially: its path derives from `__file__`, not the working directory, so with
 *any* run — a test run included — would write to the single real `history.json` in the repo root.
 
 **Settings flow:** `core/answer_settings.AnswerSettings` (`format: AnswerFormat`, `max_words: int`,
-`list_limit: int`) is the single source of truth for response control, held on
+`list_limit: int`, `temperature: float`) is the single source of truth for response control, held on
 `TabletopAITUI.settings`. Each `with_*` method returns a new validated instance —
 range/enum-invalid input raises `AnswerSettingsError` rather than silently clamping; the caller
 (the `/settings` screen in `ui/tui_app.py`) is responsible for showing that error and keeping the
@@ -130,6 +130,15 @@ command without checking whether that's actually wanted, since this was delibera
 The screen's behaviour lives in `ui/settings_screen.py` as a pure reducer (`initial_state` →
 `apply_key` → `apply_to_settings`); `ui/tui_app.py` only runs the read-key/redraw loop around it.
 Keep new key handling in the reducer — that's what makes it testable without a terminal.
+
+**Temperature (`with_temperature` + the `/settings` temperature row):** range 0.0..2.0, default
+`config.TEMPERATURE` (0.7). The "one decimal digit" rule is enforced on *input*, not validation:
+the reducer only accepts a dot when there isn't one yet and only one digit after it, so values
+like 0.55 are untypable and the user never sees a format error. The same rule lives in
+`with_temperature` (`round(value, 1) != value` → `AnswerSettingsError`) as an invariant for
+programmatic calls — don't replace it with rounding (silent normalization contradicts the
+no-clamping principle). The setting is passed to `client.ask(..., temperature=...)` on every
+question; `/logictask` deliberately doesn't pass it and stays on the client default.
 
 **`/logictask` (`core/logictask.py` + `ui/logictask_screen.py`):** solves one fixed tabletop-themed
 logic puzzle (wolf/goat/cabbage river crossing) with a prompting strategy picked on an interactive
@@ -142,7 +151,8 @@ panel (↑/↓ move, Enter runs, Esc cancels with zero API calls). Deliberate de
   requested from the model; each gets a separate request with its role as the system message.
 - Strategy prompts are independent of `AnswerSettings`: no format/word-count/list-limit
   instructions, and `max_tokens` is pinned to the default (`config.max_tokens_for_words(config.DEFAULT_MAX_WORDS)`)
-  regardless of the session settings.
+  regardless of the session settings; `ask()` is called without `temperature`, so runs stay on
+  the client default even when the session temperature is changed.
 - Results never touch `history.json` and don't increment the session dialogue counter.
 - An API error mid-run aborts the rest of the run but not the session.
 - The panel follows the `/settings` pattern: a pure reducer in `ui/logictask_screen.py`
@@ -223,7 +233,8 @@ the log if non-empty; every successful exchange is appended and immediately re-s
   the log, e.g. the input prompt around the `/settings` panel). `stub_api.StubAPI` is a threaded
   local server that both answers and **records every request**, which is where most of the value
   is: the tests assert on what actually went to the API (system message per format, the word and
-  list limits in the user prompt, `max_tokens`, the absence of `stop`, the retry count).
+  list limits in the user prompt, `max_tokens`, the session temperature, the absence of `stop`,
+  the retry count).
   `_write_all` re-writes what a single `os.write` couldn't fit into the terminal buffer —
   without it a >2000-character question loses its tail along with the trailing Enter.
 - `tests/e2e/snapshots/` — whole-screen snapshots. The stub server's port is normalized away
