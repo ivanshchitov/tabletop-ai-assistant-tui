@@ -202,7 +202,11 @@ previously printed exchanges and prompts stay in scrollback. The input prompt is
 `input()` call with no `rich` markup in the prompt string itself — embedding ANSI/rich formatting
 there makes `readline` miscompute the prompt's visible width and corrupt it on backspace, so the
 prompt is deliberately kept as an unstyled literal string. `readline` autocomplete is registered
-from the flat `COMMANDS` list.
+from the flat `COMMANDS` list. Exception: the manual API-key prompt inside `_ensure_api_key` is
+read via `sys.stdin.readline` (`_read_manual_key`), NOT `input()` — GNU readline catches SIGINT
+while `input()` is active and re-displays the prompt instead of raising `KeyboardInterrupt`, so
+Ctrl+C during the key prompt never reached `run()`'s handler (flaky in CI, invisible locally
+because the timing usually lets the interrupt fire before readline is active).
 
 **`core/api_client.py`** — `ask()` first checks the key with `is_valid_api_key()` (non-empty and
 ASCII) and raises `DeepseekAPIError` before making any request. HTTP headers are latin-1 encoded,
