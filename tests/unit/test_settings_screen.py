@@ -29,6 +29,13 @@ def test_initial_state_mirrors_current_settings():
     assert state.selected_format == AnswerFormat.JSON
     assert state.max_words_input == "123"
     assert state.list_limit_input == "4"
+    assert state.temperature_input == str(config.TEMPERATURE)
+
+
+def test_initial_state_shows_temperature_with_one_decimal():
+    settings = AnswerSettings().with_temperature(1.2)
+    state = settings_screen.initial_state(settings)
+    assert state.temperature_input == "1.2"
 
 
 # --- навигация ----------------------------------------------------------------------------
@@ -37,12 +44,17 @@ def test_initial_state_mirrors_current_settings():
 def test_down_moves_through_rows_and_wraps(state):
     assert press(state, keyboard.DOWN).row == settings_screen.ROW_MAX_WORDS
     assert press(state, keyboard.DOWN, keyboard.DOWN).row == settings_screen.ROW_LIST_LIMIT
-    assert press(state, keyboard.DOWN, keyboard.DOWN, keyboard.DOWN).row == settings_screen.ROW_FORMAT
+    assert press(state, keyboard.DOWN, keyboard.DOWN, keyboard.DOWN).row == (
+        settings_screen.ROW_TEMPERATURE
+    )
+    assert press(
+        state, keyboard.DOWN, keyboard.DOWN, keyboard.DOWN, keyboard.DOWN
+    ).row == settings_screen.ROW_FORMAT
 
 
 def test_up_moves_backwards(state):
     """Стрелка вверх должна идти вверх, а не повторять поведение стрелки вниз."""
-    assert press(state, keyboard.UP).row == settings_screen.ROW_LIST_LIMIT
+    assert press(state, keyboard.UP).row == settings_screen.ROW_TEMPERATURE
     assert press(state, keyboard.DOWN, keyboard.UP).row == settings_screen.ROW_FORMAT
 
 
@@ -120,6 +132,63 @@ def test_state_is_immutable(state):
     press(state, keyboard.DOWN, "5")
     assert state.row == settings_screen.ROW_FORMAT
     assert state.max_words_input == str(config.DEFAULT_MAX_WORDS)
+
+
+def test_temperature_row_edits_independently(state):
+    """Строка температуры редактируется сама, не задевая объём и лимит."""
+    result = press(
+        state,
+        keyboard.DOWN,
+        keyboard.DOWN,
+        keyboard.DOWN,
+        keyboard.BACKSPACE,
+        keyboard.BACKSPACE,
+        keyboard.BACKSPACE,
+        "1",
+        ".",
+        "2",
+    )
+    assert result.temperature_input == "1.2"
+    assert result.max_words_input == str(config.DEFAULT_MAX_WORDS)
+    assert result.list_limit_input == str(config.DEFAULT_LIST_LIMIT)
+
+
+def test_temperature_second_dot_is_ignored(state):
+    on_temp = press(
+        state, keyboard.DOWN, keyboard.DOWN, keyboard.DOWN,
+        *[keyboard.BACKSPACE] * 3, "1", ".",
+    )
+    assert press(on_temp, ".").temperature_input == "1."
+
+
+def test_temperature_accepts_only_one_digit_after_dot(state):
+    """Второй знак после точки ввести невозможно — лишняя цифра игнорируется."""
+    on_temp = press(
+        state, keyboard.DOWN, keyboard.DOWN, keyboard.DOWN,
+        *[keyboard.BACKSPACE] * 3, "0", ".", "5",
+    )
+    assert press(on_temp, "5").temperature_input == "0.5"
+
+
+def test_temperature_more_digits_before_dot_are_fine(state):
+    on_temp = press(
+        state, keyboard.DOWN, keyboard.DOWN, keyboard.DOWN, *[keyboard.BACKSPACE] * 3,
+    )
+    result = press(on_temp, "1", "2", ".", "5")
+    assert result.temperature_input == "12.5"
+
+
+def test_temperature_backspace_erases_dot_too(state):
+    on_temp = press(state, keyboard.DOWN, keyboard.DOWN, keyboard.DOWN, "0", ".", "5")
+    result = press(on_temp, keyboard.BACKSPACE, keyboard.BACKSPACE)
+    assert result.temperature_input == "0"
+    assert press(result, ".", "7").temperature_input == "0.7"
+
+
+@pytest.mark.parametrize("key", [keyboard.ENTER, "a", "/", "Ж", "-", ","])
+def test_temperature_rejects_non_numeric_keys(state, key):
+    on_temp = press(state, keyboard.DOWN, keyboard.DOWN, keyboard.DOWN)
+    assert press(on_temp, key) == on_temp
 
 
 # --- применение к настройкам --------------------------------------------------------------
@@ -238,3 +307,81 @@ def test_leading_zeros_are_parsed_as_numbers():
     )
     settings, _ = settings_screen.apply_to_settings(state, original)
     assert settings.max_words == 50
+
+
+# --- температура: применение ---------------------------------------------------------------
+
+
+def _state_on_temperature_row(*keys: str) -> SettingsScreenState:
+    """Строка температуры с заранее очищенным полем (дефолт «0.7» стирается)."""
+    return press(
+        settings_screen.initial_state(AnswerSettings()),
+        keyboard.DOWN,
+        keyboard.DOWN,
+        keyboard.DOWN,
+        *[keyboard.BACKSPACE] * 3,
+        *keys,
+    )
+
+
+def test_temperature_value_is_applied():
+    state = _state_on_temperature_row("1", ".", "2")
+    settings, errors = settings_screen.apply_to_settings(state, AnswerSettings())
+    assert errors == []
+    assert settings.temperature == 1.2
+
+
+def test_temperature_zero_is_applied():
+    """Граница 0.0 из задания дня: набирается как «0.0», а не пустотой."""
+    state = _state_on_temperature_row("0", ".", "0")
+    settings, errors = settings_screen.apply_to_settings(state, AnswerSettings())
+    assert errors == []
+    assert settings.temperature == 0.0
+
+
+def test_temperature_out_of_range_reports_and_keeps_previous():
+    original = AnswerSettings().with_temperature(0.7)
+    state = _state_on_temperature_row("2", ".", "5")
+    settings, errors = settings_screen.apply_to_settings(state, original)
+    assert settings.temperature == 0.7
+    assert len(errors) == 1
+    assert f"{config.MIN_TEMPERATURE}..{config.MAX_TEMPERATURE}" in errors[0]
+
+
+def test_temperature_trailing_dot_reports_and_keeps_previous():
+    original = AnswerSettings().with_temperature(0.3)
+    state = _state_on_temperature_row("0", ".")
+    settings, errors = settings_screen.apply_to_settings(state, original)
+    assert settings.temperature == 0.3
+    assert len(errors) == 1
+    assert "Температура" in errors[0]
+
+
+def test_bad_temperature_does_not_block_other_fields():
+    original = AnswerSettings()
+    state = press(
+        settings_screen.initial_state(original),
+        keyboard.DOWN,
+        *[keyboard.BACKSPACE] * 3,
+        "5",
+        "0",
+        keyboard.DOWN,
+        keyboard.DOWN,
+        *[keyboard.BACKSPACE] * 3,
+        "9",
+        ".",
+        "9",
+    )
+    settings, errors = settings_screen.apply_to_settings(state, original)
+    assert settings.max_words == 50  # валидное поле применилось
+    assert settings.temperature == original.temperature  # невалидное осталось прежним
+    assert len(errors) == 1
+
+
+def test_untouched_temperature_row_keeps_value():
+    original = AnswerSettings().with_temperature(1.1)
+    settings, errors = settings_screen.apply_to_settings(
+        settings_screen.initial_state(original), original
+    )
+    assert settings == original
+    assert errors == []

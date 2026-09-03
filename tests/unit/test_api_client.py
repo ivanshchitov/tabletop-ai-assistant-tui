@@ -50,6 +50,22 @@ def test_request_payload_carries_messages_and_settings(client):
 
 
 @responses.activate
+def test_temperature_parameter_reaches_payload(client):
+    responses.add(responses.POST, config.API_URL, json=_completion("ok"), status=200)
+    client.ask("system", "user", temperature=1.2)
+    payload = json.loads(responses.calls[0].request.body)
+    assert payload["temperature"] == 1.2
+
+
+@responses.activate
+def test_temperature_defaults_to_config_value(client):
+    responses.add(responses.POST, config.API_URL, json=_completion("ok"), status=200)
+    client.ask("system", "user")
+    payload = json.loads(responses.calls[0].request.body)
+    assert payload["temperature"] == config.TEMPERATURE
+
+
+@responses.activate
 def test_payload_never_contains_stop_field(client):
     """Регресс: `stop` обрывает reasoning-модель на reasoning_content с пустым content."""
     responses.add(responses.POST, config.API_URL, json=_completion("ok"), status=200)

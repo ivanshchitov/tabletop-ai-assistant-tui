@@ -11,6 +11,45 @@ def test_defaults_match_config():
     assert settings.max_words == config.DEFAULT_MAX_WORDS
     assert settings.list_limit == config.DEFAULT_LIST_LIMIT
     assert settings.format == AnswerFormat.FREE
+    assert settings.temperature == config.TEMPERATURE
+
+
+@pytest.mark.parametrize("value", [config.MIN_TEMPERATURE, 0.7, 1.2, config.MAX_TEMPERATURE])
+def test_with_temperature_accepts_range_with_one_decimal(value):
+    assert AnswerSettings().with_temperature(value).temperature == value
+
+
+@pytest.mark.parametrize(
+    "value", [config.MAX_TEMPERATURE + 0.5, config.MIN_TEMPERATURE - 0.1, 2.5, -0.1]
+)
+def test_with_temperature_rejects_out_of_range(value):
+    with pytest.raises(AnswerSettingsError):
+        AnswerSettings().with_temperature(value)
+
+
+@pytest.mark.parametrize("value", [0.55, 1.15, 0.01, 1.999])
+def test_with_temperature_rejects_more_than_one_decimal_digit(value):
+    """Инвариант ядра: программный вызов с двумя знаками — ошибка, не округление."""
+    with pytest.raises(AnswerSettingsError):
+        AnswerSettings().with_temperature(value)
+
+
+def test_with_temperature_rejected_value_leaves_original_untouched():
+    settings = AnswerSettings().with_temperature(1.2)
+    with pytest.raises(AnswerSettingsError):
+        settings.with_temperature(3.0)
+    assert settings.temperature == 1.2
+
+
+def test_with_temperature_preserves_other_fields():
+    settings = AnswerSettings(max_words=100, format=AnswerFormat.JSON, list_limit=7)
+    updated = settings.with_temperature(0.0)
+    assert (updated.temperature, updated.max_words, updated.format, updated.list_limit) == (
+        0.0,
+        100,
+        AnswerFormat.JSON,
+        7,
+    )
 
 
 @pytest.mark.parametrize("value", [config.MIN_MAX_WORDS, 200, config.MAX_MAX_WORDS])

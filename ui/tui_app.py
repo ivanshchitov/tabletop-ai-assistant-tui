@@ -291,6 +291,7 @@ class TabletopAITUI:
         marker_format = "➤" if state.row == settings_screen.ROW_FORMAT else " "
         marker_words = "➤" if state.row == settings_screen.ROW_MAX_WORDS else " "
         marker_list_limit = "➤" if state.row == settings_screen.ROW_LIST_LIMIT else " "
+        marker_temperature = "➤" if state.row == settings_screen.ROW_TEMPERATURE else " "
         words_display = (
             f"[reverse bold]{state.max_words_input or ' '}[/reverse bold]"
             if state.row == settings_screen.ROW_MAX_WORDS
@@ -301,10 +302,16 @@ class TabletopAITUI:
             if state.row == settings_screen.ROW_LIST_LIMIT
             else state.list_limit_input
         )
+        temperature_display = (
+            f"[reverse bold]{state.temperature_input or ' '}[/reverse bold]"
+            if state.row == settings_screen.ROW_TEMPERATURE
+            else state.temperature_input
+        )
         body = (
             f"{marker_format} Формат ответа: {format_line}\n"
             f"{marker_words} Макс. объём ({config.MIN_MAX_WORDS}..{config.MAX_MAX_WORDS} слов): {words_display}\n"
             f"{marker_list_limit} Лимит вариантов в списке ({config.MIN_LIST_LIMIT}..{config.MAX_LIST_LIMIT}): {list_limit_display}\n"
+            f"{marker_temperature} Температура ({config.MIN_TEMPERATURE}..{config.MAX_TEMPERATURE}): {temperature_display}\n"
             "\n"
             "[dim]↑/↓ — поле, ←/→ — формат, цифры/Backspace — числовые поля, Esc — выход и сохранение[/dim]"
         )
@@ -332,6 +339,7 @@ class TabletopAITUI:
                     prompts.build_system_message(self.settings.format),
                     user_prompt,
                     max_tokens=config.max_tokens_for_words(self.settings.max_words),
+                    temperature=self.settings.temperature,
                 )
             except DeepseekAPIError as exc:
                 self.last_error = str(exc)
@@ -360,6 +368,7 @@ class TabletopAITUI:
         self.console.print(
             f"[dim]Статус: Готов ✅  |  Формат: {FORMAT_LABELS[self.settings.format]}  |  "
             f"Объём: {self.settings.max_words} слов  |  Лимит списка: {self.settings.list_limit}  |  "
+            f"Температура: {self.settings.temperature:.1f}  |  "
             f"Команды: {commands_hint}  |  Диалогов за сессию: {self.session_count}[/dim]"
         )
         self.console.rule(style="dim")
