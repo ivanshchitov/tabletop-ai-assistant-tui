@@ -52,6 +52,7 @@ class DeepseekAPIClient:
         system_message: str,
         user_message: str,
         max_tokens: int = config.max_tokens_for_words(config.DEFAULT_MAX_WORDS),
+        temperature: float = config.TEMPERATURE,
     ) -> str:
         if not is_valid_api_key(self.api_key):
             raise DeepseekAPIError(API_KEY_CHARSET_ERROR)
@@ -62,7 +63,7 @@ class DeepseekAPIClient:
                 {"role": "system", "content": system_message},
                 {"role": "user", "content": user_message},
             ],
-            "temperature": config.TEMPERATURE,
+            "temperature": temperature,
             "max_tokens": max_tokens,
         }
         headers = {

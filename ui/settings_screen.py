@@ -7,6 +7,7 @@
 
 from dataclasses import dataclass, replace
 from typing import List, Tuple
+import re
 
 from core.answer_settings import AnswerFormat, AnswerSettings, AnswerSettingsError
 
@@ -15,9 +16,12 @@ from . import keyboard
 ROW_FORMAT = 0
 ROW_MAX_WORDS = 1
 ROW_LIST_LIMIT = 2
-ROWS_COUNT = 3
+ROW_TEMPERATURE = 3
+ROWS_COUNT = 4
 
 FORMAT_VALUES: List[AnswerFormat] = list(AnswerFormat)
+
+_TEMPERATURE_RE = re.compile(r"^(\d+)(?:\.(\d))?$")
 
 
 @dataclass(frozen=True)
@@ -33,6 +37,7 @@ class SettingsScreenState:
     format_index: int = 0
     max_words_input: str = ""
     list_limit_input: str = ""
+    temperature_input: str = ""
 
     @property
     def selected_format(self) -> AnswerFormat:
@@ -45,7 +50,13 @@ def initial_state(settings: AnswerSettings) -> SettingsScreenState:
         format_index=FORMAT_VALUES.index(settings.format),
         max_words_input=str(settings.max_words),
         list_limit_input=str(settings.list_limit),
+        temperature_input=_format_temperature(settings.temperature),
     )
+
+
+def _format_temperature(value: float) -> str:
+    """Отображение значения температуры одной десятичной дробью: 0.7 → «0.7», 2 → «2.0»."""
+    return f"{value:.1f}"
 
 
 def apply_key(state: SettingsScreenState, key: str) -> SettingsScreenState:
@@ -74,7 +85,28 @@ def apply_key(state: SettingsScreenState, key: str) -> SettingsScreenState:
         if len(key) == 1 and key.isdigit():
             return replace(state, list_limit_input=state.list_limit_input + key)
 
+    if state.row == ROW_TEMPERATURE:
+        if key == keyboard.BACKSPACE:
+            return replace(state, temperature_input=state.temperature_input[:-1])
+        if len(key) == 1 and _temperature_key_accepted(state.temperature_input, key):
+            return replace(state, temperature_input=state.temperature_input + key)
+
     return state
+
+
+def _temperature_key_accepted(current: str, key: str) -> bool:
+    """В поле температуры нельзя ввести вторую точку или второй знак после точки.
+
+    Ограничение на вводе, а не на валидации: значение с двумя знаками после точки через
+    экран получить невозможно, ошибка формата у пользователя не возникает.
+    """
+    if key == ".":
+        return "." not in current
+    if key.isdigit():
+        if "." in current:
+            return current.rsplit(".", 1)[1] == ""
+        return True
+    return False
 
 
 def apply_to_settings(
@@ -105,4 +137,24 @@ def apply_to_settings(
     else:
         errors.append("Лимит вариантов в списке: введите число.")
 
+    result = _apply_temperature(state.temperature_input, result, errors)
+
     return result, errors
+
+
+def _apply_temperature(
+    raw_value: str, settings: AnswerSettings, errors: List[str]
+) -> AnswerSettings:
+    """Разбор и применение значения температуры; ошибки идут отдельным сообщением."""
+    match = _TEMPERATURE_RE.match(raw_value)
+    if match is None:
+        errors.append("Температура: введите число с не более чем одним знаком после точки.")
+        return settings
+    value = float(match.group(1))
+    if match.group(2) is not None:
+        value += int(match.group(2)) / 10
+    try:
+        return settings.with_temperature(round(value, 1))
+    except AnswerSettingsError as exc:
+        errors.append(str(exc))
+        return settings

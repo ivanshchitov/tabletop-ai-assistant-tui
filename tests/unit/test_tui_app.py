@@ -16,16 +16,31 @@ from ui.tui_app import TabletopAITUI
 
 
 class FakeClient:
-    """Подставной клиент: отдаёт заготовленные ответы и запоминает, что у него спросили."""
+    """Подставной клиент: отдаёт заготовленные ответы и запоминает, что у него спросили.
+
+    temperature=None означает «вызывающий не передал температуру» — так отличают вызов,
+    полагающийся на дефолт клиента (/logictask), от явной передачи значения настройки.
+    """
 
     def __init__(self, answers=None, error: Optional[Exception] = None) -> None:
         self.answers = list(answers or ["Ответ по умолчанию"])
         self.error = error
         self.calls: List[dict] = []
 
-    def ask(self, system_message: str, user_message: str, max_tokens: int = 0) -> str:
+    def ask(
+        self,
+        system_message: str,
+        user_message: str,
+        max_tokens: int = 0,
+        temperature: Optional[float] = None,
+    ) -> str:
         self.calls.append(
-            {"system": system_message, "user": user_message, "max_tokens": max_tokens}
+            {
+                "system": system_message,
+                "user": user_message,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+            }
         )
         if self.error is not None:
             raise self.error
@@ -227,7 +242,7 @@ def test_api_error_is_reported_and_not_persisted(make_app, recording_console, hi
 
 def test_app_survives_an_error_and_answers_the_next_question(make_app, recording_console, history):
     class FlakyClient(FakeClient):
-        def ask(self, system_message, user_message, max_tokens=0):
+        def ask(self, system_message, user_message, max_tokens=0, temperature=None):
             self.calls.append({"user": user_message})
             if len(self.calls) == 1:
                 raise DeepseekAPIError("Ошибка соединения с Deepseek API.")
@@ -267,6 +282,47 @@ def test_status_bar_shows_current_settings(make_app, recording_console):
     assert recording_console.contains("Формат: компактный")
     assert recording_console.contains("Объём: 75 слов")
     assert recording_console.contains("Лимит списка: 4")
+    assert recording_console.contains("Температура: 0.7")
+
+
+def test_status_bar_reflects_changed_temperature(make_app, recording_console):
+    app = make_app(["/exit"], FakeClient())
+    app.settings = app.settings.with_temperature(1.2)
+    app.run()
+    assert recording_console.contains("Температура: 1.2")
+
+
+def test_settings_panel_shows_temperature_row(recording_console):
+    """Панель /settings содержит строку температуры с диапазоном и текущим значением.
+
+    Живой экран рисуется в transient-Live (в буфер юнит-теста не попадает), поэтому
+    рендерим панель напрямую — проверяется состав строк, а не поведение Live.
+    """
+    app = TabletopAITUI(console=recording_console.console, history=HistoryManager(), client=FakeClient())
+    recording_console.console.print(app._render_settings_panel(settings_screen.initial_state(app.settings)))
+
+    assert recording_console.contains(
+        f"Температура ({config.MIN_TEMPERATURE}..{config.MAX_TEMPERATURE}): 0.7"
+    )
+
+
+def test_settings_screen_applies_temperature_change(
+    make_app, recording_console, monkeypatch
+):
+    """Набор 1.2 на строке температуры меняет настройку и виден в статус-баре."""
+    keys = iter(
+        [keyboard.DOWN, keyboard.DOWN, keyboard.DOWN]
+        + [keyboard.BACKSPACE] * 3
+        + ["1", ".", "2", keyboard.ESC]
+    )
+    monkeypatch.setattr(keyboard, "read_key", lambda: next(keys))
+    monkeypatch.setattr(keyboard, "raw_mode", _noop_context)
+
+    app = make_app(["/settings", "/exit"], FakeClient())
+    app.run()
+
+    assert app.settings.temperature == 1.2
+    assert recording_console.contains("Температура: 1.2")
 
 
 # --- предупреждение о невалидном JSON -------------------------------------------------------
@@ -392,6 +448,28 @@ def test_logictask_opens_panel_and_runs_chosen_strategy(make_app, recording_cons
     assert app.session_count == 0
 
 
+def test_question_carries_temperature_setting(make_app):
+    """Температура настройки сессии доходит до клиента с каждым вопросом."""
+    client = FakeClient()
+    app = make_app(["Вопрос", "/exit"], client)
+    app.settings = AnswerSettings().with_temperature(1.2)
+    app.run()
+    assert client.calls[0]["temperature"] == 1.2
+
+
+def test_logictask_ignores_temperature_setting(make_app, monkeypatch):
+    """Прогоны /logictask не передают температуру настройки — клиент берёт дефолт."""
+    keys = iter([keyboard.ENTER, keyboard.ESC])
+    monkeypatch.setattr(keyboard, "read_key", lambda: next(keys))
+    monkeypatch.setattr(keyboard, "raw_mode", _noop_context)
+
+    client = FakeClient(["Ответ задачи"])
+    app = make_app(["/logictask", "/exit"], client)
+    app.settings = AnswerSettings().with_temperature(1.2)
+    app.run()
+    assert client.calls[0]["temperature"] is None
+
+
 def test_logictask_panel_visible_before_choice(make_app, recording_console, monkeypatch):
     """Панель с четырьмя стратегиями и описанием задачи; до Enter/Esc запросов нет."""
     keys = iter([keyboard.ESC])
@@ -499,7 +577,7 @@ def test_logictask_error_stops_step_but_session_continues(
     monkeypatch.setattr(keyboard, "raw_mode", _noop_context)
 
     class TwoStepClient(FakeClient):
-        def ask(self, system_message, user_message, max_tokens=0):
+        def ask(self, system_message, user_message, max_tokens=0, temperature=None):
             self.calls.append({"system": system_message, "user": user_message})
             if len(self.calls) == 2:
                 raise DeepseekAPIError("Тестовая ошибка API.")

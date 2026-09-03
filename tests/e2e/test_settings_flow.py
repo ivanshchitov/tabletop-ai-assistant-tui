@@ -46,13 +46,14 @@ def close_settings(session):
 # --- отрисовка и навигация ----------------------------------------------------------------
 
 
-def test_settings_screen_shows_all_three_rows(app):
+def test_settings_screen_shows_all_four_rows(app):
     with app() as session:
         screen = open_settings(session)
 
     assert "Формат ответа" in screen
     assert "Макс. объём" in screen
     assert "Лимит вариантов в списке" in screen
+    assert "Температура (0.0..2.0): 0.7" in screen
     assert "Esc — выход" in screen
 
 
@@ -69,13 +70,17 @@ def test_marker_moves_down_between_rows(app):
         session.read_for(0.3)
         assert "➤ Лимит вариантов" in session.screen_text()
 
+        session.send_keys(KEY_DOWN)
+        session.read_for(0.3)
+        assert "➤ Температура" in session.screen_text()
+
 
 def test_marker_moves_up(app):
     with app() as session:
         open_settings(session)
         session.send_keys(KEY_UP)
         session.read_for(0.3)
-        assert "➤ Лимит вариантов" in session.screen_text()
+        assert "➤ Температура" in session.screen_text()
 
 
 def test_escape_closes_the_screen(app):
@@ -117,6 +122,37 @@ def test_full_settings_walkthrough_changes_the_next_request(app, stub):
     assert "не более 6 вариантов" in payload["messages"][1]["content"]
     assert payload["max_tokens"] == 50 * 4 + 50
     assert "stop" not in payload
+
+
+def test_temperature_setting_changes_the_next_request(app, stub):
+    """Температура 1.2, набранная на экране, видна в статус-баре и уходит в payload."""
+    with app() as session:
+        open_settings(session)
+        session.send_keys(KEY_DOWN, KEY_DOWN, KEY_DOWN)
+        session.send_keys(KEY_BACKSPACE, KEY_BACKSPACE, KEY_BACKSPACE)
+        session.send_keys(b"1", b".", b"2")
+        close_settings(session)
+        session.wait_for("Температура: 1.2")
+
+        session.ask("Придумай название настольной игры", "Ответ stub-сервера")
+
+    assert stub.last_payload()["temperature"] == 1.2
+
+
+def test_temperature_input_blocks_the_second_decimal_digit(app):
+    """Ограничение одного знака после точки видно на экране: 0.5 + «5» → 0.5."""
+    with app() as session:
+        open_settings(session)
+        session.send_keys(KEY_DOWN, KEY_DOWN, KEY_DOWN)
+        session.send_keys(KEY_BACKSPACE, KEY_BACKSPACE, KEY_BACKSPACE)
+        session.send_keys(b"0", b".", b"5")
+        session.read_for(0.3)
+        screen = session.screen_text()
+        assert "Температура (0.0..2.0): 0.5" in screen
+
+        session.send_keys(b"5")
+        session.read_for(0.3)
+        assert "Температура (0.0..2.0): 0.5" in session.screen_text()
 
 
 def test_format_switches_the_system_message(app, stub):

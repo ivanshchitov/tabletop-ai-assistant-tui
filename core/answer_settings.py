@@ -23,20 +23,55 @@ class AnswerSettings:
     max_words: int = config.DEFAULT_MAX_WORDS
     format: AnswerFormat = AnswerFormat.FREE
     list_limit: int = config.DEFAULT_LIST_LIMIT
+    temperature: float = config.TEMPERATURE
 
     def with_max_words(self, value: int) -> "AnswerSettings":
         if not config.MIN_MAX_WORDS <= value <= config.MAX_MAX_WORDS:
             raise AnswerSettingsError(
                 f"Значение должно быть в диапазоне {config.MIN_MAX_WORDS}..{config.MAX_MAX_WORDS}."
             )
-        return AnswerSettings(max_words=value, format=self.format, list_limit=self.list_limit)
+        return AnswerSettings(
+            max_words=value,
+            format=self.format,
+            list_limit=self.list_limit,
+            temperature=self.temperature,
+        )
 
     def with_format(self, value: AnswerFormat) -> "AnswerSettings":
-        return AnswerSettings(max_words=self.max_words, format=value, list_limit=self.list_limit)
+        return AnswerSettings(
+            max_words=self.max_words,
+            format=value,
+            list_limit=self.list_limit,
+            temperature=self.temperature,
+        )
 
     def with_list_limit(self, value: int) -> "AnswerSettings":
         if not config.MIN_LIST_LIMIT <= value <= config.MAX_LIST_LIMIT:
             raise AnswerSettingsError(
                 f"Значение должно быть в диапазоне {config.MIN_LIST_LIMIT}..{config.MAX_LIST_LIMIT}."
             )
-        return AnswerSettings(max_words=self.max_words, format=self.format, list_limit=value)
+        return AnswerSettings(
+            max_words=self.max_words,
+            format=self.format,
+            list_limit=value,
+            temperature=self.temperature,
+        )
+
+    def with_temperature(self, value: float) -> "AnswerSettings":
+        if not config.MIN_TEMPERATURE <= value <= config.MAX_TEMPERATURE:
+            raise AnswerSettingsError(
+                f"Температура должна быть в диапазоне "
+                f"{config.MIN_TEMPERATURE}..{config.MAX_TEMPERATURE}."
+            )
+        # Пользовательский ввод ограничен одним знаком после точки ещё на экране
+        # настроек; здесь та же проверка служит инвариантом для программных вызовов.
+        if round(value, 1) != value:
+            raise AnswerSettingsError(
+                "Температура задаётся числом не более чем с одним знаком после точки."
+            )
+        return AnswerSettings(
+            max_words=self.max_words,
+            format=self.format,
+            list_limit=self.list_limit,
+            temperature=value,
+        )

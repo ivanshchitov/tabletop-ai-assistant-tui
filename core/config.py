@@ -19,6 +19,8 @@ DEFAULT_API_URL = "https://opencode.ai/zen/v1/chat/completions"
 API_URL = os.getenv("OPENCODE_API_URL", DEFAULT_API_URL)
 MODEL_NAME = "deepseek-v4-flash"
 TEMPERATURE = 0.7
+MIN_TEMPERATURE = 0.0
+MAX_TEMPERATURE = 2.0
 
 MIN_MAX_WORDS = 10
 MAX_MAX_WORDS = 500
