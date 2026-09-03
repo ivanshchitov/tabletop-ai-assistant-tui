@@ -132,6 +132,20 @@ def test_empty_input_is_skipped(make_app):
 # --- получение API-ключа --------------------------------------------------------------------
 
 
+def monkeypatch_stdin_lines(monkeypatch, lines):
+    """Ручной ввод ключа читается из sys.stdin.readline, а не из input() — см. _read_manual_key."""
+    reader = iter(lines)
+
+    class FakeStdin:
+        def readline(self):
+            try:
+                return next(reader) + "\n"
+            except StopIteration:
+                raise EOFError  # исчерпание ввода = Ctrl+D
+
+    monkeypatch.setattr("sys.stdin", FakeStdin())
+
+
 def test_key_from_environment_is_used_without_asking(make_app, recording_console, monkeypatch):
     monkeypatch.setenv("OPENCODE_API_KEY", "sk-from-env")
     app = TabletopAITUI(console=recording_console.console, history=HistoryManager(path=Path("/dev/null")))
@@ -142,8 +156,7 @@ def test_key_from_environment_is_used_without_asking(make_app, recording_console
 def test_missing_key_is_requested(make_app, recording_console, monkeypatch, history):
     monkeypatch.delenv("OPENCODE_API_KEY", raising=False)
     app = TabletopAITUI(console=recording_console.console, history=history)
-    app._inputs = iter(["", "   ", "sk-typed-by-hand"])
-    monkeypatch.setattr("builtins.input", lambda prompt="": next(app._inputs))
+    monkeypatch_stdin_lines(monkeypatch, ["", "   ", "sk-typed-by-hand"])
 
     assert app._ensure_api_key() == "sk-typed-by-hand"
     assert recording_console.contains("API-ключ не найден")
@@ -153,8 +166,7 @@ def test_non_ascii_key_is_rejected_and_asked_again(recording_console, monkeypatc
     """Ключ в русской раскладке отсекается при вводе — иначе он падал бы UnicodeEncodeError."""
     monkeypatch.delenv("OPENCODE_API_KEY", raising=False)
     app = TabletopAITUI(console=recording_console.console, history=history)
-    app._inputs = iter(["sk-введён-вручную", "sk-good-key"])
-    monkeypatch.setattr("builtins.input", lambda prompt="": next(app._inputs))
+    monkeypatch_stdin_lines(monkeypatch, ["sk-введён-вручную", "sk-good-key"])
 
     assert app._ensure_api_key() == "sk-good-key"
     assert recording_console.contains("проверьте раскладку клавиатуры")
@@ -164,8 +176,7 @@ def test_non_ascii_key_from_environment_is_rejected(recording_console, monkeypat
     """Непригодный ключ из .env отсекается на старте, а не после первого вопроса."""
     monkeypatch.setenv("OPENCODE_API_KEY", "sk-ключ-из-окружения")
     app = TabletopAITUI(console=recording_console.console, history=history)
-    app._inputs = iter(["sk-good-key"])
-    monkeypatch.setattr("builtins.input", lambda prompt="": next(app._inputs))
+    monkeypatch_stdin_lines(monkeypatch, ["sk-good-key"])
 
     assert app._ensure_api_key() == "sk-good-key"
     assert recording_console.contains("проверьте раскладку клавиатуры")

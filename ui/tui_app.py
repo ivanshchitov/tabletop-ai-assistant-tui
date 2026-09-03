@@ -1,6 +1,7 @@
 """TUI-приложение Tabletop AI Assistant на базе rich."""
 
 import os
+import sys
 import time
 from typing import List, Optional
 
@@ -141,6 +142,20 @@ class TabletopAITUI:
             self._exit()
             return
 
+    def _read_manual_key(self) -> str:
+        """Читает ключ с терминала без readline.
+
+        readline перехватывает SIGINT (rl_catch_signals у GNU readline): Ctrl+C во время
+        ручного ввода ключа не поднимал KeyboardInterrupt — приложение молча перерисовывало
+        промпт и продолжало ждать. Читаем строку напрямую из stdin, тогда Ctrl+C штатно
+        поднимает KeyboardInterrupt, который ловит run().
+        """
+        self.console.print("[bold]Введите OPENCODE_API_KEY вручную:[/bold] ")
+        line = sys.stdin.readline()
+        if line == "":
+            raise EOFError
+        return line.strip()
+
     def _ensure_api_key(self) -> str:
         """Возвращает пригодный ключ, при необходимости спрашивая его у пользователя.
 
@@ -155,7 +170,7 @@ class TabletopAITUI:
                 self.console.print(
                     "[bold red]API-ключ не найден. Добавьте OPENCODE_API_KEY в файл .env[/bold red]"
                 )
-            entered = input("Введите OPENCODE_API_KEY вручную: ").strip()
+            entered = self._read_manual_key()
             if entered:
                 config.set_api_key_runtime(entered)
                 api_key = entered
