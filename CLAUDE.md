@@ -190,17 +190,32 @@ Deliberate decisions baked in:
 **`/models` (`ui/models_screen.py` + `core/config.py`):** model selection, one decision per
 session. Deliberate decisions baked in:
 - `config.AVAILABLE_MODELS` is the fixed list (`deepseek-v4-flash`, `deepseek-v4-pro`,
-  `kimi-k2.5`, `glm-5.1`, `mimo-v2.5-free`) and `DEFAULT_MODEL` is its first element; the old
-  `MODEL_NAME` constant no longer exists. The panel and the client only read the list from here.
+  `kimi-k2.5`, `glm-5.1`, `mimo-v2.5-free`, `minimax-m2.5`, `kimi-k3`) and `DEFAULT_MODEL` is its
+  first element; the old `MODEL_NAME` constant no longer exists. The panel and the client only
+  read the list from here. `minimax-m2.5` and `kimi-k3` were added specifically to give a clear
+  weak/medium/strong price tier alongside `deepseek-v4-flash` for the day-5 challenge comparison
+  (time/tokens/cost across model strength) — not required by any other feature.
+- `config.MODEL_PRICING` maps every model in `AVAILABLE_MODELS` to a `(input_price, output_price)`
+  pair in USD per 1M tokens, used by `core.usage.estimate_cost()` to price a request. Where
+  OpenCode Zen has peak/off-peak pricing (DeepSeek V4 Flash/Pro), the table stores the lower
+  off-peak number — comparative, not accounting-grade precision (see
+  `openspec/changes/add-model-usage-metadata/design.md`, since archived, for the full rationale).
 - The selected model lives on `TabletopAITUI.model` — session-only, like `AnswerSettings` (no
   persistence between restarts is deliberate, same backlog logic). Every request passes it as
-  `client.ask(..., model=...)`; `/logictask` follows the selection too, so one session = one model.
+  `client.ask_with_usage(..., model=...)`; `/logictask` follows the selection too, so one session =
+  one model.
 - The panel follows the same reducer pattern (`initial_state(current_model)` puts the cursor on
   the active model); the active model is additionally marked "(текущая)" in the render, separate
   from the cursor. Enter applies, Esc cancels with zero API calls.
 - No client-side model validation: the list is fixed so free-form input is impossible, and an
   unknown model surfaces as a regular API error through the existing `APIError` path.
 - The status bar shows `Модель: <имя>` right after "Готов" — several e2e snapshots assert on it.
+- After every answer — a normal question via `_handle_question` and each individual API call
+  inside `/logictask` (twice for strategy 3, three times for strategy 4, once per expert) —
+  `TabletopAITUI._print_usage_meta()` prints a screen-only line with response time, token counts
+  and cost (`"неизвестно"` when the model has no entry in `MODEL_PRICING`). This line is never
+  written to `history.json` and never replayed on restart — it exists only at the moment of the
+  answer.
 
 **Prompt assembly (`core/prompts.py` + `assets/*.md`):**
 - `assets/system_prompt.md` is the base system prompt; `assets/answer_format_compact.md` and
@@ -260,6 +275,20 @@ than after the first question. Retries on timeout with exponential backoff (`con
 on connection errors (treated as a persistent network problem, not transient). `is_valid_json_answer()`
 is used only when `AnswerFormat.JSON` is active, to warn the user client-side if the model didn't
 actually return valid JSON — it doesn't block or alter the displayed answer.
+`ask()` and the newer `ask_with_usage()` share one private `_request()` (HTTP call, retries, error
+handling, unchanged from before this split); `ask()` returns just the stripped answer text as
+always, while `ask_with_usage()` additionally returns an `AnswerMeta` dataclass (content, model,
+`elapsed_seconds` measured around the whole `_request()` call including retries, `prompt_tokens`/
+`completion_tokens`/`total_tokens` from the API's `usage` field, and `cost_usd` from
+`core.usage.estimate_cost()` — `None`, not an error, when the model has no entry in
+`config.MODEL_PRICING`). `ui/tui_app.py` calls `ask_with_usage()` everywhere now (both the normal
+question path and every `/logictask` strategy call); `ask()` stays only for callers that just want
+the text and don't need metrics — currently none inside this app, kept because changing its
+signature would have broken every existing caller/test for no benefit.
+
+**`core/usage.py`** — `estimate_cost(model, prompt_tokens, completion_tokens)` is a pure function
+over `config.MODEL_PRICING`; it exists as its own module (not inlined in `api_client.py`) so cost
+math is testable without HTTP mocking.
 
 **`core/history_manager.py`** — `history.json` (gitignored) is loaded once at startup and replayed into
 the log if non-empty; every successful exchange is appended and immediately re-saved, capped at
