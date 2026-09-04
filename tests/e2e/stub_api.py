@@ -33,7 +33,14 @@ class Reply:
             return self.raw_body
         if self.status != 200:
             return json.dumps({"error": {"message": "stub error"}})
-        return json.dumps({"choices": [{"message": {"content": self.content or ""}}]})
+        return json.dumps(
+            {
+                "choices": [{"message": {"content": self.content or ""}}],
+                # Фиксированные значения, не зависящие от длины вопроса/ответа — этого достаточно,
+                # чтобы e2e-тесты проверили сам факт проброса usage от API до экрана.
+                "usage": {"prompt_tokens": 50, "completion_tokens": 100, "total_tokens": 150},
+            }
+        )
 
 
 def answer(content: str) -> Reply:
