@@ -29,6 +29,19 @@ AVAILABLE_MODELS = [
     "kimi-k3",
 ]
 DEFAULT_MODEL = AVAILABLE_MODELS[0]
+# Цена входных/выходных токенов (доллары за 1 млн токенов) по каталогу OpenCode Zen. Для моделей
+# с разной ценой в пиковые/непиковые часы (DeepSeek V4 Flash/Pro) берётся более низкое (off-peak)
+# значение — время суток на клиенте не отслеживается, точность не бухгалтерская, а сравнительная
+# (см. openspec/changes/add-model-usage-metadata/design.md).
+MODEL_PRICING = {
+    "deepseek-v4-flash": (0.22, 0.66),
+    "deepseek-v4-pro": (0.66, 1.98),
+    "kimi-k2.5": (0.60, 3.00),
+    "glm-5.1": (1.40, 4.40),
+    "mimo-v2.5-free": (0.0, 0.0),
+    "minimax-m2.5": (0.30, 1.20),
+    "kimi-k3": (3.00, 15.00),
+}
 TEMPERATURE = 0.7
 MIN_TEMPERATURE = 0.0
 MAX_TEMPERATURE = 2.0

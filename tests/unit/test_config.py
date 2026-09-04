@@ -107,6 +107,14 @@ def test_default_model_is_first_available():
     assert config.DEFAULT_MODEL == config.AVAILABLE_MODELS[0]
 
 
+def test_model_pricing_covers_every_available_model():
+    for model in config.AVAILABLE_MODELS:
+        assert model in config.MODEL_PRICING
+        input_price, output_price = config.MODEL_PRICING[model]
+        assert input_price >= 0
+        assert output_price >= 0
+
+
 @pytest.mark.parametrize("attr", ["REQUEST_TIMEOUT", "MAX_RETRIES", "HISTORY_LIMIT", "MAX_INPUT_LENGTH"])
 def test_limits_are_positive(attr):
     assert getattr(config, attr) > 0
