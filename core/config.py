@@ -82,7 +82,7 @@ HISTORY_FILE = Path(os.getenv("TABLETOP_HISTORY_FILE", str(DEFAULT_HISTORY_FILE)
 
 # Таймаут переопределяется через окружение: e2e-сценарию с ретраями нужно, чтобы клиент
 # сдавался за доли секунды, а не ждал полминуты на каждый намеренно зависший ответ.
-REQUEST_TIMEOUT = int(os.getenv("TABLETOP_REQUEST_TIMEOUT", "30"))
+REQUEST_TIMEOUT = int(os.getenv("TABLETOP_REQUEST_TIMEOUT", "90"))
 MAX_RETRIES = 3
 
 

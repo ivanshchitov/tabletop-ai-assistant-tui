@@ -68,6 +68,17 @@ def test_api_url_override_from_environment(monkeypatch):
         importlib.reload(config)
 
 
+def test_request_timeout_default_covers_slow_reasoning_models(monkeypatch):
+    """kimi-k2.6 на сложном вопросе генерирует дольше 30с — прежний дефолт обрывал запрос раньше,
+    чем модель успевала ответить (проверено вручную против реального API)."""
+    monkeypatch.delenv("TABLETOP_REQUEST_TIMEOUT", raising=False)
+    reloaded = importlib.reload(config)
+    try:
+        assert reloaded.REQUEST_TIMEOUT == 90
+    finally:
+        importlib.reload(config)
+
+
 def test_history_file_override_from_environment(monkeypatch, tmp_path):
     """Без этого переключателя любой прогон писал бы в реальный history.json репозитория."""
     target = tmp_path / "custom-history.json"
