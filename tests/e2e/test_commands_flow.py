@@ -47,8 +47,8 @@ def test_enter_runs_selected_command(app, stub, history_file):
     session.send_line("/commands")
     _wait_panel_open(session)
 
-    # ↓↓↓ — выбор /clear; Enter выполняет команду прямо из панели.
-    session.send_key(harness.KEY_DOWN, 3)
+    # ↓↓↓↓ — выбор /clear; Enter выполняет команду прямо из панели.
+    session.send_key(harness.KEY_DOWN, 4)
     session.send_key(harness.KEY_ENTER, 1)
     _wait_panel_closed(session)
 
