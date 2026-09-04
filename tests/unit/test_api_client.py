@@ -25,6 +25,17 @@ def _completion(content: str) -> dict:
     return {"choices": [{"message": {"content": content}}]}
 
 
+def _completion_with_usage(content: str, prompt_tokens: int, completion_tokens: int) -> dict:
+    return {
+        "choices": [{"message": {"content": content}}],
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        },
+    }
+
+
 # --- успешный путь --------------------------------------------------------------------
 
 
@@ -94,6 +105,40 @@ def test_default_max_tokens_matches_default_word_limit(client):
     client.ask("system", "user")
     payload = json.loads(responses.calls[0].request.body)
     assert payload["max_tokens"] == config.max_tokens_for_words(config.DEFAULT_MAX_WORDS)
+
+
+# --- метрики использования --------------------------------------------------------------
+
+
+@responses.activate
+def test_ask_with_usage_returns_answer_meta(client):
+    responses.add(
+        responses.POST,
+        config.API_URL,
+        json=_completion_with_usage("Ответ", prompt_tokens=100, completion_tokens=200),
+        status=200,
+    )
+    meta = client.ask_with_usage("system", "user", model="deepseek-v4-flash")
+
+    assert meta.content == "Ответ"
+    assert meta.model == "deepseek-v4-flash"
+    assert meta.elapsed_seconds > 0
+    assert meta.prompt_tokens == 100
+    assert meta.completion_tokens == 200
+    assert meta.total_tokens == 300
+    assert meta.cost_usd == pytest.approx((100 * 0.22 + 200 * 0.66) / 1_000_000)
+
+
+@responses.activate
+def test_ask_with_usage_unknown_model_has_no_cost(client):
+    responses.add(
+        responses.POST,
+        config.API_URL,
+        json=_completion_with_usage("Ответ", prompt_tokens=10, completion_tokens=20),
+        status=200,
+    )
+    meta = client.ask_with_usage("system", "user", model="no-such-model")
+    assert meta.cost_usd is None
 
 
 # --- ошибки ---------------------------------------------------------------------------
