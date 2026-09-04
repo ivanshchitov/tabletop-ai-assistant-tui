@@ -607,5 +607,81 @@ def test_logictask_error_stops_step_but_session_continues(
 def test_logictask_is_a_known_command(make_app, recording_console):
     make_app(["/exit"], FakeClient()).run()
     assert "/logictask" in tui_app.COMMANDS
-    assert recording_console.contains("Команды: /exit, /settings, /clear, /logictask")
+    assert recording_console.contains("Команды: /exit, /commands")
+
+
+# --- /commands: панель команд и выполнение выбранной команды --------------------------------
+
+
+def test_commands_panel_enter_runs_selected_clear(
+    make_app, recording_console, history, history_path, monkeypatch
+):
+    """Выбор /clear в панели выполняет команду: история очищена, сообщение напечатано."""
+    client = FakeClient()
+    keys = iter([keyboard.DOWN, keyboard.DOWN, keyboard.DOWN, keyboard.ENTER])  # /clear
+    monkeypatch.setattr(keyboard, "read_key", lambda: next(keys))
+    monkeypatch.setattr(keyboard, "raw_mode", _noop_context)
+
+    history.add("Вопрос", "Ответ")
+    make_app(["/commands", "/exit"], client).run()
+
+    assert "История диалога очищена." in recording_console.text
+    assert history.dialogues == []
+    assert json.loads(history_path.read_text(encoding="utf-8")) == []
+    assert client.calls == []  # панель не делает запросов к модели
+
+
+def test_commands_panel_enter_exit_terminates_app(make_app, recording_console, monkeypatch):
+    """Выбор /exit в панели завершает приложение с сохранением истории."""
+    keys = iter([keyboard.ENTER])  # первая строка панели — /exit
+    monkeypatch.setattr(keyboard, "read_key", lambda: next(keys))
+    monkeypatch.setattr(keyboard, "raw_mode", _noop_context)
+
+    app = make_app(["/commands"])
+    app.run()
+
+    assert app._exit_requested  # завершение именно командой из панели, а не EOF
+    assert recording_console.contains(tui_app.GOODBYE_MESSAGE)
+
+
+def test_commands_panel_enter_settings_opens_screen(make_app, monkeypatch):
+    """Выбор /settings открывает экран настроек — тот же обработчик, что при ручном наборе."""
+    opened = []
+    monkeypatch.setattr(TabletopAITUI, "_open_settings_screen", lambda self: opened.append(True))
+    keys = iter([keyboard.DOWN, keyboard.DOWN, keyboard.ENTER])  # /settings
+    monkeypatch.setattr(keyboard, "read_key", lambda: next(keys))
+    monkeypatch.setattr(keyboard, "raw_mode", _noop_context)
+
+    make_app(["/commands", "/exit"]).run()
+
+    assert opened == [True]
+
+
+def test_commands_panel_esc_executes_nothing(
+    make_app, recording_console, history, monkeypatch
+):
+    """Esc закрывает панель: ничего не выполнено, сессия продолжается."""
+    keys = iter([keyboard.ESC])
+    monkeypatch.setattr(keyboard, "read_key", lambda: next(keys))
+    monkeypatch.setattr(keyboard, "raw_mode", _noop_context)
+
+    make_app(["/commands", "/exit"]).run()
+
+    assert recording_console.contains(tui_app.GOODBYE_MESSAGE)  # вышли только через /exit
+    for command in ("История диалога очищена.",):
+        assert command not in recording_console.text
+
+
+def test_commands_is_a_known_command_and_autocomplete_sees_it():
+    assert "/commands" in tui_app.COMMANDS
+    assert tui_app.COMMANDS[1] == "/commands"
+
+
+def test_status_bar_hint_lists_only_exit_and_commands(make_app, recording_console):
+    make_app(["/exit"], FakeClient()).run()
+    output = recording_console.text
+    assert "Команды: /exit, /commands" in output
+    assert "Команды: /exit, /commands, /settings" not in output
+    assert "/clear" not in output.split("Команды: ")[-1]
+    assert "/logictask" not in output.split("Команды: ")[-1]
 

@@ -26,7 +26,7 @@ from core.api_client import (
 )
 from core.history_manager import HistoryManager
 
-from . import keyboard, logictask_screen, settings_screen
+from . import commands_screen, keyboard, logictask_screen, settings_screen
 from .settings_screen import SettingsScreenState
 
 APP_TITLE = "🎲 TABLETOP AI ASSISTANT — эксперт по настольным играм"
@@ -40,7 +40,11 @@ TYPING_CHUNK_SIZE = 3
 # Пауза между кадрами анимации печати. Переопределяется через окружение, чтобы e2e-прогон
 # по псевдотерминалу не ждал реального времени набора на каждый ответ.
 TYPING_DELAY = float(os.getenv("TABLETOP_TYPING_DELAY", "0.015"))
-COMMANDS = ["/exit", "/settings", "/clear", "/logictask"]
+# Полный список команд обслуживает автодополнение и панель /commands; источник —
+# ui/commands_screen.COMMAND_OPTIONS, чтобы панель и Tab не разъезжались.
+COMMANDS = [command for command, _ in commands_screen.COMMAND_OPTIONS]
+# Подсказка в статус-баре — только точка входа: полный список с описаниями на панели /commands.
+STATUS_COMMANDS = ["/exit", "/commands"]
 
 FORMAT_LABELS = {
     AnswerFormat.COMPACT: "компактный",
@@ -68,6 +72,7 @@ class TabletopAITUI:
         self.client: Optional[DeepseekAPIClient] = client
         self.last_error: Optional[str] = None
         self.settings = AnswerSettings()
+        self._exit_requested = False
         self._setup_autocomplete()
 
     def _setup_autocomplete(self) -> None:
@@ -123,6 +128,8 @@ class TabletopAITUI:
                     return
 
                 if user_input.startswith("/") and self._handle_command(user_input):
+                    if self._exit_requested:
+                        return
                     self._print_status_bar()
                     continue
 
@@ -179,6 +186,9 @@ class TabletopAITUI:
     def _handle_command(self, user_input: str) -> bool:
         """Обрабатывает команды, кроме /exit. Возвращает True, если команда распознана."""
         command = user_input.split(maxsplit=1)[0]
+        if command == "/commands":
+            self._open_commands_screen()
+            return True
         if command == "/settings":
             self._open_settings_screen()
             return True
@@ -190,6 +200,51 @@ class TabletopAITUI:
             self._run_logictask()
             return True
         return False
+
+    def _open_commands_screen(self) -> None:
+        """Панель команд: ↑/↓ — выбор, Enter — выполнить выбранную команду, Esc — отмена.
+
+        Здесь только цикл «прочитать клавишу — перерисовать»; как клавиши меняют экран
+        и чем заканчивается выбор, решает редьюсер `ui.commands_screen`.
+        Выполнение не зависит от построчного редактирования терминала: выбранная команда
+        исполняется тем же диспетчером, что и ручной набор. Повторный выбор `/commands`
+        заново открывает панель (цикл, а не рекурсия).
+        """
+        command = "/commands"
+        while command == "/commands":
+            state = commands_screen.initial_state()
+
+            with Live(console=self.console, refresh_per_second=30, transient=True) as live, keyboard.raw_mode():
+                live.update(self._render_commands_panel(state))
+                while True:
+                    key = keyboard.read_key()
+                    state = commands_screen.apply_key(state, key)
+                    if state.confirmed or state.cancelled:
+                        break
+                    live.update(self._render_commands_panel(state))
+
+            if not state.confirmed:
+                return
+            command = state.selected[0]
+
+        if command == "/exit":
+            self._exit()
+            self._exit_requested = True
+            return
+        self._handle_command(command)
+
+    def _render_commands_panel(self, state: commands_screen.CommandsScreenState) -> Panel:
+        lines = []
+        for index, (command, description) in enumerate(commands_screen.COMMAND_OPTIONS):
+            if index == state.selected_index:
+                lines.append(f"➤ [reverse bold]{command} — {description}[/reverse bold]")
+            else:
+                lines.append(f"  {command} — {description}")
+        body = (
+            "\n".join(lines)
+            + "\n\n[dim]↑/↓ — выбор, Enter — выполнить, Esc — отмена[/dim]"
+        )
+        return Panel(body, title="Команды", style="cyan")
 
     def _run_logictask(self) -> None:
         """Прогон фиксированной задачи выбранной стратегией промптинга.
@@ -379,7 +434,7 @@ class TabletopAITUI:
             live.update(Markdown(answer))
 
     def _print_status_bar(self) -> None:
-        commands_hint = ", ".join(COMMANDS)
+        commands_hint = ", ".join(STATUS_COMMANDS)
         self.console.print(
             f"[dim]Статус: Готов ✅  |  Формат: {FORMAT_LABELS[self.settings.format]}  |  "
             f"Объём: {self.settings.max_words} слов  |  Лимит списка: {self.settings.list_limit}  |  "
