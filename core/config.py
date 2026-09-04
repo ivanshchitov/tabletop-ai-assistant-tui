@@ -47,7 +47,7 @@ MIN_TEMPERATURE = 0.0
 MAX_TEMPERATURE = 2.0
 
 MIN_MAX_WORDS = 10
-MAX_MAX_WORDS = 500
+MAX_MAX_WORDS = 1000
 DEFAULT_MAX_WORDS = 200
 
 # Пользователь ограничивает ответ в словах (инструкция в user-промпте — см.

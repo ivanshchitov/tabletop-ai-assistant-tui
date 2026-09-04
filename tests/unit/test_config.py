@@ -28,6 +28,14 @@ def test_ranges_are_sane():
     assert config.MIN_LIST_LIMIT <= config.DEFAULT_LIST_LIMIT <= config.MAX_LIST_LIMIT
 
 
+def test_max_words_ceiling_raised_for_reasoning_models():
+    """Reasoning-модели (kimi-k2.x, glm-5.1, deepseek-v4-pro) на сложных вопросах тратят весь
+    max_tokens на рассуждение раньше, чем дойдут до ответа — 500-словный потолок (2050 токенов)
+    этого не покрывает, 1000-словный (4050 токенов) — покрывает (проверено вручную против API).
+    """
+    assert config.MAX_MAX_WORDS == 1000
+
+
 def test_get_api_key_reads_environment(monkeypatch):
     monkeypatch.setenv("OPENCODE_API_KEY", "sk-from-env")
     assert config.get_api_key() == "sk-from-env"
