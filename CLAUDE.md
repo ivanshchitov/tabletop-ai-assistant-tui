@@ -240,6 +240,19 @@ session. Deliberate decisions baked in:
   `content`, and a hard `stop` match inside `reasoning_content` truncates the response with
   `content` empty. Any length/stop behavior has to be a prompt instruction plus client-side
   handling, never the API's `stop` field.
+- **`config.MAX_MAX_WORDS` is 1000, not 500.** Several reasoning models in the pool (`kimi-k2.5`,
+  `kimi-k2.6`, `glm-5.1`, `deepseek-v4-pro`) put their thinking into `reasoning_content`, same as
+  `deepseek-v4-flash` above — and on a demanding comparison-style question, that reasoning can eat
+  the *entire* `max_tokens` budget before the model ever starts writing `content`, coming back with
+  `finish_reason: "length"` and an empty answer even though the request itself succeeded (no
+  `APIError`, real `usage` numbers). Verified directly against the API: at the old ceiling (500
+  words → `max_tokens` 2050) `kimi-k2.5`/`glm-5.1`/`deepseek-v4-pro` all returned empty content on
+  a "compare X and Y, justify in detail" prompt; `kimi-k2.6` needed roughly 4000 tokens (~988
+  words) to produce a real answer for the same prompt. Raising the ceiling to 1000 words (`max_tokens`
+  4050) gives reasoning models enough headroom without changing the default (200 words) or floor
+  (10 words). This is a client-side mitigation, not a fix — the underlying model behavior (spending
+  unbounded reasoning tokens on some prompts) is unchanged, so an even harder question can still
+  return empty for these models; there is no client-side signal to detect or retry on that case.
 
 **`ui/keyboard.py` (raw terminal input for the interactive panels: `/commands`, `/settings`, `/logictask`, `/models`)** — two non-obvious constraints,
 both found by testing against a real PTY rather than mocks:
