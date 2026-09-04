@@ -182,10 +182,10 @@ def test_invalid_value_is_reported_and_previous_value_kept(app, stub):
         open_settings(session)
         session.send_keys(KEY_DOWN)
         session.send_keys(KEY_BACKSPACE, KEY_BACKSPACE, KEY_BACKSPACE)
-        session.send_keys(b"9", b"9", b"9")
+        session.send_keys(b"9", b"9", b"9", b"9")
         session.send_keys(KEY_ESC)
 
-        session.wait_for("Значение должно быть в диапазоне 10..500")
+        session.wait_for("Значение должно быть в диапазоне 10..1000")
         session.wait_for("Объём: 200 слов")
 
         session.send_line("Вопрос")

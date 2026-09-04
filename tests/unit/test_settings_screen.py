@@ -225,6 +225,7 @@ def test_out_of_range_value_keeps_previous_and_reports():
         "9",
         "9",
         "9",
+        "9",
     )
     settings, errors = settings_screen.apply_to_settings(state, original)
     assert settings.max_words == 120

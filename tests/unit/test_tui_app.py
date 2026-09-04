@@ -419,7 +419,7 @@ def test_settings_screen_applies_changes_and_updates_status_bar(
 def test_settings_screen_reports_invalid_value_and_keeps_previous(
     make_app, recording_console, monkeypatch
 ):
-    keys = iter([keyboard.DOWN] + [keyboard.BACKSPACE] * 3 + ["9", "9", "9", keyboard.ESC])
+    keys = iter([keyboard.DOWN] + [keyboard.BACKSPACE] * 3 + ["9", "9", "9", "9", keyboard.ESC])
     monkeypatch.setattr(keyboard, "read_key", lambda: next(keys))
     monkeypatch.setattr(keyboard, "raw_mode", _noop_context)
 
