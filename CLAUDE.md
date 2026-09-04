@@ -190,16 +190,16 @@ Deliberate decisions baked in:
 **`/models` (`ui/models_screen.py` + `core/config.py`):** model selection, one decision per
 session. Deliberate decisions baked in:
 - `config.AVAILABLE_MODELS` is the fixed list (`deepseek-v4-flash`, `deepseek-v4-pro`,
-  `kimi-k2.5`, `glm-5.1`, `mimo-v2.5-free`, `minimax-m2.5`, `kimi-k3`) and `DEFAULT_MODEL` is its
+  `kimi-k2.5`, `glm-5.1`, `mimo-v2.5-free`, `kimi-k2.6`, `kimi-k3`) and `DEFAULT_MODEL` is its
   first element; the old `MODEL_NAME` constant no longer exists. The panel and the client only
-  read the list from here. `minimax-m2.5` and `kimi-k3` were added specifically to give a clear
+  read the list from here. `kimi-k2.6` and `kimi-k3` were added specifically to give a clear
   weak/medium/strong price tier alongside `deepseek-v4-flash` for the day-5 challenge comparison
   (time/tokens/cost across model strength) — not required by any other feature.
 - `config.MODEL_PRICING` maps every model in `AVAILABLE_MODELS` to a `(input_price, output_price)`
   pair in USD per 1M tokens, used by `core.usage.estimate_cost()` to price a request. Where
   OpenCode Zen has peak/off-peak pricing (DeepSeek V4 Flash/Pro), the table stores the lower
   off-peak number — comparative, not accounting-grade precision (see
-  `openspec/changes/add-model-usage-metadata/design.md`, since archived, for the full rationale).
+  `openspec/changes/archive/2026-09-04-add-model-usage-metadata/design.md` for the full rationale).
 - The selected model lives on `TabletopAITUI.model` — session-only, like `AnswerSettings` (no
   persistence between restarts is deliberate, same backlog logic). Every request passes it as
   `client.ask_with_usage(..., model=...)`; `/logictask` follows the selection too, so one session =

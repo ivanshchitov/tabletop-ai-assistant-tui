@@ -98,7 +98,7 @@ def test_available_models_is_the_fixed_list():
         "kimi-k2.5",
         "glm-5.1",
         "mimo-v2.5-free",
-        "minimax-m2.5",
+        "kimi-k2.6",
         "kimi-k3",
     ]
 
