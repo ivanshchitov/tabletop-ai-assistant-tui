@@ -7,7 +7,7 @@ from ui.commands_screen import CommandsScreenState, initial_state, apply_key
 
 def test_panel_lists_all_commands_with_descriptions():
     commands = [command for command, _ in commands_screen.COMMAND_OPTIONS]
-    assert commands == ["/exit", "/commands", "/settings", "/clear", "/logictask"]
+    assert commands == ["/exit", "/commands", "/settings", "/models", "/clear", "/logictask"]
     for command, description in commands_screen.COMMAND_OPTIONS:
         assert command.startswith("/")
         assert description
