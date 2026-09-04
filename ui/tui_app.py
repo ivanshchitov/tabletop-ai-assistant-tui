@@ -324,13 +324,13 @@ class TabletopAITUI:
         self.last_error = None
         assert self.client is not None
 
-        def _call(system: str, user: str):
+        def _call(system: str, user: str) -> Optional[AnswerMeta]:
             # Потолок токенов фиксируется от объёма по умолчанию: настройки ответа сессии
             # (формат, объём, лимит списка) к прогонам /logictask не применяются.
             max_tokens = config.max_tokens_for_words(config.DEFAULT_MAX_WORDS)
             with self.console.status("[bold yellow]● Отправка...[/bold yellow]", spinner="dots"):
                 try:
-                    return self.client.ask(system, user, max_tokens=max_tokens, model=self.model)
+                    return self.client.ask_with_usage(system, user, max_tokens=max_tokens, model=self.model)
                 except APIError as exc:
                     self.last_error = str(exc)
                     self.console.print(f"[bold red]{exc}[/bold red]")
@@ -339,32 +339,37 @@ class TabletopAITUI:
 
         self.console.print(f"[bold cyan]Стратегия {number}: {title}[/bold cyan]")
         if number == 1:
-            answer = _call(*logictask.build_direct_prompts())
-            if answer is None:
+            meta = _call(*logictask.build_direct_prompts())
+            if meta is None:
                 return
-            self._print_typing(answer)
+            self._print_typing(meta.content)
+            self._print_usage_meta(meta)
         elif number == 2:
-            answer = _call(*logictask.build_stepwise_prompts())
-            if answer is None:
+            meta = _call(*logictask.build_stepwise_prompts())
+            if meta is None:
                 return
-            self._print_typing(answer)
+            self._print_typing(meta.content)
+            self._print_usage_meta(meta)
         elif number == 3:
-            composed = _call(*logictask.build_prompt_compose_prompts())
-            if composed is None:
+            composed_meta = _call(*logictask.build_prompt_compose_prompts())
+            if composed_meta is None:
                 return
             self.console.print("[dim]Составленный моделью промпт:[/dim]")
-            self._print_typing(composed)
-            answer = _call(*logictask.build_solve_with_prompt_prompts(composed))
-            if answer is None:
+            self._print_typing(composed_meta.content)
+            self._print_usage_meta(composed_meta)
+            meta = _call(*logictask.build_solve_with_prompt_prompts(composed_meta.content))
+            if meta is None:
                 return
-            self._print_typing(answer)
+            self._print_typing(meta.content)
+            self._print_usage_meta(meta)
         else:
             for role in logictask.EXPERT_ROLES:
-                expert_answer = _call(*logictask.build_expert_prompts(role))
-                if expert_answer is None:
+                expert_meta = _call(*logictask.build_expert_prompts(role))
+                if expert_meta is None:
                     return
                 self.console.print(f"[dim]{role}[/dim]")
-                self._print_typing(expert_answer)
+                self._print_typing(expert_meta.content)
+                self._print_usage_meta(expert_meta)
         self.console.rule(style="dim")
 
     def _open_settings_screen(self) -> None:

@@ -57,6 +57,7 @@ def test_chosen_direct_strategy_makes_single_request(app, stub, history_file):
 
     session.wait_for("Стратегия 1: Прямой ответ")
     session.wait_for("Прямой ответ stub-модели.")
+    session.wait_for("Токены: 50+100=150")
     session.wait_for_prompt()
     session.send_line("/exit")
     session.wait_exit()
@@ -66,6 +67,7 @@ def test_chosen_direct_strategy_makes_single_request(app, stub, history_file):
     assert "только ответ" in stub.user_messages()[0]
     assert stub.system_messages()[0] == logictask.DIRECT_SYSTEM_MESSAGE
     assert json.loads(history_file.read_text(encoding="utf-8")) == []
+    assert session.scrollback().count("Токены: 50+100=150") == 1
 
 
 def test_chosen_strategy3_runs_both_steps(app, stub):
@@ -89,6 +91,7 @@ def test_chosen_strategy3_runs_both_steps(app, stub):
     assert stub.call_count == 2
     assert stub.system_messages()[1] == "СОСТАВЛЕННЫЙ ПРОМПТ STUB"
     assert stub.user_messages()[1] == logictask.LOGIC_TASK
+    assert session.scrollback().count("Токены: 50+100=150") == 2
 
 
 def test_chosen_strategy4_runs_three_experts(app, stub):
@@ -116,3 +119,4 @@ def test_chosen_strategy4_runs_three_experts(app, stub):
     assert stub.system_messages() == list(logictask.EXPERT_ROLES)
     for user in stub.user_messages():
         assert user == logictask.LOGIC_TASK
+    assert session.scrollback().count("Токены: 50+100=150") == 3
