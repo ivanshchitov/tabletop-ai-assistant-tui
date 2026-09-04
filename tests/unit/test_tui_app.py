@@ -618,7 +618,7 @@ def test_commands_panel_enter_runs_selected_clear(
 ):
     """Выбор /clear в панели выполняет команду: история очищена, сообщение напечатано."""
     client = FakeClient()
-    keys = iter([keyboard.DOWN, keyboard.DOWN, keyboard.DOWN, keyboard.ENTER])  # /clear
+    keys = iter([keyboard.DOWN, keyboard.DOWN, keyboard.DOWN, keyboard.DOWN, keyboard.ENTER])  # /clear
     monkeypatch.setattr(keyboard, "read_key", lambda: next(keys))
     monkeypatch.setattr(keyboard, "raw_mode", _noop_context)
 
