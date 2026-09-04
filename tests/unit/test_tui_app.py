@@ -9,7 +9,7 @@ import pytest
 
 from core import config
 from core.answer_settings import AnswerFormat, AnswerSettings
-from core.api_client import APIError
+from core.api_client import AnswerMeta, APIError
 from core.history_manager import HistoryManager
 from ui import keyboard, settings_screen, tui_app
 from ui.tui_app import TabletopAITUI
@@ -47,6 +47,25 @@ class FakeClient:
         if self.error is not None:
             raise self.error
         return self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
+
+    def ask_with_usage(
+        self,
+        system_message: str,
+        user_message: str,
+        max_tokens: int = 0,
+        temperature: Optional[float] = None,
+        model: Optional[str] = None,
+    ) -> AnswerMeta:
+        content = self.ask(system_message, user_message, max_tokens, temperature, model)
+        return AnswerMeta(
+            content=content,
+            model=model or config.DEFAULT_MODEL,
+            elapsed_seconds=0.01,
+            prompt_tokens=10,
+            completion_tokens=20,
+            total_tokens=30,
+            cost_usd=0.0001,
+        )
 
 
 @contextlib.contextmanager

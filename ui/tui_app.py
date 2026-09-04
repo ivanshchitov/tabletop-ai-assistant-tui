@@ -19,6 +19,7 @@ from core import config, logictask, prompts
 from core.answer_settings import AnswerFormat, AnswerSettings
 from core.api_client import (
     API_KEY_CHARSET_ERROR,
+    AnswerMeta,
     APIClient,
     APIError,
     is_valid_api_key,
@@ -441,7 +442,7 @@ class TabletopAITUI:
         user_prompt = prompts.build_user_prompt(question, self.settings)
         with self.console.status("[bold yellow]● Отправка...[/bold yellow]", spinner="dots"):
             try:
-                answer = self.client.ask(
+                meta = self.client.ask_with_usage(
                     prompts.build_system_message(self.settings.format),
                     user_prompt,
                     max_tokens=config.max_tokens_for_words(self.settings.max_words),
@@ -455,13 +456,23 @@ class TabletopAITUI:
                 self.console.rule(style="dim")
                 return
 
+        answer = meta.content
         self.console.print("[bold magenta]Tabletop AI Assistant:[/bold magenta]")
         self._print_typing(answer)
         if self.settings.format == AnswerFormat.JSON and not is_valid_json_answer(answer):
             self.console.print("[bold yellow]⚠ Модель не вернула валидный JSON.[/bold yellow]")
+        self._print_usage_meta(meta)
         self.console.rule(style="dim")
         self.history.add(question, answer)
         self.session_count += 1
+
+    def _print_usage_meta(self, meta: AnswerMeta) -> None:
+        cost = f"${meta.cost_usd:.6f}" if meta.cost_usd is not None else "неизвестно"
+        self.console.print(
+            f"[dim]⏱ {meta.elapsed_seconds:.2f}с  |  "
+            f"Токены: {meta.prompt_tokens}+{meta.completion_tokens}={meta.total_tokens}  |  "
+            f"Стоимость: {cost}[/dim]"
+        )
 
     def _print_typing(self, answer: str) -> None:
         with Live(console=self.console, refresh_per_second=30) as live:
