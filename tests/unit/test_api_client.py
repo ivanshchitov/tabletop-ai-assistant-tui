@@ -40,13 +40,21 @@ def test_request_payload_carries_messages_and_settings(client):
     client.ask("СИСТЕМА", "ВОПРОС", max_tokens=777)
 
     payload = json.loads(responses.calls[0].request.body)
-    assert payload["model"] == config.MODEL_NAME
+    assert payload["model"] == config.DEFAULT_MODEL
     assert payload["temperature"] == config.TEMPERATURE
     assert payload["max_tokens"] == 777
     assert payload["messages"] == [
         {"role": "system", "content": "СИСТЕМА"},
         {"role": "user", "content": "ВОПРОС"},
     ]
+
+
+@responses.activate
+def test_model_parameter_reaches_payload(client):
+    responses.add(responses.POST, config.API_URL, json=_completion("ok"), status=200)
+    client.ask("system", "user", model="kimi-k2.5")
+    payload = json.loads(responses.calls[0].request.body)
+    assert payload["model"] == "kimi-k2.5"
 
 
 @responses.activate

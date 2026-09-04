@@ -88,7 +88,21 @@ def test_base_dir_points_at_repository_root():
 
 
 def test_model_name_is_the_reasoning_model():
-    assert config.MODEL_NAME == "deepseek-v4-flash"
+    assert config.DEFAULT_MODEL == "deepseek-v4-flash"
+
+
+def test_available_models_is_the_fixed_list():
+    assert config.AVAILABLE_MODELS == [
+        "deepseek-v4-flash",
+        "deepseek-v4-pro",
+        "kimi-k2.5",
+        "glm-5.1",
+        "mimo-v2.5-free",
+    ]
+
+
+def test_default_model_is_first_available():
+    assert config.DEFAULT_MODEL == config.AVAILABLE_MODELS[0]
 
 
 @pytest.mark.parametrize("attr", ["REQUEST_TIMEOUT", "MAX_RETRIES", "HISTORY_LIMIT", "MAX_INPUT_LENGTH"])

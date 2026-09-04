@@ -17,7 +17,16 @@ load_dotenv(dotenv_path=ENV_PATH)
 # локальный stub-сервер вместо обращения к реальному OpenCode Zen.
 DEFAULT_API_URL = "https://opencode.ai/zen/v1/chat/completions"
 API_URL = os.getenv("OPENCODE_API_URL", DEFAULT_API_URL)
-MODEL_NAME = "deepseek-v4-flash"
+# Список моделей, которые пользователь может выбрать через /models; первая — модель
+# по умолчанию. Панель и клиент читают отсюда, имена моделей не зашиваются нигде больше.
+AVAILABLE_MODELS = [
+    "deepseek-v4-flash",
+    "deepseek-v4-pro",
+    "kimi-k2.5",
+    "glm-5.1",
+    "mimo-v2.5-free",
+]
+DEFAULT_MODEL = AVAILABLE_MODELS[0]
 TEMPERATURE = 0.7
 MIN_TEMPERATURE = 0.0
 MAX_TEMPERATURE = 2.0

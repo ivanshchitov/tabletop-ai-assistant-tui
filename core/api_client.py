@@ -53,12 +53,13 @@ class DeepseekAPIClient:
         user_message: str,
         max_tokens: int = config.max_tokens_for_words(config.DEFAULT_MAX_WORDS),
         temperature: float = config.TEMPERATURE,
+        model: str = config.DEFAULT_MODEL,
     ) -> str:
         if not is_valid_api_key(self.api_key):
             raise DeepseekAPIError(API_KEY_CHARSET_ERROR)
 
         payload = {
-            "model": config.MODEL_NAME,
+            "model": model,
             "messages": [
                 {"role": "system", "content": system_message},
                 {"role": "user", "content": user_message},
