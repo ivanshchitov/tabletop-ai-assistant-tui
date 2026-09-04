@@ -203,7 +203,7 @@ def test_server_error_is_survivable(app, stub):
     """Ошибка не роняет сессию: следующий вопрос проходит, в историю попал только успешный."""
     stub.sequence(failure(500), answer("А вот теперь всё хорошо."))
     with app() as session:
-        session.ask("Первый вопрос", "Ошибка Deepseek API")
+        session.ask("Первый вопрос", "Ошибка API")
         session.wait_for("Попробуйте повторить запрос")
         session.ask("Второй вопрос", "А вот теперь всё хорошо")
         session.wait_for("Диалогов за сессию: 1")
@@ -218,7 +218,7 @@ def test_bad_key_is_reported(app, stub):
 def test_malformed_response_is_reported(app, stub):
     stub.always(malformed())
     with app() as session:
-        session.ask("Вопрос", "Некорректный ответ от Deepseek API")
+        session.ask("Вопрос", "Некорректный ответ от API")
 
 
 def test_timeout_is_retried_transparently(app, stub):
@@ -233,7 +233,7 @@ def test_timeout_is_retried_transparently(app, stub):
 def test_failed_exchange_is_not_saved(app, stub, history_file):
     stub.always(failure(500))
     with app() as session:
-        session.ask("Вопрос без ответа", "Ошибка Deepseek API")
+        session.ask("Вопрос без ответа", "Ошибка API")
         session.send_line("/exit")
         session.wait_exit()
 

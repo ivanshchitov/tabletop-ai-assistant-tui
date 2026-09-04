@@ -46,7 +46,7 @@ core/                      # Настройки, промпты, API-клиен�
   answer_settings.py         # AnswerFormat, AnswerSettings — настройки формата/объёма/лимита списка/температуры
   prompts.py                  # Сборка системного и user-промпта из assets/
   logictask.py                 # Фиксированная задача и промпты четырёх стратегий /logictask
-  api_client.py                # DeepseekAPIClient — запросы к API, retry с backoff
+  api_client.py                # APIClient — запросы к API, retry с backoff
   history_manager.py           # Сохранение/загрузка истории (history.json)
 ui/                         # Терминальный интерфейс
   tui_app.py                  # Основной класс TabletopAITUI: rich-интерфейс, /commands, /settings, /logictask

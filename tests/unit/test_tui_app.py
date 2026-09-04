@@ -9,7 +9,7 @@ import pytest
 
 from core import config
 from core.answer_settings import AnswerFormat, AnswerSettings
-from core.api_client import DeepseekAPIError
+from core.api_client import APIError
 from core.history_manager import HistoryManager
 from ui import keyboard, settings_screen, tui_app
 from ui.tui_app import TabletopAITUI
@@ -243,11 +243,11 @@ def test_system_message_matches_active_format(make_app):
 
 
 def test_api_error_is_reported_and_not_persisted(make_app, recording_console, history):
-    client = FakeClient(error=DeepseekAPIError("Неверный API-ключ Deepseek."))
+    client = FakeClient(error=APIError("Неверный API-ключ."))
     app = make_app(["Вопрос", "/exit"], client)
     app.run()
 
-    assert recording_console.contains("Неверный API-ключ Deepseek.")
+    assert recording_console.contains("Неверный API-ключ.")
     assert recording_console.contains("Попробуйте повторить запрос.")
     assert history.dialogues == []
     assert app.session_count == 0
@@ -258,7 +258,7 @@ def test_app_survives_an_error_and_answers_the_next_question(make_app, recording
         def ask(self, system_message, user_message, max_tokens=0, temperature=None, model=None):
             self.calls.append({"user": user_message})
             if len(self.calls) == 1:
-                raise DeepseekAPIError("Ошибка соединения с Deepseek API.")
+                raise APIError("Ошибка соединения с API.")
             return "Второй ответ"
 
     app = make_app(["Первый вопрос", "Второй вопрос", "/exit"], FlakyClient())
@@ -593,7 +593,7 @@ def test_logictask_error_stops_step_but_session_continues(
         def ask(self, system_message, user_message, max_tokens=0, temperature=None, model=None):
             self.calls.append({"system": system_message, "user": user_message})
             if len(self.calls) == 2:
-                raise DeepseekAPIError("Тестовая ошибка API.")
+                raise APIError("Тестовая ошибка API.")
             return "СОСТАВЛЕННЫЙ ПРОМПТ"
 
     client = TwoStepClient()

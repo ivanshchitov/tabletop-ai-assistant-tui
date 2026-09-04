@@ -1,4 +1,4 @@
-"""Клиент Deepseek API: разбор ответов, ошибки, ретраи, состав запроса."""
+"""Клиент API: разбор ответов, ошибки, ретраи, состав запроса."""
 
 import json
 
@@ -9,16 +9,16 @@ import responses
 from core import config
 from core.api_client import (
     API_KEY_CHARSET_ERROR,
-    DeepseekAPIClient,
-    DeepseekAPIError,
+    APIClient,
+    APIError,
     is_valid_api_key,
     is_valid_json_answer,
 )
 
 
 @pytest.fixture
-def client() -> DeepseekAPIClient:
-    return DeepseekAPIClient("sk-test")
+def client() -> APIClient:
+    return APIClient("sk-test")
 
 
 def _completion(content: str) -> dict:
@@ -102,14 +102,14 @@ def test_default_max_tokens_matches_default_word_limit(client):
 @responses.activate
 def test_unauthorized_reports_bad_key(client):
     responses.add(responses.POST, config.API_URL, json={"error": "nope"}, status=401)
-    with pytest.raises(DeepseekAPIError, match="Неверный API-ключ"):
+    with pytest.raises(APIError, match="Неверный API-ключ"):
         client.ask("system", "user")
 
 
 @responses.activate
 def test_server_error_is_wrapped(client):
     responses.add(responses.POST, config.API_URL, json={"error": "boom"}, status=500)
-    with pytest.raises(DeepseekAPIError, match="Ошибка Deepseek API"):
+    with pytest.raises(APIError, match="Ошибка API"):
         client.ask("system", "user")
 
 
@@ -120,14 +120,14 @@ def test_server_error_is_wrapped(client):
 )
 def test_malformed_success_payload_is_wrapped(client, payload):
     responses.add(responses.POST, config.API_URL, json=payload, status=200)
-    with pytest.raises(DeepseekAPIError, match="Некорректный ответ"):
+    with pytest.raises(APIError, match="Некорректный ответ"):
         client.ask("system", "user")
 
 
 @responses.activate
 def test_non_json_body_is_wrapped(client):
     responses.add(responses.POST, config.API_URL, body="<html>502</html>", status=200)
-    with pytest.raises(DeepseekAPIError, match="Некорректный ответ"):
+    with pytest.raises(APIError, match="Некорректный ответ"):
         client.ask("system", "user")
 
 
@@ -135,7 +135,7 @@ def test_non_json_body_is_wrapped(client):
 def test_connection_error_is_not_retried(client, no_sleep):
     """Проблема с сетью считается устойчивой — повтор бессмысленен, в отличие от таймаута."""
     responses.add(responses.POST, config.API_URL, body=requests.exceptions.ConnectionError())
-    with pytest.raises(DeepseekAPIError, match="Ошибка соединения"):
+    with pytest.raises(APIError, match="Ошибка соединения"):
         client.ask("system", "user")
     assert len(responses.calls) == 1
     assert no_sleep == []
@@ -159,7 +159,7 @@ def test_timeout_gives_up_after_max_retries(client, no_sleep):
     for _ in range(config.MAX_RETRIES):
         responses.add(responses.POST, config.API_URL, body=requests.exceptions.Timeout())
 
-    with pytest.raises(DeepseekAPIError, match="Превышено время ожидания"):
+    with pytest.raises(APIError, match="Превышено время ожидания"):
         client.ask("system", "user")
     assert len(responses.calls) == config.MAX_RETRIES
 
@@ -169,7 +169,7 @@ def test_backoff_is_exponential(client, no_sleep):
     for _ in range(config.MAX_RETRIES):
         responses.add(responses.POST, config.API_URL, body=requests.exceptions.Timeout())
 
-    with pytest.raises(DeepseekAPIError):
+    with pytest.raises(APIError):
         client.ask("system", "user")
     # Пауза перед каждой повторной попыткой, но не после последней.
     assert no_sleep == [2**i for i in range(config.MAX_RETRIES - 1)]
@@ -179,7 +179,7 @@ def test_backoff_is_exponential(client, no_sleep):
 def test_http_error_is_not_retried(client, no_sleep):
     """Ретраятся только таймауты: 500 отдаётся пользователю сразу."""
     responses.add(responses.POST, config.API_URL, json={}, status=500)
-    with pytest.raises(DeepseekAPIError):
+    with pytest.raises(APIError):
         client.ask("system", "user")
     assert len(responses.calls) == 1
 
@@ -214,24 +214,24 @@ def test_non_ascii_or_empty_keys_are_rejected(key):
 def test_non_ascii_key_fails_with_a_readable_message():
     """Раньше здесь вылетал UnicodeEncodeError из недр requests — падение с traceback."""
     responses.add(responses.POST, config.API_URL, json=_completion("ok"), status=200)
-    with pytest.raises(DeepseekAPIError, match="проверьте раскладку клавиатуры"):
-        DeepseekAPIClient("sk-ключ-в-кириллице").ask("system", "user")
+    with pytest.raises(APIError, match="проверьте раскладку клавиатуры"):
+        APIClient("sk-ключ-в-кириллице").ask("system", "user")
 
 
 @responses.activate
 def test_bad_key_is_rejected_before_any_request():
     """Заведомо непригодный ключ не должен приводить к обращению к API."""
     responses.add(responses.POST, config.API_URL, json=_completion("ok"), status=200)
-    with pytest.raises(DeepseekAPIError):
-        DeepseekAPIClient("sk-кириллица").ask("system", "user")
+    with pytest.raises(APIError):
+        APIClient("sk-кириллица").ask("system", "user")
     assert len(responses.calls) == 0
 
 
 @responses.activate
 def test_empty_key_is_reported_too():
     responses.add(responses.POST, config.API_URL, json=_completion("ok"), status=200)
-    with pytest.raises(DeepseekAPIError, match=API_KEY_CHARSET_ERROR[:20]):
-        DeepseekAPIClient("").ask("system", "user")
+    with pytest.raises(APIError, match=API_KEY_CHARSET_ERROR[:20]):
+        APIClient("").ask("system", "user")
 
 
 # --- проверка JSON-ответа ---------------------------------------------------------------

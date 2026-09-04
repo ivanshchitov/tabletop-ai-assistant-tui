@@ -118,12 +118,12 @@ def test_record_cassettes(request, fmt):
     if not request.config.getoption("--record-cassettes"):
         pytest.skip("запись кассет включается флагом --record-cassettes")
 
-    from core.api_client import DeepseekAPIClient
+    from core.api_client import APIClient
 
     api_key = config.get_api_key()
     assert api_key, "Нужен настоящий OPENCODE_API_KEY в окружении или .env"
 
-    client = DeepseekAPIClient(api_key)
+    client = APIClient(api_key)
     settings = AnswerSettings().with_format(fmt)
     recorded = {}
     for key, question in cassettes.RECORDED_QUESTIONS.items():

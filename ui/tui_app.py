@@ -19,8 +19,8 @@ from core import config, logictask, prompts
 from core.answer_settings import AnswerFormat, AnswerSettings
 from core.api_client import (
     API_KEY_CHARSET_ERROR,
-    DeepseekAPIClient,
-    DeepseekAPIError,
+    APIClient,
+    APIError,
     is_valid_api_key,
     is_valid_json_answer,
 )
@@ -58,7 +58,7 @@ class TabletopAITUI:
         self,
         console: Optional[Console] = None,
         history: Optional[HistoryManager] = None,
-        client: Optional[DeepseekAPIClient] = None,
+        client: Optional[APIClient] = None,
     ) -> None:
         """Зависимости необязательны: по умолчанию — реальные консоль, история и клиент.
 
@@ -69,7 +69,7 @@ class TabletopAITUI:
         self.console = console if console is not None else Console()
         self.history = history if history is not None else HistoryManager()
         self.session_count = 0
-        self.client: Optional[DeepseekAPIClient] = client
+        self.client: Optional[APIClient] = client
         self.last_error: Optional[str] = None
         self.settings = AnswerSettings()
         self.model = config.DEFAULT_MODEL
@@ -102,7 +102,7 @@ class TabletopAITUI:
                 self.console.print()
                 self.console.print(f"[bold yellow]{EXIT_BEFORE_START_MESSAGE}[/bold yellow]")
                 return
-            self.client = DeepseekAPIClient(api_key)
+            self.client = APIClient(api_key)
 
         self.console.print(Panel(APP_TITLE, style="bold cyan"))
         if self.history.dialogues:
@@ -330,7 +330,7 @@ class TabletopAITUI:
             with self.console.status("[bold yellow]● Отправка...[/bold yellow]", spinner="dots"):
                 try:
                     return self.client.ask(system, user, max_tokens=max_tokens, model=self.model)
-                except DeepseekAPIError as exc:
+                except APIError as exc:
                     self.last_error = str(exc)
                     self.console.print(f"[bold red]{exc}[/bold red]")
                     self.console.print("[bold red]Попробуйте повторить запрос.[/bold red]")
@@ -448,7 +448,7 @@ class TabletopAITUI:
                     temperature=self.settings.temperature,
                     model=self.model,
                 )
-            except DeepseekAPIError as exc:
+            except APIError as exc:
                 self.last_error = str(exc)
                 self.console.print(f"[bold red]{exc}[/bold red]")
                 self.console.print("[bold red]Попробуйте повторить запрос.[/bold red]")

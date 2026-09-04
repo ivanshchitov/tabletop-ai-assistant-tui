@@ -1,4 +1,4 @@
-"""Клиент для обращения к Deepseek Chat Completions API."""
+"""Клиент для обращения к Chat Completions API."""
 
 import json
 import re
@@ -39,11 +39,11 @@ API_KEY_CHARSET_ERROR = (
 )
 
 
-class DeepseekAPIError(Exception):
-    """Ошибка при обращении к Deepseek API."""
+class APIError(Exception):
+    """Ошибка при обращении к API."""
 
 
-class DeepseekAPIClient:
+class APIClient:
     def __init__(self, api_key: str):
         self.api_key = api_key
 
@@ -56,7 +56,7 @@ class DeepseekAPIClient:
         model: str = config.DEFAULT_MODEL,
     ) -> str:
         if not is_valid_api_key(self.api_key):
-            raise DeepseekAPIError(API_KEY_CHARSET_ERROR)
+            raise APIError(API_KEY_CHARSET_ERROR)
 
         payload = {
             "model": model,
@@ -84,25 +84,25 @@ class DeepseekAPIClient:
                 if attempt < config.MAX_RETRIES - 1:
                     time.sleep(2**attempt)
                     continue
-                raise DeepseekAPIError(
-                    "Превышено время ожидания ответа от Deepseek API."
+                raise APIError(
+                    "Превышено время ожидания ответа от API."
                 ) from last_timeout
             except requests.exceptions.ConnectionError as exc:
-                raise DeepseekAPIError(
-                    "Ошибка соединения с Deepseek API. Проверьте интернет-соединение."
+                raise APIError(
+                    "Ошибка соединения с API. Проверьте интернет-соединение."
                 ) from exc
 
             if response.status_code == 401:
-                raise DeepseekAPIError("Неверный API-ключ Deepseek.")
+                raise APIError("Неверный API-ключ.")
             try:
                 response.raise_for_status()
             except requests.exceptions.HTTPError as exc:
-                raise DeepseekAPIError(f"Ошибка Deepseek API: {exc}") from exc
+                raise APIError(f"Ошибка API: {exc}") from exc
 
             try:
                 data = response.json()
                 return data["choices"][0]["message"]["content"].strip()
             except (ValueError, KeyError, IndexError) as exc:
-                raise DeepseekAPIError("Некорректный ответ от Deepseek API.") from exc
+                raise APIError("Некорректный ответ от API.") from exc
 
-        raise DeepseekAPIError("Превышено время ожидания ответа от Deepseek API.")
+        raise APIError("Превышено время ожидания ответа от API.")
