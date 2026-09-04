@@ -52,7 +52,11 @@ asked.
   waits for the panel hint ("Enter — решить") to appear on screen *before* sending arrows/Enter,
   and after Esc waits for the panel title to disappear (`wait_until_gone`) before touching the
   prompt again. `wait_for_prompt()` alone is a false positive there: the prompt is already in
-  scrollback from before the panel opened.
+  scrollback from before the panel opened. Same pattern in `tests/e2e/test_commands_flow.py`
+  (hint "Enter — выполнить"). Additionally: a byte sent immediately after a raw-mode screen
+  closes can vanish on the switch back to canonical mode (first byte eaten, e.g. `/exit`
+  arriving as `exit`) — either wait for the command's *effect* before the next send, or sleep
+  briefly after `wait_until_gone` on the panel.
 
 ## Change workflow (OpenSpec)
 
@@ -101,8 +105,8 @@ OpenCode the same six commands are spelled with a dash (`/opsx-propose`, `/opsx-
 ## Architecture
 
 Two packages: `core/` (settings, prompts, API client, history, logictask prompt builders — no
-`rich`/terminal dependency) and `ui/` (`tui_app.py`, `keyboard.py`, `settings_screen.py`,
-`logictask_screen.py` — everything that touches the terminal). Modules inside `core/`
+`rich`/terminal dependency) and `ui/` (`tui_app.py`, `keyboard.py`, `commands_screen.py`,
+`settings_screen.py`, `logictask_screen.py` — everything that touches the terminal). Modules inside `core/`
 import each other with relative imports (`from . import config`, `from .answer_settings import
 AnswerFormat`); `ui/` imports from `core` with absolute imports (`from core import config,
 prompts`) since they're sibling packages, and imports its own sibling module with a relative
@@ -161,6 +165,25 @@ panel (↑/↓ move, Enter runs, Esc cancels with zero API calls). Deliberate de
   the transient `Live` panel opens — a non-terminal `Live` (as in unit tests) renders nothing, so
   anything asserted on in unit tests must go through the permanent prints.
 
+**`/commands` (`ui/commands_screen.py`):** an interactive panel listing every command with a short
+description (↑/↓ move, Enter runs the selected command, Esc cancels with zero API calls).
+Deliberate decisions baked in:
+- Enter **executes** the selected command directly through the same dispatcher `_handle_command`
+  that serves manual input — it deliberately does NOT prefill the readline input buffer. The
+  insert-into-buffer approach was tried first and failed on libedit (`/usr/bin/python3` on macOS):
+  libedit silently ignores both `rl_startup_hook` and `insert_text`, so nothing happened for the
+  user. Direct execution behaves identically on GNU readline, libedit, and no-readline builds —
+  don't reintroduce readline-based prefill for interactive flows.
+- `COMMANDS` (autocomplete + dispatcher) is derived from `ui/commands_screen.COMMAND_OPTIONS`
+  (command + description pairs), so the panel and Tab-completion can't drift apart; add new
+  commands there, not in `tui_app`.
+- The status-bar hint uses a separate `STATUS_COMMANDS = ["/exit", "/commands"]` — the full list
+  intentionally lives only in the panel.
+- Selecting `/commands` inside the panel reopens it (a `while` loop in `_open_commands_screen`,
+  not recursion); `/exit` selection calls `_exit()` and sets `self._exit_requested`, which the
+  main loop checks after `_handle_command` returns — that's how the loop stops without an
+  exception.
+
 **Prompt assembly (`core/prompts.py` + `assets/*.md`):**
 - `assets/system_prompt.md` is the base system prompt; `assets/answer_format_compact.md` and
   `assets/answer_format_json.md` are per-format instructions appended to it. `AnswerFormat.FREE`
@@ -185,7 +208,7 @@ panel (↑/↓ move, Enter runs, Esc cancels with zero API calls). Deliberate de
   `content` empty. Any length/stop behavior has to be a prompt instruction plus client-side
   handling, never the API's `stop` field.
 
-**`ui/keyboard.py` (raw terminal input for the `/settings` screen)** — two non-obvious constraints,
+**`ui/keyboard.py` (raw terminal input for the interactive panels: `/commands`, `/settings`, `/logictask`)** — two non-obvious constraints,
 both found by testing against a real PTY rather than mocks:
 - Read raw bytes with `os.read(fd, 1)`, not `sys.stdin.read(1)`. The buffered `TextIOWrapper` can
   pull multiple bytes of an escape sequence (e.g. arrow key `ESC [ A`) into its own internal buffer
@@ -224,8 +247,8 @@ the log if non-empty; every successful exchange is appended and immediately re-s
 
 ## Test layout
 
-- `tests/unit/` — no subprocesses, ~1s for the whole layer. `core/` logic, the `/settings` and
-  `/logictask` reducers, and `TabletopAITUI` driven through injected dependencies:
+- `tests/unit/` — no subprocesses, ~1s for the whole layer. `core/` logic, the `/commands`,
+  `/settings` and `/logictask` reducers, and `TabletopAITUI` driven through injected dependencies:
   `TabletopAITUI(console=, history=, client=)` takes a `rich` console writing to a buffer, a
   `HistoryManager` on `tmp_path`, and a fake client that records what was asked. Passing a client
   also skips the API-key prompt at startup.
