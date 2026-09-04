@@ -253,6 +253,17 @@ session. Deliberate decisions baked in:
   (10 words). This is a client-side mitigation, not a fix — the underlying model behavior (spending
   unbounded reasoning tokens on some prompts) is unchanged, so an even harder question can still
   return empty for these models; there is no client-side signal to detect or retry on that case.
+- **`config.REQUEST_TIMEOUT` is 90s, not 30s**, for the same reason as the word ceiling above:
+  generating thousands of reasoning tokens takes real wall-clock time. Measured directly against
+  the API, `kimi-k2.6` generated at roughly 57 tokens/sec on a demanding prompt (26.3s for 1500
+  tokens), so the ~4050-token budget from the raised `MAX_MAX_WORDS` needs on the order of 70s —
+  well past the old 30s default, which cut the request off with a timeout *before* the model could
+  finish, even though it wasn't stuck. Retrying doesn't help here: every attempt gets the same
+  `REQUEST_TIMEOUT`, so a response that genuinely needs 70s times out on all `MAX_RETRIES` attempts
+  identically. Trade-off: a request that truly hangs (dead server, network partition) now takes
+  proportionally longer to surface as an error to the user (up to ~273s across 3 attempts instead
+  of ~93s) — accepted deliberately so slow-but-working reasoning responses aren't misreported as
+  failures.
 
 **`ui/keyboard.py` (raw terminal input for the interactive panels: `/commands`, `/settings`, `/logictask`, `/models`)** — two non-obvious constraints,
 both found by testing against a real PTY rather than mocks:
