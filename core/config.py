@@ -25,6 +25,8 @@ AVAILABLE_MODELS = [
     "kimi-k2.5",
     "glm-5.1",
     "mimo-v2.5-free",
+    "minimax-m2.5",
+    "kimi-k3",
 ]
 DEFAULT_MODEL = AVAILABLE_MODELS[0]
 TEMPERATURE = 0.7
