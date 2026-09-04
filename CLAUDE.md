@@ -4,8 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A console TUI (Python + `rich`) that answers board-game questions via `deepseek-v4-flash`, an
-OpenAI-compatible chat-completions model served at OpenCode Zen (`https://opencode.ai/zen/v1/chat/completions`).
+A console TUI (Python + `rich`) that answers board-game questions via a model picked with the
+`/models` command (default `deepseek-v4-flash`), an OpenAI-compatible chat-completions model
+served at OpenCode Zen (`https://opencode.ai/zen/v1/chat/completions`).
 Off-topic questions get a fixed refusal phrase instead of being answered.
 
 ## Commands
@@ -53,7 +54,8 @@ asked.
   and after Esc waits for the panel title to disappear (`wait_until_gone`) before touching the
   prompt again. `wait_for_prompt()` alone is a false positive there: the prompt is already in
   scrollback from before the panel opened. Same pattern in `tests/e2e/test_commands_flow.py`
-  (hint "Enter — выполнить"). Additionally: a byte sent immediately after a raw-mode screen
+  (hint "Enter — выполнить") and `tests/e2e/test_models_flow.py` (hint "Enter — применить").
+  Additionally: a byte sent immediately after a raw-mode screen
   closes can vanish on the switch back to canonical mode (first byte eaten, e.g. `/exit`
   arriving as `exit`) — either wait for the command's *effect* before the next send, or sleep
   briefly after `wait_until_gone` on the panel.
@@ -75,9 +77,10 @@ OpenCode the same six commands are spelled with a dash (`/opsx-propose`, `/opsx-
 - The delta spec is a *diff* against the main spec, not a copy of it. The main specs under
   `openspec/specs/` are only ever written by archive/sync, never edited by hand during a change.
 - `openspec/specs/` holds the master spec (archived from `add-master-spec`, reverse-engineered
-  from the existing code/tests) as nine capabilities, each the target for future `MODIFIED` deltas:
+  from the existing code/tests) as ten capabilities, each the target for future `MODIFIED` deltas:
   `question-answering`, `answer-settings`, `api-integration`, `history-persistence`,
-  `terminal-ui`, `settings-screen`, `configuration`, `test-infrastructure`, `prompt-strategies`.
+  `terminal-ui`, `settings-screen`, `configuration`, `test-infrastructure`, `prompt-strategies`,
+  `model-selection`.
   It records deliberate decisions worth knowing before touching related code: the JSON format's
   refusal reply is a machine-readable `{"error": ...}` object rather than the verbatim refusal
   phrase used by free/compact (not a bug to fix), and `AnswerSettings` is session-only by design —
@@ -106,7 +109,7 @@ OpenCode the same six commands are spelled with a dash (`/opsx-propose`, `/opsx-
 
 Two packages: `core/` (settings, prompts, API client, history, logictask prompt builders — no
 `rich`/terminal dependency) and `ui/` (`tui_app.py`, `keyboard.py`, `commands_screen.py`,
-`settings_screen.py`, `logictask_screen.py` — everything that touches the terminal). Modules inside `core/`
+`settings_screen.py`, `logictask_screen.py`, `models_screen.py` — everything that touches the terminal). Modules inside `core/`
 import each other with relative imports (`from . import config`, `from .answer_settings import
 AnswerFormat`); `ui/` imports from `core` with absolute imports (`from core import config,
 prompts`) since they're sibling packages, and imports its own sibling module with a relative
@@ -155,8 +158,8 @@ panel (↑/↓ move, Enter runs, Esc cancels with zero API calls). Deliberate de
   requested from the model; each gets a separate request with its role as the system message.
 - Strategy prompts are independent of `AnswerSettings`: no format/word-count/list-limit
   instructions, and `max_tokens` is pinned to the default (`config.max_tokens_for_words(config.DEFAULT_MAX_WORDS)`)
-  regardless of the session settings; `ask()` is called without `temperature`, so runs stay on
-  the client default even when the session temperature is changed.
+  regardless of the session settings; `ask()` is called without `temperature` (client default)
+  but carries the session model (`model=self.model`).
 - Results never touch `history.json` and don't increment the session dialogue counter.
 - An API error mid-run aborts the rest of the run but not the session.
 - The panel follows the `/settings` pattern: a pure reducer in `ui/logictask_screen.py`
@@ -184,6 +187,21 @@ Deliberate decisions baked in:
   main loop checks after `_handle_command` returns — that's how the loop stops without an
   exception.
 
+**`/models` (`ui/models_screen.py` + `core/config.py`):** model selection, one decision per
+session. Deliberate decisions baked in:
+- `config.AVAILABLE_MODELS` is the fixed list (`deepseek-v4-flash`, `deepseek-v4-pro`,
+  `kimi-k2.5`, `glm-5.1`, `mimo-v2.5-free`) and `DEFAULT_MODEL` is its first element; the old
+  `MODEL_NAME` constant no longer exists. The panel and the client only read the list from here.
+- The selected model lives on `TabletopAITUI.model` — session-only, like `AnswerSettings` (no
+  persistence between restarts is deliberate, same backlog logic). Every request passes it as
+  `client.ask(..., model=...)`; `/logictask` follows the selection too, so one session = one model.
+- The panel follows the same reducer pattern (`initial_state(current_model)` puts the cursor on
+  the active model); the active model is additionally marked "(текущая)" in the render, separate
+  from the cursor. Enter applies, Esc cancels with zero API calls.
+- No client-side model validation: the list is fixed so free-form input is impossible, and an
+  unknown model surfaces as a regular API error through the existing `APIError` path.
+- The status bar shows `Модель: <имя>` right after "Готов" — several e2e snapshots assert on it.
+
 **Prompt assembly (`core/prompts.py` + `assets/*.md`):**
 - `assets/system_prompt.md` is the base system prompt; `assets/answer_format_compact.md` and
   `assets/answer_format_json.md` are per-format instructions appended to it. `AnswerFormat.FREE`
@@ -208,7 +226,7 @@ Deliberate decisions baked in:
   `content` empty. Any length/stop behavior has to be a prompt instruction plus client-side
   handling, never the API's `stop` field.
 
-**`ui/keyboard.py` (raw terminal input for the interactive panels: `/commands`, `/settings`, `/logictask`)** — two non-obvious constraints,
+**`ui/keyboard.py` (raw terminal input for the interactive panels: `/commands`, `/settings`, `/logictask`, `/models`)** — two non-obvious constraints,
 both found by testing against a real PTY rather than mocks:
 - Read raw bytes with `os.read(fd, 1)`, not `sys.stdin.read(1)`. The buffered `TextIOWrapper` can
   pull multiple bytes of an escape sequence (e.g. arrow key `ESC [ A`) into its own internal buffer
@@ -232,7 +250,9 @@ Ctrl+C during the key prompt never reached `run()`'s handler (flaky in CI, invis
 because the timing usually lets the interrupt fire before readline is active).
 
 **`core/api_client.py`** — `ask()` first checks the key with `is_valid_api_key()` (non-empty and
-ASCII) and raises `DeepseekAPIError` before making any request. HTTP headers are latin-1 encoded,
+ASCII) and raises `APIError` before making any request. The model is a parameter
+(`ask(..., model=...)`, default `config.DEFAULT_MODEL`) — the client has no model names baked in.
+HTTP headers are latin-1 encoded,
 so a key typed in a Cyrillic keyboard layout used to blow up with `UnicodeEncodeError` from deep
 inside `requests` — a traceback instead of a message. `ui/tui_app.py`'s `_ensure_api_key()` runs the
 same check, including on the key that came from `.env`, so the problem surfaces at startup rather
@@ -248,7 +268,7 @@ the log if non-empty; every successful exchange is appended and immediately re-s
 ## Test layout
 
 - `tests/unit/` — no subprocesses, ~1s for the whole layer. `core/` logic, the `/commands`,
-  `/settings` and `/logictask` reducers, and `TabletopAITUI` driven through injected dependencies:
+  `/settings`, `/logictask` and `/models` reducers, and `TabletopAITUI` driven through injected dependencies:
   `TabletopAITUI(console=, history=, client=)` takes a `rich` console writing to a buffer, a
   `HistoryManager` on `tmp_path`, and a fake client that records what was asked. Passing a client
   also skips the API-key prompt at startup.
