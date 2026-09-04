@@ -26,7 +26,7 @@ from core.api_client import (
 )
 from core.history_manager import HistoryManager
 
-from . import commands_screen, keyboard, logictask_screen, settings_screen
+from . import commands_screen, keyboard, logictask_screen, models_screen, settings_screen
 from .settings_screen import SettingsScreenState
 
 APP_TITLE = "🎲 TABLETOP AI ASSISTANT — эксперт по настольным играм"
@@ -72,6 +72,7 @@ class TabletopAITUI:
         self.client: Optional[DeepseekAPIClient] = client
         self.last_error: Optional[str] = None
         self.settings = AnswerSettings()
+        self.model = config.DEFAULT_MODEL
         self._exit_requested = False
         self._setup_autocomplete()
 
@@ -192,6 +193,9 @@ class TabletopAITUI:
         if command == "/settings":
             self._open_settings_screen()
             return True
+        if command == "/models":
+            self._open_models_screen()
+            return True
         if command == "/clear":
             self.history.clear()
             self.console.print("[bold green]История диалога очищена.[/bold green]")
@@ -246,6 +250,38 @@ class TabletopAITUI:
         )
         return Panel(body, title="Команды", style="cyan")
 
+    def _open_models_screen(self) -> None:
+        """Панель выбора модели: ↑/↓ — выбор, Enter — применить, Esc — отмена.
+
+        Та же схема, что у панели команд: редьюсер `ui.models_screen` решает, как клавиши
+        меняют экран, здесь только raw_mode, Live и read-key/redraw. Выбор меняет только
+        локальное состояние сессии — ни одного запроса к API панель не делает.
+        """
+        state = models_screen.initial_state(self.model)
+
+        with Live(console=self.console, refresh_per_second=30, transient=True) as live, keyboard.raw_mode():
+            live.update(self._render_models_panel(state))
+            while True:
+                key = keyboard.read_key()
+                state = models_screen.apply_key(state, key)
+                if state.confirmed or state.cancelled:
+                    break
+                live.update(self._render_models_panel(state))
+
+        if state.confirmed:
+            self.model = state.selected
+
+    def _render_models_panel(self, state: models_screen.ModelSelectionState) -> Panel:
+        lines = []
+        for index, model in enumerate(state.available):
+            marker = "➤ " if index == state.selected_index else "  "
+            highlight = "[reverse bold]" if index == state.selected_index else ""
+            reset = "[/reverse bold]" if index == state.selected_index else ""
+            suffix = " (текущая)" if model == state.current else ""
+            lines.append(f"{marker}{highlight}{model}{reset}{suffix}")
+        body = "\n".join(lines) + "\n\n[dim]↑/↓ — выбор, Enter — применить, Esc — отмена[/dim]"
+        return Panel(body, title="Модель", style="cyan")
+
     def _run_logictask(self) -> None:
         """Прогон фиксированной задачи выбранной стратегией промптинга.
 
@@ -293,7 +329,7 @@ class TabletopAITUI:
             max_tokens = config.max_tokens_for_words(config.DEFAULT_MAX_WORDS)
             with self.console.status("[bold yellow]● Отправка...[/bold yellow]", spinner="dots"):
                 try:
-                    return self.client.ask(system, user, max_tokens=max_tokens)
+                    return self.client.ask(system, user, max_tokens=max_tokens, model=self.model)
                 except DeepseekAPIError as exc:
                     self.last_error = str(exc)
                     self.console.print(f"[bold red]{exc}[/bold red]")
@@ -410,6 +446,7 @@ class TabletopAITUI:
                     user_prompt,
                     max_tokens=config.max_tokens_for_words(self.settings.max_words),
                     temperature=self.settings.temperature,
+                    model=self.model,
                 )
             except DeepseekAPIError as exc:
                 self.last_error = str(exc)
@@ -436,7 +473,7 @@ class TabletopAITUI:
     def _print_status_bar(self) -> None:
         commands_hint = ", ".join(STATUS_COMMANDS)
         self.console.print(
-            f"[dim]Статус: Готов ✅  |  Формат: {FORMAT_LABELS[self.settings.format]}  |  "
+            f"[dim]Статус: Готов ✅  |  Модель: {self.model}  |  Формат: {FORMAT_LABELS[self.settings.format]}  |  "
             f"Объём: {self.settings.max_words} слов  |  Лимит списка: {self.settings.list_limit}  |  "
             f"Температура: {self.settings.temperature:.1f}  |  "
             f"Команды: {commands_hint}  |  Диалогов за сессию: {self.session_count}[/dim]"

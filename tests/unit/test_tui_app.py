@@ -33,6 +33,7 @@ class FakeClient:
         user_message: str,
         max_tokens: int = 0,
         temperature: Optional[float] = None,
+        model: Optional[str] = None,
     ) -> str:
         self.calls.append(
             {
@@ -40,6 +41,7 @@ class FakeClient:
                 "user": user_message,
                 "max_tokens": max_tokens,
                 "temperature": temperature,
+                "model": model,
             }
         )
         if self.error is not None:
@@ -253,7 +255,7 @@ def test_api_error_is_reported_and_not_persisted(make_app, recording_console, hi
 
 def test_app_survives_an_error_and_answers_the_next_question(make_app, recording_console, history):
     class FlakyClient(FakeClient):
-        def ask(self, system_message, user_message, max_tokens=0, temperature=None):
+        def ask(self, system_message, user_message, max_tokens=0, temperature=None, model=None):
             self.calls.append({"user": user_message})
             if len(self.calls) == 1:
                 raise DeepseekAPIError("Ошибка соединения с Deepseek API.")
@@ -588,7 +590,7 @@ def test_logictask_error_stops_step_but_session_continues(
     monkeypatch.setattr(keyboard, "raw_mode", _noop_context)
 
     class TwoStepClient(FakeClient):
-        def ask(self, system_message, user_message, max_tokens=0, temperature=None):
+        def ask(self, system_message, user_message, max_tokens=0, temperature=None, model=None):
             self.calls.append({"system": system_message, "user": user_message})
             if len(self.calls) == 2:
                 raise DeepseekAPIError("Тестовая ошибка API.")
@@ -684,4 +686,74 @@ def test_status_bar_hint_lists_only_exit_and_commands(make_app, recording_consol
     assert "Команды: /exit, /commands, /settings" not in output
     assert "/clear" not in output.split("Команды: ")[-1]
     assert "/logictask" not in output.split("Команды: ")[-1]
+
+
+# --- /models: панель выбора модели ----------------------------------------------------------
+
+
+def _panel_keys(monkeypatch, keys) -> None:
+    key_iter = iter(keys)
+    monkeypatch.setattr(keyboard, "read_key", lambda: next(key_iter))
+    monkeypatch.setattr(keyboard, "raw_mode", _noop_context)
+
+
+def test_models_command_selects_session_model(make_app, monkeypatch):
+    _panel_keys(monkeypatch, [keyboard.DOWN, keyboard.ENTER])
+
+    client = FakeClient()
+    app = make_app(["/models", "/exit"], client)
+    app.run()
+
+    assert app.model == config.AVAILABLE_MODELS[1]
+    assert client.calls == []  # панель не делает запросов к модели
+
+
+def test_models_command_esc_keeps_current_model(make_app, monkeypatch):
+    _panel_keys(monkeypatch, [keyboard.DOWN, keyboard.ESC])
+
+    client = FakeClient()
+    app = make_app(["/models", "/exit"], client)
+    app.run()
+
+    assert app.model == config.DEFAULT_MODEL
+    assert client.calls == []
+
+
+def test_question_uses_selected_model(make_app, monkeypatch):
+    _panel_keys(monkeypatch, [keyboard.DOWN, keyboard.DOWN, keyboard.DOWN, keyboard.ENTER])  # glm-5.1
+
+    client = FakeClient()
+    make_app(["/models", "Вопрос", "/exit"], client).run()
+
+    assert len(client.calls) == 1
+    assert client.calls[0]["model"] == "glm-5.1"
+
+
+def test_logictask_uses_selected_model(make_app, monkeypatch):
+    _panel_keys(monkeypatch, [keyboard.DOWN, keyboard.ENTER, keyboard.ENTER])
+
+    client = FakeClient(["Ответ стратегии"])
+    make_app(["/models", "/logictask", "/exit"], client).run()
+
+    assert len(client.calls) == 1
+    assert client.calls[0]["model"] == config.AVAILABLE_MODELS[1]
+
+
+def test_models_is_a_known_command_and_autocomplete_sees_it():
+    assert "/models" in tui_app.COMMANDS
+    assert tui_app.COMMANDS[3] == "/models"
+
+
+def test_status_bar_shows_current_model(make_app, recording_console):
+    make_app(["/exit"], FakeClient()).run()
+    assert f"Модель: {config.DEFAULT_MODEL}" in recording_console.text
+
+
+def test_status_bar_shows_model_after_selection(make_app, recording_console, monkeypatch):
+    _panel_keys(monkeypatch, [keyboard.DOWN, keyboard.ENTER])
+
+    app = make_app(["/models", "/exit"], FakeClient())
+    app.run()
+
+    assert f"Модель: {config.AVAILABLE_MODELS[1]}" in recording_console.text
 
