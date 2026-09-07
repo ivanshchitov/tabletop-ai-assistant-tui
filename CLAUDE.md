@@ -107,7 +107,7 @@ OpenCode the same six commands are spelled with a dash (`/opsx-propose`, `/opsx-
 
 ## Architecture
 
-Two packages: `core/` (settings, prompts, API client, history, logictask prompt builders — no
+Two packages: `core/` (agent, settings, prompts, API client, history, logictask prompt builders — no
 `rich`/terminal dependency) and `ui/` (`tui_app.py`, `keyboard.py`, `commands_screen.py`,
 `settings_screen.py`, `logictask_screen.py`, `models_screen.py` — everything that touches the terminal). Modules inside `core/`
 import each other with relative imports (`from . import config`, `from .answer_settings import
@@ -305,10 +305,31 @@ always, while `ask_with_usage()` additionally returns an `AnswerMeta` dataclass 
 `elapsed_seconds` measured around the whole `_request()` call including retries, `prompt_tokens`/
 `completion_tokens`/`total_tokens` from the API's `usage` field, and `cost_usd` from
 `core.usage.estimate_cost()` — `None`, not an error, when the model has no entry in
-`config.MODEL_PRICING`). `ui/tui_app.py` calls `ask_with_usage()` everywhere now (both the normal
-question path and every `/logictask` strategy call); `ask()` stays only for callers that just want
-the text and don't need metrics — currently none inside this app, kept because changing its
-signature would have broken every existing caller/test for no benefit.
+`config.MODEL_PRICING`). The agent calls `ask_with_usage_messages()` (full message stack) for the
+normal question path and every `/logictask` strategy call; `ask()`/`ask_with_usage()` remain as
+two-message sugar over the same `_request()` for callers that don't need the stack.
+
+**`core/tabletop_agent.py`** — the agent entity: the single place that decides what goes to the
+LLM. `TabletopAgent` owns the session's message stack (user/assistant turns of successful
+exchanges, capped at `config.HISTORY_LIMIT` exchanges — oldest turns drop out of the *requests*,
+not the screen or `history.json`), rebuilds the system message from the current `AnswerSettings`
+on every `ask()` (a format switch applies to the very next question; past user turns keep the
+word/list instructions of their moment), and forwards the whole stack via
+`client.ask_with_usage_messages()`. `solve_logictask(strategy)` runs the `/logictask` strategies
+as a generator yielding `(label, AnswerMeta)` per request — deliberately outside the conversation
+stack (results never influence later answers) and without session settings (no temperature,
+`max_tokens` pinned to the default word budget). `reset()` (wired to `/clear`) empties the stack.
+`AgentConfig` is the agent's single config object — session `AnswerSettings` plus the session
+`model` (flat read-only views `format`/`max_words`/`list_limit` over the settings; validation
+stays in `AnswerSettings.with_*`). The TUI's `settings`/`model` properties route into it. After
+every successful request — `ask()` and each `/logictask` call — the agent keeps the returned
+`AnswerMeta` on the read-only `last_result` property (response time, token counts, cost), so
+metrics of the last request are always available to readers without the UI having to stash them.
+The agent prints nothing: errors surface as `APIError` to the caller. `TabletopAITUI` is a thin
+view over it — replayed `history.json` entries are display-only and never seed the LLM context
+(session-only, like `AnswerSettings`). Requests are multi-turn now: the second question in a
+session carries the first exchange, so `prompt_tokens` grows with the conversation up to the
+cap — expected cost of context, visible in the usage line.
 
 **`core/usage.py`** — `estimate_cost(model, prompt_tokens, completion_tokens)` is a pure function
 over `config.MODEL_PRICING`; it exists as its own module (not inlined in `api_client.py`) so cost
@@ -316,7 +337,8 @@ math is testable without HTTP mocking.
 
 **`core/history_manager.py`** — `history.json` (gitignored) is loaded once at startup and replayed into
 the log if non-empty; every successful exchange is appended and immediately re-saved, capped at
-`config.HISTORY_LIMIT`. `/clear` empties both the in-memory list and the file.
+`config.HISTORY_LIMIT`. `/clear` empties both the in-memory list and the file, and resets the
+agent's conversation stack.
 
 ## Test layout
 

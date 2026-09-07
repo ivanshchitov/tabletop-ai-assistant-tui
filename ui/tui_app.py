@@ -15,7 +15,7 @@ from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
 
-from core import config, logictask, prompts
+from core import config, logictask
 from core.answer_settings import AnswerFormat, AnswerSettings
 from core.api_client import (
     API_KEY_CHARSET_ERROR,
@@ -26,6 +26,7 @@ from core.api_client import (
     is_valid_json_answer,
 )
 from core.history_manager import HistoryManager
+from core.tabletop_agent import TabletopAgent
 
 from . import commands_screen, keyboard, logictask_screen, models_screen, settings_screen
 from .settings_screen import SettingsScreenState
@@ -72,10 +73,26 @@ class TabletopAITUI:
         self.session_count = 0
         self.client: Optional[APIClient] = client
         self.last_error: Optional[str] = None
-        self.settings = AnswerSettings()
-        self.model = config.DEFAULT_MODEL
+        self.agent = TabletopAgent(client)
         self._exit_requested = False
         self._setup_autocomplete()
+
+    @property
+    def settings(self) -> AnswerSettings:
+        """Настройки ответа живут в агенте; UI читает и меняет их через свойства."""
+        return self.agent.settings
+
+    @settings.setter
+    def settings(self, value: AnswerSettings) -> None:
+        self.agent.settings = value
+
+    @property
+    def model(self) -> str:
+        return self.agent.model
+
+    @model.setter
+    def model(self, value: str) -> None:
+        self.agent.model = value
 
     def _setup_autocomplete(self) -> None:
         if readline is None:
@@ -104,6 +121,7 @@ class TabletopAITUI:
                 self.console.print(f"[bold yellow]{EXIT_BEFORE_START_MESSAGE}[/bold yellow]")
                 return
             self.client = APIClient(api_key)
+            self.agent.client = self.client
 
         self.console.print(Panel(APP_TITLE, style="bold cyan"))
         if self.history.dialogues:
@@ -199,6 +217,7 @@ class TabletopAITUI:
             return True
         if command == "/clear":
             self.history.clear()
+            self.agent.reset()
             self.console.print("[bold green]История диалога очищена.[/bold green]")
             return True
         if command == "/logictask":
@@ -321,55 +340,29 @@ class TabletopAITUI:
         return Panel(body, title="Логическая задача", style="cyan")
 
     def _run_strategy(self, number: int, title: str) -> None:
+        """Показ прогона: агент решает, UI печатает по мере прихода результатов.
+
+        Каждый next() генератора выполняет один запрос к API — спиннер включается на
+        время запроса. Ошибка API прерывает остаток прогона, но не сессию.
+        """
         self.last_error = None
-        assert self.client is not None
-
-        def _call(system: str, user: str) -> Optional[AnswerMeta]:
-            # Потолок токенов фиксируется от объёма по умолчанию: настройки ответа сессии
-            # (формат, объём, лимит списка) к прогонам /logictask не применяются.
-            max_tokens = config.max_tokens_for_words(config.DEFAULT_MAX_WORDS)
-            with self.console.status("[bold yellow]● Отправка...[/bold yellow]", spinner="dots"):
-                try:
-                    return self.client.ask_with_usage(system, user, max_tokens=max_tokens, model=self.model)
-                except APIError as exc:
-                    self.last_error = str(exc)
-                    self.console.print(f"[bold red]{exc}[/bold red]")
-                    self.console.print("[bold red]Попробуйте повторить запрос.[/bold red]")
-                    return None
-
         self.console.print(f"[bold cyan]Стратегия {number}: {title}[/bold cyan]")
-        if number == 1:
-            meta = _call(*logictask.build_direct_prompts())
-            if meta is None:
+        results = self.agent.solve_logictask(number)
+        while True:
+            try:
+                with self.console.status("[bold yellow]● Отправка...[/bold yellow]", spinner="dots"):
+                    label, meta = next(results)
+            except StopIteration:
+                break
+            except APIError as exc:
+                self.last_error = str(exc)
+                self.console.print(f"[bold red]{exc}[/bold red]")
+                self.console.print("[bold red]Попробуйте повторить запрос.[/bold red]")
                 return
+            if label:
+                self.console.print(f"[dim]{label}[/dim]")
             self._print_typing(meta.content)
             self._print_usage_meta(meta)
-        elif number == 2:
-            meta = _call(*logictask.build_stepwise_prompts())
-            if meta is None:
-                return
-            self._print_typing(meta.content)
-            self._print_usage_meta(meta)
-        elif number == 3:
-            composed_meta = _call(*logictask.build_prompt_compose_prompts())
-            if composed_meta is None:
-                return
-            self.console.print("[dim]Составленный моделью промпт:[/dim]")
-            self._print_typing(composed_meta.content)
-            self._print_usage_meta(composed_meta)
-            meta = _call(*logictask.build_solve_with_prompt_prompts(composed_meta.content))
-            if meta is None:
-                return
-            self._print_typing(meta.content)
-            self._print_usage_meta(meta)
-        else:
-            for role in logictask.EXPERT_ROLES:
-                expert_meta = _call(*logictask.build_expert_prompts(role))
-                if expert_meta is None:
-                    return
-                self.console.print(f"[dim]{role}[/dim]")
-                self._print_typing(expert_meta.content)
-                self._print_usage_meta(expert_meta)
         self.console.rule(style="dim")
 
     def _open_settings_screen(self) -> None:
@@ -443,17 +436,9 @@ class TabletopAITUI:
         self.last_error = None
         self.console.print(f"[bold blue]Вы:[/bold blue] {question}")
 
-        assert self.client is not None
-        user_prompt = prompts.build_user_prompt(question, self.settings)
         with self.console.status("[bold yellow]● Отправка...[/bold yellow]", spinner="dots"):
             try:
-                meta = self.client.ask_with_usage(
-                    prompts.build_system_message(self.settings.format),
-                    user_prompt,
-                    max_tokens=config.max_tokens_for_words(self.settings.max_words),
-                    temperature=self.settings.temperature,
-                    model=self.model,
-                )
+                meta = self.agent.ask(question)
             except APIError as exc:
                 self.last_error = str(exc)
                 self.console.print(f"[bold red]{exc}[/bold red]")

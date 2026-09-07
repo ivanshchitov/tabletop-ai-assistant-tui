@@ -53,8 +53,11 @@ core/                      # Настройки, промпты, API-клиен�
   answer_settings.py         # AnswerFormat, AnswerSettings — настройки формата/объёма/лимита списка/температуры
   prompts.py                  # Сборка системного и user-промпта из assets/
   logictask.py                 # Фиксированная задача и промпты четырёх стратегий /logictask
-  api_client.py                # APIClient — запросы к API, retry с backoff, ask_with_usage (время/токены/стоимость)
+  api_client.py                # APIClient — запросы к API массивом сообщений, retry с backoff, ask_with_usage (время/токены/стоимость)
   usage.py                      # estimate_cost — расчёт стоимости запроса по MODEL_PRICING
+  tabletop_agent.py             # TabletopAgent — агент: конфиг (формат/объём/лимит/температура/модель),
+                                 #  стек сообщений сессии (кап HISTORY_LIMIT), пересылка в LLM,
+                                 #  /logictask, метрики последнего запроса (last_result)
   history_manager.py           # Сохранение/загрузка истории (history.json)
 ui/                         # Терминальный интерфейс
   tui_app.py                  # Основной класс TabletopAITUI: rich-интерфейс, /commands, /settings, /models, /logictask

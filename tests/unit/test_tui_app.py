@@ -67,6 +67,22 @@ class FakeClient:
             cost_usd=0.0001,
         )
 
+    def ask_with_usage_messages(
+        self,
+        messages,
+        max_tokens: int = 0,
+        temperature: Optional[float] = None,
+        model: Optional[str] = None,
+    ) -> AnswerMeta:
+        """Режим стека агента: system — первое сообщение, user — последний user-ход."""
+        system_message = messages[0]["content"]
+        user_message = [m for m in messages if m["role"] == "user"][-1]["content"]
+        meta = self.ask_with_usage(
+            system_message, user_message, max_tokens=max_tokens, temperature=temperature, model=model
+        )
+        self.calls[-1]["messages"] = [dict(m) for m in messages]
+        return meta
+
 
 @contextlib.contextmanager
 def _noop_context():

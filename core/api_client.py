@@ -4,7 +4,7 @@ import json
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -63,22 +63,19 @@ class APIClient:
 
     def _request(
         self,
-        system_message: str,
-        user_message: str,
+        messages: List[Dict[str, str]],
         max_tokens: int,
-        temperature: float,
+        temperature: Optional[float],
         model: str,
     ) -> tuple[Dict[str, Any], float]:
+        """Единый HTTP-путь: messages — готовый список ролей; None-температура = дефолт."""
         if not is_valid_api_key(self.api_key):
             raise APIError(API_KEY_CHARSET_ERROR)
 
         payload = {
             "model": model,
-            "messages": [
-                {"role": "system", "content": system_message},
-                {"role": "user", "content": user_message},
-            ],
-            "temperature": temperature,
+            "messages": messages,
+            "temperature": temperature if temperature is not None else config.TEMPERATURE,
             "max_tokens": max_tokens,
         }
         headers = {
@@ -132,7 +129,15 @@ class APIClient:
         temperature: float = config.TEMPERATURE,
         model: str = config.DEFAULT_MODEL,
     ) -> str:
-        data, _ = self._request(system_message, user_message, max_tokens, temperature, model)
+        data, _ = self._request(
+            [
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": user_message},
+            ],
+            max_tokens,
+            temperature,
+            model,
+        )
         return data["choices"][0]["message"]["content"].strip()
 
     def ask_with_usage(
@@ -143,7 +148,30 @@ class APIClient:
         temperature: float = config.TEMPERATURE,
         model: str = config.DEFAULT_MODEL,
     ) -> AnswerMeta:
-        data, elapsed = self._request(system_message, user_message, max_tokens, temperature, model)
+        data, elapsed = self._request(
+            [
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": user_message},
+            ],
+            max_tokens,
+            temperature,
+            model,
+        )
+        return self._meta_from(data, elapsed, model)
+
+    def ask_with_usage_messages(
+        self,
+        messages: List[Dict[str, str]],
+        max_tokens: int = config.max_tokens_for_words(config.DEFAULT_MAX_WORDS),
+        temperature: Optional[float] = None,
+        model: str = config.DEFAULT_MODEL,
+    ) -> AnswerMeta:
+        """Полный список сообщений (стек агента); None-температура — клиентский дефолт."""
+        data, elapsed = self._request(messages, max_tokens, temperature, model)
+        return self._meta_from(data, elapsed, model)
+
+    @staticmethod
+    def _meta_from(data: Dict[str, Any], elapsed: float, model: str) -> AnswerMeta:
         content = data["choices"][0]["message"]["content"].strip()
         request_usage = data.get("usage") or {}
         prompt_tokens = request_usage.get("prompt_tokens", 0)
