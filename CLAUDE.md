@@ -326,10 +326,15 @@ every successful request — `ask()` and each `/logictask` call — the agent ke
 `AnswerMeta` on the read-only `last_result` property (response time, token counts, cost), so
 metrics of the last request are always available to readers without the UI having to stash them.
 The agent prints nothing: errors surface as `APIError` to the caller. `TabletopAITUI` is a thin
-view over it — replayed `history.json` entries are display-only and never seed the LLM context
-(session-only, like `AnswerSettings`). Requests are multi-turn now: the second question in a
-session carries the first exchange, so `prompt_tokens` grows with the conversation up to the
-cap — expected cost of context, visible in the usage line.
+view over it. The context survives restarts: `TabletopAITUI.run()` seeds the agent's stack from
+`history.dialogues` via `restore_context()` right after startup (same source as the screen
+replay, so screen and model context can't drift). One deliberate deviation from the live-session
+rule "past user turns keep their own word/list instructions": a restored user turn is rebuilt
+through `build_user_prompt` with the *current* settings, because `history.json` stores the raw
+question, not the assembled prompt — the assistant turn is kept verbatim. Requests are multi-turn:
+the second question in a session (and the first question after a restart with non-empty history)
+carries the prior exchanges, so `prompt_tokens` grows with the conversation up to the cap —
+expected cost of context, visible in the usage line.
 
 **`core/usage.py`** — `estimate_cost(model, prompt_tokens, completion_tokens)` is a pure function
 over `config.MODEL_PRICING`; it exists as its own module (not inlined in `api_client.py`) so cost

@@ -124,6 +124,19 @@ class TabletopAgent:
         """Опустошает стек сообщений (команда /clear)."""
         self._turns.clear()
 
+    def restore_context(self, dialogues) -> None:
+        """Засеивает стек ходами из сохранённой истории (пары «вопрос–ответ»).
+
+        user-ход собирается инструкциями текущих настроек — в истории хранится вопрос,
+        а не собранный промпт; ответ кладётся дословно. Потолок глубины тот же, что
+        у живой сессии (кап в _remember).
+        """
+        for item in dialogues:
+            self._remember(
+                prompts.build_user_prompt(item["question"], self.config.settings),
+                item["answer"],
+            )
+
     # --- внутреннее -----------------------------------------------------------------------
 
     def _build_messages(self, user_prompt: str) -> List[Dict[str, str]]:

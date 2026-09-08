@@ -124,6 +124,9 @@ class TabletopAITUI:
             self.agent.client = self.client
 
         self.console.print(Panel(APP_TITLE, style="bold cyan"))
+        # Контекст переживает перезапуск: реплей истории и засев стека агента идут
+        # из одного источника (history.dialogues), расхождений экран/модель не бывает.
+        self.agent.restore_context(self.history.dialogues)
         if self.history.dialogues:
             self._print_history()
         else:

@@ -124,6 +124,59 @@ def test_reset_clears_the_stack():
     assert "Вопрос до очистки" not in "".join(m["content"] for m in messages)
 
 
+# --- восстановление контекста из истории --------------------------------------------------
+
+
+def test_restore_context_seeds_the_stack_from_saved_dialogues():
+    agent, client = make_agent()
+    agent.restore_context(
+        [
+            {"question": "Вопрос из истории", "answer": "Ответ из истории"},
+            {"question": "Второй из истории", "answer": "Второй ответ"},
+            {"question": "Третий из истории", "answer": "Третий ответ"},
+        ]
+    )
+    agent.ask("Новый вопрос")
+    messages = client.calls[0]["messages"]
+    assert [m["role"] for m in messages][1:] == ["user", "assistant"] * 3 + ["user"]
+    assert "Вопрос из истории" in messages[1]["content"]
+    assert messages[2]["content"] == "Ответ из истории"
+    assert "Новый вопрос" in messages[-1]["content"]
+
+
+def test_restored_user_turns_carry_current_settings_instructions():
+    agent, _ = make_agent(settings=AnswerSettings(max_words=500, list_limit=7))
+    agent.restore_context([{"question": "Старый вопрос", "answer": "Старый ответ"}])
+    client = agent.client
+    agent.ask("Новый вопрос")
+    restored_user = client.calls[0]["messages"][1]["content"]
+    assert "Старый вопрос" in restored_user
+    assert "не более 500 слов" in restored_user
+    assert "не более 7 вариантов" in restored_user
+
+
+def test_restore_context_is_capped_at_history_limit(monkeypatch):
+    monkeypatch.setattr(config, "HISTORY_LIMIT", 2)
+    agent, client = make_agent()
+    agent.restore_context(
+        [{"question": f"Вопрос {i}", "answer": f"Ответ {i}"} for i in range(1, 5)]
+    )
+    agent.ask("Новый вопрос")
+    contents = "".join(m["content"] for m in client.calls[0]["messages"])
+    assert "Вопрос 1" not in contents and "Вопрос 2" not in contents
+    assert "Вопрос 3" in contents and "Вопрос 4" in contents
+
+
+def test_reset_after_restore_clears_the_stack():
+    agent, client = make_agent()
+    agent.restore_context([{"question": "Прошлый вопрос", "answer": "Прошлый ответ"}])
+    agent.reset()
+    agent.ask("Новый вопрос")
+    messages = client.calls[0]["messages"]
+    assert [m["role"] for m in messages] == ["system", "user"]
+    assert "Прошлый вопрос" not in messages[1]["content"]
+
+
 # --- системное сообщение и параметры ---------------------------------------------------
 
 

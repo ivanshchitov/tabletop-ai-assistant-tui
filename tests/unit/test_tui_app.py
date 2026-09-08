@@ -150,6 +150,27 @@ def test_existing_history_is_replayed_instead_of_welcome(make_app, recording_con
     assert not recording_console.contains("Tabletop AI Assistant запущен")
 
 
+def test_first_question_after_restart_carries_restored_context(make_app, history):
+    history.add("Старый вопрос", "Старый ответ")
+    client = FakeClient()
+    make_app(["Новый вопрос", "/exit"], client).run()
+
+    messages = client.calls[0]["messages"]
+    assert [m["role"] for m in messages] == ["system", "user", "assistant", "user"]
+    assert "Старый вопрос" in messages[1]["content"]
+    assert messages[2]["content"] == "Старый ответ"
+
+
+def test_clear_after_restart_resets_restored_context(make_app, history):
+    history.add("Старый вопрос", "Старый ответ")
+    client = FakeClient()
+    make_app(["/clear", "Новый вопрос", "/exit"], client).run()
+
+    messages = client.calls[0]["messages"]
+    assert [m["role"] for m in messages] == ["system", "user"]
+    assert "Старый вопрос" not in messages[1]["content"]
+
+
 def test_exit_command_says_goodbye(make_app, recording_console):
     make_app(["/exit"]).run()
     assert recording_console.contains(tui_app.GOODBYE_MESSAGE)

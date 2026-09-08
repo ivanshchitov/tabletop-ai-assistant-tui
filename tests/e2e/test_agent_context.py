@@ -70,7 +70,7 @@ def test_logictask_does_not_change_the_conversation_context(app, stub):
     assert "Обычный вопрос" in payload["messages"][1]["content"]
 
 
-def test_replayed_history_is_not_sent_to_the_model(app, stub, history_file):
+def test_restarted_session_carries_restored_context(app, stub, history_file):
     stub.always(answer("Ответ первой сессии."))
     with app() as session:
         session.ask("Вопрос в первой сессии", "Ответ первой сессии.")
@@ -80,8 +80,26 @@ def test_replayed_history_is_not_sent_to_the_model(app, stub, history_file):
         session.wait_for("Вопрос в первой сессии")  # реплей виден на экране
         session.ask("Вопрос во второй сессии", "Ответ второй сессии.")
 
-    # реплей остался показом: контекст второй сессии пуст
-    assert _roles(stub.payload_at(1)) == ["system", "user"]
-    assert "Вопрос в первой сессии" not in "".join(
-        m["content"] for m in stub.payload_at(1)["messages"]
-    )
+    # контекст пережил перезапуск: запрос второй сессии несёт прошлый обмен
+    payload = stub.payload_at(1)
+    assert _roles(payload) == ["system", "user", "assistant", "user"]
+    assert "Вопрос в первой сессии" in payload["messages"][1]["content"]
+    assert payload["messages"][2]["content"] == "Ответ первой сессии."
+    assert "Вопрос во второй сессии" in payload["messages"][3]["content"]
+
+
+def test_clear_after_restart_resets_restored_context(app, stub, history_file):
+    stub.always(answer("Ответ первой сессии."))
+    with app() as session:
+        session.ask("Вопрос в первой сессии", "Ответ первой сессии.")
+
+    stub.always(answer("Ответ второй сессии."))
+    with app() as session:
+        session.wait_for("Вопрос в первой сессии")
+        session.send_line("/clear")
+        session.wait_for("История диалога очищена.")
+        session.ask("Вопрос во второй сессии", "Ответ второй сессии.")
+
+    payload = stub.last_payload()
+    assert _roles(payload) == ["system", "user"]
+    assert "Вопрос в первой сессии" not in "".join(m["content"] for m in payload["messages"])
