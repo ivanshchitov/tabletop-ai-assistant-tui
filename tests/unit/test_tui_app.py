@@ -633,7 +633,7 @@ def test_logictask_run_is_not_in_history(make_app, history, history_path, monkey
     app.run()
 
     assert history.dialogues == []
-    assert json.loads(history_path.read_text(encoding="utf-8")) == []
+    assert not history_path.exists() or json.loads(history_path.read_text(encoding="utf-8")) == []
     assert app.session_count == 0
 
 

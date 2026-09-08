@@ -69,13 +69,19 @@ class TabletopAITUI:
         запрашивать его при старте не нужно.
         """
         self.console = console if console is not None else Console()
-        self.history = history if history is not None else HistoryManager()
         self.session_count = 0
         self.client: Optional[APIClient] = client
         self.last_error: Optional[str] = None
-        self.agent = TabletopAgent(client)
+        # Обе памяти агента — внутри агента: история передаётся ему при создании,
+        # и он сам восстанавливает контекст; UI только показывает сохранённое.
+        self.agent = TabletopAgent(client, history=history)
         self._exit_requested = False
         self._setup_autocomplete()
+
+    @property
+    def history(self) -> HistoryManager:
+        """Память диалога принадлежит агенту; интерфейс читает её для реплея."""
+        return self.agent.history
 
     @property
     def settings(self) -> AnswerSettings:
@@ -124,9 +130,6 @@ class TabletopAITUI:
             self.agent.client = self.client
 
         self.console.print(Panel(APP_TITLE, style="bold cyan"))
-        # Контекст переживает перезапуск: реплей истории и засев стека агента идут
-        # из одного источника (history.dialogues), расхождений экран/модель не бывает.
-        self.agent.restore_context(self.history.dialogues)
         if self.history.dialogues:
             self._print_history()
         else:
@@ -219,7 +222,6 @@ class TabletopAITUI:
             self._open_models_screen()
             return True
         if command == "/clear":
-            self.history.clear()
             self.agent.reset()
             self.console.print("[bold green]История диалога очищена.[/bold green]")
             return True
@@ -456,7 +458,6 @@ class TabletopAITUI:
             self.console.print("[bold yellow]⚠ Модель не вернула валидный JSON.[/bold yellow]")
         self._print_usage_meta(meta)
         self.console.rule(style="dim")
-        self.history.add(question, answer)
         self.session_count += 1
 
     def _print_usage_meta(self, meta: AnswerMeta) -> None:
@@ -485,5 +486,4 @@ class TabletopAITUI:
         self.console.rule(style="dim")
 
     def _exit(self) -> None:
-        self.history.save()
         self.console.print(f"[bold yellow]{GOODBYE_MESSAGE}[/bold yellow]")

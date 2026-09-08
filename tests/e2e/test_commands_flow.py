@@ -38,7 +38,7 @@ def test_panel_lists_commands_and_esc_makes_no_requests(app, stub, history_file)
 
     session.send_line("/exit")
     session.wait_exit()
-    assert json.loads(history_file.read_text(encoding="utf-8")) == []
+    assert not history_file.exists() or json.loads(history_file.read_text(encoding="utf-8")) == []
 
 
 def test_enter_runs_selected_command(app, stub, history_file):
@@ -57,7 +57,7 @@ def test_enter_runs_selected_command(app, stub, history_file):
 
     session.send_line("/exit")
     session.wait_exit()
-    assert json.loads(history_file.read_text(encoding="utf-8")) == []
+    assert not history_file.exists() or json.loads(history_file.read_text(encoding="utf-8")) == []
 
 
 def test_settings_selection_opens_settings_screen(app, stub):
@@ -95,7 +95,7 @@ def test_exit_selection_terminates_app(app, stub, history_file):
     session.send_key(harness.KEY_ENTER, 1)  # первая строка панели — /exit
     session.wait_exit()
     assert stub.call_count == 0
-    assert json.loads(history_file.read_text(encoding="utf-8")) == []
+    assert not history_file.exists() or json.loads(history_file.read_text(encoding="utf-8")) == []
 
 
 def test_status_bar_hint_lists_only_exit_and_commands(app, stub):

@@ -326,13 +326,14 @@ every successful request — `ask()` and each `/logictask` call — the agent ke
 `AnswerMeta` on the read-only `last_result` property (response time, token counts, cost), so
 metrics of the last request are always available to readers without the UI having to stash them.
 The agent prints nothing: errors surface as `APIError` to the caller. `TabletopAITUI` is a thin
-view over it. The context survives restarts: `TabletopAITUI.run()` seeds the agent's stack from
-`history.dialogues` via `restore_context()` right after startup (same source as the screen
-replay, so screen and model context can't drift). One deliberate deviation from the live-session
-rule "past user turns keep their own word/list instructions": a restored user turn is rebuilt
-through `build_user_prompt` with the *current* settings, because `history.json` stores the raw
-question, not the assembled prompt — the assistant turn is kept verbatim. Requests are multi-turn:
-the second question in a session (and the first question after a restart with non-empty history)
+view over it. The agent owns both memories: the session stack and the `history.json` manager
+(passed at construction), so the context survives restarts without any UI involvement —
+`TabletopAgent.__init__` calls `restore_context()` itself, and `ask()` appends each successful
+exchange to the file immediately. One deliberate deviation from the live-session rule "past
+user turns keep their own word/list instructions": a restored user turn is rebuilt through
+`build_user_prompt` with the *current* settings, because `history.json` stores the raw question,
+not the assembled prompt — the assistant turn is kept verbatim. Requests are multi-turn: the
+second question in a session (and the first question after a restart with non-empty history)
 carries the prior exchanges, so `prompt_tokens` grows with the conversation up to the cap —
 expected cost of context, visible in the usage line.
 
@@ -340,10 +341,12 @@ expected cost of context, visible in the usage line.
 over `config.MODEL_PRICING`; it exists as its own module (not inlined in `api_client.py`) so cost
 math is testable without HTTP mocking.
 
-**`core/history_manager.py`** — `history.json` (gitignored) is loaded once at startup and replayed into
-the log if non-empty; every successful exchange is appended and immediately re-saved, capped at
-`config.HISTORY_LIMIT`. `/clear` empties both the in-memory list and the file, and resets the
-agent's conversation stack.
+**`core/history_manager.py`** — `history.json` (gitignored) is the agent's long-term memory:
+`TabletopAgent` owns the manager (passed at construction, `TabletopAgent(client, history=...)`),
+seeds its message stack from it automatically at creation, appends every successful exchange to
+it immediately inside `ask()`, and empties both memories in `reset()`. The TUI only displays
+its contents (startup replay) — it never writes or clears history itself. Storage cap is
+`config.HISTORY_LIMIT`; a missing or corrupt file reads as empty history.
 
 ## Test layout
 

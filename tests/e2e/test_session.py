@@ -237,7 +237,7 @@ def test_failed_exchange_is_not_saved(app, stub, history_file):
         session.send_line("/exit")
         session.wait_exit()
 
-    assert json.loads(history_file.read_text(encoding="utf-8")) == []
+    assert not history_file.exists() or json.loads(history_file.read_text(encoding="utf-8")) == []
 
 
 # --- выход ------------------------------------------------------------------------------------

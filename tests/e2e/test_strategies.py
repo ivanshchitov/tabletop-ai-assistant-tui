@@ -43,7 +43,7 @@ def test_panel_shown_then_esc_makes_no_requests(app, stub, history_file):
 
     session.send_line("/exit")
     session.wait_exit()
-    assert json.loads(history_file.read_text(encoding="utf-8")) == []
+    assert not history_file.exists() or json.loads(history_file.read_text(encoding="utf-8")) == []
 
 
 def test_chosen_direct_strategy_makes_single_request(app, stub, history_file):
@@ -66,7 +66,7 @@ def test_chosen_direct_strategy_makes_single_request(app, stub, history_file):
     assert logictask.LOGIC_TASK in stub.user_messages()[0]
     assert "только ответ" in stub.user_messages()[0]
     assert stub.system_messages()[0] == logictask.DIRECT_SYSTEM_MESSAGE
-    assert json.loads(history_file.read_text(encoding="utf-8")) == []
+    assert not history_file.exists() or json.loads(history_file.read_text(encoding="utf-8")) == []
     assert session.scrollback().count("Токены: 50+100=150") == 1
 
 

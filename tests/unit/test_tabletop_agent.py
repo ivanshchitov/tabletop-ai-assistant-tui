@@ -1,12 +1,13 @@
 """Агент: стек сообщений сессии, пересылка LLM, решение логической задачи."""
 
+import json
 from typing import List, Optional
 
 import pytest
-
-from core import config, logictask
+from core import config, logictask, tabletop_agent
 from core.answer_settings import AnswerFormat, AnswerSettings
 from core.api_client import AnswerMeta, APIError
+from core.history_manager import HistoryManager
 from core.tabletop_agent import TabletopAgent
 
 
@@ -49,10 +50,22 @@ class FakeAgentClient:
             total_tokens=30,
             cost_usd=0.0001,
         )
+@pytest.fixture(autouse=True)
+def isolated_history(tmp_path, monkeypatch):
+    """Дефолтный HistoryManager агента всегда указывает на временный файл.
+
+    Агент владеет памятью и восстанавливает её сам при создании: без патча каждый
+    тест читал бы реальный history.json пользователя.
+    """
+    monkeypatch.setattr(
+        tabletop_agent, "HistoryManager", lambda: HistoryManager(tmp_path / "history.json")
+    )
 
 
-def make_agent(client=None, answers=None, **kwargs) -> tuple:
+def make_agent(client=None, answers=None, history=None, **kwargs) -> tuple:
     client = client if client is not None else FakeAgentClient(answers=answers)
+    if history is not None:
+        return TabletopAgent(client, history=history, **kwargs), client
     return TabletopAgent(client, **kwargs), client
 
 
@@ -124,57 +137,108 @@ def test_reset_clears_the_stack():
     assert "Вопрос до очистки" not in "".join(m["content"] for m in messages)
 
 
-# --- восстановление контекста из истории --------------------------------------------------
+# --- долговременная память внутри агента ---------------------------------------------------
 
 
-def test_restore_context_seeds_the_stack_from_saved_dialogues():
-    agent, client = make_agent()
-    agent.restore_context(
-        [
-            {"question": "Вопрос из истории", "answer": "Ответ из истории"},
-            {"question": "Второй из истории", "answer": "Второй ответ"},
-            {"question": "Третий из истории", "answer": "Третий ответ"},
-        ]
-    )
-    agent.ask("Новый вопрос")
+def test_agent_restores_its_own_history_on_construction():
+    first, _ = make_agent()
+    first.history.add("Вопрос из истории", "Ответ из истории")
+
+    second, client = make_agent(history=first.history, answers=["Свежий ответ"])
+    second.ask("Новый вопрос")
+
     messages = client.calls[0]["messages"]
-    assert [m["role"] for m in messages][1:] == ["user", "assistant"] * 3 + ["user"]
+    assert [m["role"] for m in messages] == ["system", "user", "assistant", "user"]
     assert "Вопрос из истории" in messages[1]["content"]
     assert messages[2]["content"] == "Ответ из истории"
     assert "Новый вопрос" in messages[-1]["content"]
 
 
 def test_restored_user_turns_carry_current_settings_instructions():
-    agent, _ = make_agent(settings=AnswerSettings(max_words=500, list_limit=7))
-    agent.restore_context([{"question": "Старый вопрос", "answer": "Старый ответ"}])
-    client = agent.client
-    agent.ask("Новый вопрос")
+    first, _ = make_agent()
+    first.history.add("Старый вопрос", "Старый ответ")
+
+    second, client = make_agent(
+        history=first.history, settings=AnswerSettings(max_words=500, list_limit=7)
+    )
+    second.ask("Новый вопрос")
+
     restored_user = client.calls[0]["messages"][1]["content"]
     assert "Старый вопрос" in restored_user
     assert "не более 500 слов" in restored_user
     assert "не более 7 вариантов" in restored_user
 
 
-def test_restore_context_is_capped_at_history_limit(monkeypatch):
+def test_memory_is_capped_at_history_limit(monkeypatch):
     monkeypatch.setattr(config, "HISTORY_LIMIT", 2)
-    agent, client = make_agent()
-    agent.restore_context(
-        [{"question": f"Вопрос {i}", "answer": f"Ответ {i}"} for i in range(1, 5)]
-    )
-    agent.ask("Новый вопрос")
+    first, _ = make_agent()
+    for i in range(1, 5):
+        first.history.add(f"Вопрос {i}", f"Ответ {i}")
+
+    second, client = make_agent(history=first.history)
+    second.ask("Новый вопрос")
+
     contents = "".join(m["content"] for m in client.calls[0]["messages"])
     assert "Вопрос 1" not in contents and "Вопрос 2" not in contents
     assert "Вопрос 3" in contents and "Вопрос 4" in contents
 
 
-def test_reset_after_restore_clears_the_stack():
+def test_ask_persists_exchange_immediately():
+    agent, _ = make_agent()
+    agent.ask("Вопрос на диск")
+
+    data = json.loads(agent.history.path.read_text(encoding="utf-8"))
+    assert data == [{"question": "Вопрос на диск", "answer": "Ответ по умолчанию"}]
+
+
+def test_failed_exchange_is_not_persisted():
+    agent, _ = make_agent(client=FakeAgentClient(error=APIError("Сбой API.")))
+    with pytest.raises(APIError):
+        agent.ask("Вопрос при ошибке")
+
+    assert agent.history.dialogues == []
+
+
+def test_reset_clears_stack_and_file():
     agent, client = make_agent()
-    agent.restore_context([{"question": "Прошлый вопрос", "answer": "Прошлый ответ"}])
+    agent.ask("Вопрос до очистки")
     agent.reset()
-    agent.ask("Новый вопрос")
-    messages = client.calls[0]["messages"]
+
+    assert json.loads(agent.history.path.read_text(encoding="utf-8")) == []
+    assert agent.history.dialogues == []
+
+    agent.ask("Вопрос после очистки")
+    messages = client.calls[-1]["messages"]
     assert [m["role"] for m in messages] == ["system", "user"]
-    assert "Прошлый вопрос" not in messages[1]["content"]
+    assert "Вопрос до очистки" not in messages[1]["content"]
+
+
+def test_logictask_does_not_touch_memory():
+    agent, _ = make_agent(answers=["Прямой ответ", "Ещё ответ"])
+    agent.ask("Обычный вопрос")
+
+    list(agent.solve_logictask(1))
+
+    data = json.loads(agent.history.path.read_text(encoding="utf-8"))
+    assert [d["question"] for d in data] == ["Обычный вопрос"]
+
+
+def test_stack_is_rebuilt_from_file_invariant():
+    first, first_client = make_agent(answers=["Первый ответ", "Второй ответ"])
+    first.ask("Первый вопрос")
+    first.ask("Второй вопрос")
+    reference = first_client.calls[-1]["messages"]
+
+    second, second_client = make_agent(history=first.history, answers=["Третий ответ"])
+    second.ask("Третий вопрос")
+
+    restored = second_client.calls[0]["messages"]
+    # system + два восстановленных обмена (user/assistant) + новый user-ход
+    assert [m["role"] for m in restored] == ["system", "user", "assistant", "user", "assistant", "user"]
+    # восстановленный стек дословно совпадает со стеком первого агента на момент записи
+    assert [m["content"] for m in restored[1:4]] == [m["content"] for m in reference[1:4]]
+    assert restored[4]["content"] == "Второй ответ"
+    assert "Третий вопрос" in restored[5]["content"]
 
 
 # --- системное сообщение и параметры ---------------------------------------------------

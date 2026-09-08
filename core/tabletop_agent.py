@@ -13,6 +13,7 @@ from typing import Dict, Iterator, List, Optional, Tuple
 from . import config, logictask, prompts
 from .answer_settings import AnswerFormat, AnswerSettings
 from .api_client import APIClient, AnswerMeta
+from .history_manager import HistoryManager
 
 # Метка промежуточного результата стратегии 3 (составленный моделью промпт).
 COMPOSED_PROMPT_LABEL = "Составленный моделью промпт"
@@ -54,15 +55,20 @@ class TabletopAgent:
         client: Optional[APIClient],
         settings: Optional[AnswerSettings] = None,
         model: Optional[str] = None,
+        history: Optional[HistoryManager] = None,
     ) -> None:
         self.client = client
         self.config = AgentConfig(
             settings=settings if settings is not None else AnswerSettings(),
             model=model if model is not None else config.DEFAULT_MODEL,
         )
+        self.history = history if history is not None else HistoryManager()
         # Ходы user/assistant успешных обменов; system в стеке не хранится (пересобирается).
         self._turns: List[Dict[str, str]] = []
         self._last_result: Optional[AnswerMeta] = None
+        # Обе памяти агента — свои: стек сессии восстанавливается из файла истории
+        # сразу при создании, «забыть вызвать» восстановление невозможно.
+        self.restore_context()
 
     @property
     def settings(self) -> AnswerSettings:
@@ -97,6 +103,8 @@ class TabletopAgent:
         )
         self._last_result = meta
         self._remember(user_prompt, meta.content)
+        # Долговременная память: пара «вопрос–ответ» — на диск сразу после ответа.
+        self.history.add(question, meta.content)
         return meta
 
     def solve_logictask(self, strategy_number: int) -> Iterator[Tuple[Optional[str], AnswerMeta]]:
@@ -121,17 +129,18 @@ class TabletopAgent:
                 yield role, self._logictask_call(*logictask.build_expert_prompts(role))
 
     def reset(self) -> None:
-        """Опустошает стек сообщений (команда /clear)."""
+        """Опустошает стек сообщений и файл истории (команда /clear)."""
         self._turns.clear()
+        self.history.clear()
 
-    def restore_context(self, dialogues) -> None:
-        """Засеивает стек ходами из сохранённой истории (пары «вопрос–ответ»).
+    def restore_context(self) -> None:
+        """Засеивает стек ходами из собственной истории агента (пары «вопрос–ответ»).
 
         user-ход собирается инструкциями текущих настроек — в истории хранится вопрос,
         а не собранный промпт; ответ кладётся дословно. Потолок глубины тот же, что
-        у живой сессии (кап в _remember).
+        у живой сессии (кап в _remember). Вызывается конструктором автоматически.
         """
-        for item in dialogues:
+        for item in self.history.dialogues:
             self._remember(
                 prompts.build_user_prompt(item["question"], self.config.settings),
                 item["answer"],
