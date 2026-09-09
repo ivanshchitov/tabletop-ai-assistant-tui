@@ -4,7 +4,8 @@ import json
 from typing import List, Optional
 
 import pytest
-from core import config, logictask, tabletop_agent
+from core import config, logictask, prompts, tabletop_agent
+from core.usage import estimate_tokens
 from core.answer_settings import AnswerFormat, AnswerSettings
 from core.api_client import AnswerMeta, APIError
 from core.history_manager import HistoryManager
@@ -18,9 +19,12 @@ class FakeAgentClient:
     /logictask (клиентский дефолт) от явной передачи значения настройки.
     """
 
-    def __init__(self, answers=None, error: Optional[Exception] = None) -> None:
+    def __init__(self, answers=None, error: Optional[Exception] = None, usages=None) -> None:
         self.answers = list(answers or ["Ответ по умолчанию"])
         self.error = error
+        # Список (prompt_tokens, completion_tokens, cost_usd) — по одному на вызов;
+        # последний повторяется, если вызовов больше.
+        self.usages = list(usages) if usages else None
         self.calls: List[dict] = []
 
     def ask_with_usage_messages(
@@ -41,14 +45,18 @@ class FakeAgentClient:
         if self.error is not None:
             raise self.error
         content = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
+        if self.usages:
+            prompt, completion, cost = self.usages.pop(0) if len(self.usages) > 1 else self.usages[0]
+        else:
+            prompt, completion, cost = 10, 20, 0.0001
         return AnswerMeta(
             content=content,
             model=model or config.DEFAULT_MODEL,
             elapsed_seconds=0.01,
-            prompt_tokens=10,
-            completion_tokens=20,
-            total_tokens=30,
-            cost_usd=0.0001,
+            prompt_tokens=prompt,
+            completion_tokens=completion,
+            total_tokens=prompt + completion,
+            cost_usd=cost,
         )
 @pytest.fixture(autouse=True)
 def isolated_history(tmp_path, monkeypatch):
@@ -62,8 +70,8 @@ def isolated_history(tmp_path, monkeypatch):
     )
 
 
-def make_agent(client=None, answers=None, history=None, **kwargs) -> tuple:
-    client = client if client is not None else FakeAgentClient(answers=answers)
+def make_agent(client=None, answers=None, history=None, usages=None, **kwargs) -> tuple:
+    client = client if client is not None else FakeAgentClient(answers=answers, usages=usages)
     if history is not None:
         return TabletopAgent(client, history=history, **kwargs), client
     return TabletopAgent(client, **kwargs), client
@@ -182,13 +190,13 @@ def test_memory_is_capped_at_history_limit(monkeypatch):
     assert "Вопрос 1" not in contents and "Вопрос 2" not in contents
     assert "Вопрос 3" in contents and "Вопрос 4" in contents
 
-
 def test_ask_persists_exchange_immediately():
     agent, _ = make_agent()
     agent.ask("Вопрос на диск")
-
     data = json.loads(agent.history.path.read_text(encoding="utf-8"))
-    assert data == [{"question": "Вопрос на диск", "answer": "Ответ по умолчанию"}]
+    assert data[0]["question"] == "Вопрос на диск"
+    assert data[0]["answer"] == "Ответ по умолчанию"
+    assert data[0]["usage"]["total_tokens"] == 30
 
 
 def test_failed_exchange_is_not_persisted():
@@ -401,3 +409,81 @@ def test_last_result_is_read_only():
     agent, _ = make_agent()
     with pytest.raises(AttributeError):
         agent.last_result = None
+
+
+# --- день 8: накопитель сессии, расход истории, оценка стека ---------------------------
+
+
+def test_session_usage_accumulates_successful_questions():
+    agent, _ = make_agent()
+    agent.ask("Первый")
+    agent.ask("Второй")
+    usage = agent.session_usage
+    assert usage.requests == 2
+    assert usage.total_tokens == 60
+    assert usage.cost_usd == 0.0002
+
+
+def test_session_usage_counts_logictask_calls():
+    agent, _ = make_agent(answers=["Прямой ответ"])
+    list(agent.solve_logictask(1))
+    assert agent.session_usage.requests == 1
+
+
+def test_failed_request_is_not_counted():
+    agent, _ = make_agent(client=FakeAgentClient(error=APIError("Сбой API.")))
+    with pytest.raises(APIError):
+        agent.ask("Вопрос")
+    assert agent.session_usage.requests == 0
+
+
+def test_reset_clears_session_usage():
+    agent, _ = make_agent()
+    agent.ask("Вопрос")
+    agent.reset()
+    assert agent.session_usage.requests == 0
+
+
+def test_ask_persists_usage_block_in_history():
+    agent, _ = make_agent(usages=[(100, 50, 0.01)])
+    agent.ask("Вопрос на диск")
+    record = agent.history.dialogues[0]
+    assert record["usage"] == {
+        "prompt_tokens": 100,
+        "completion_tokens": 50,
+        "total_tokens": 150,
+        "cost_usd": 0.01,
+    }
+
+
+def test_lifetime_usage_survives_restart_through_history_file():
+    first, _ = make_agent(usages=[(100, 50, 0.01)])
+    first.ask("Вопрос между запусками")
+    second, _ = make_agent()
+    assert second.session_usage.requests == 0  # сессия новая
+    lifetime = second.history.total_usage()
+    assert lifetime.requests == 1
+    assert lifetime.total_tokens == 150
+
+def test_stack_tokens_estimate_counts_system_message():
+    agent, _ = make_agent()
+    assert agent.stack_tokens_estimate == estimate_tokens(
+        prompts.build_system_message(agent.config.format)
+    )
+
+
+def test_stack_tokens_estimate_grows_with_turns():
+    agent, _ = make_agent()
+    before = agent.stack_tokens_estimate
+    agent.ask("Вопрос")
+    assert agent.stack_tokens_estimate > before
+
+
+def test_stack_tokens_estimate_stops_growing_when_window_is_full(monkeypatch):
+    monkeypatch.setattr(config, "HISTORY_LIMIT", 2)
+    agent, _ = make_agent()
+    agent.ask("Вопрос 1")
+    agent.ask("Вопрос 2")
+    full = agent.stack_tokens_estimate
+    agent.ask("Вопрос 3")
+    assert agent.stack_tokens_estimate == full

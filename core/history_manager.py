@@ -1,10 +1,12 @@
-"""Сохранение и загрузка истории диалогов."""
+"""Сохранение и загрузка истории диалогов (с метриками использования каждого обмена)."""
 
 import json
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, List, Optional
 
 from . import config
+from .usage import SessionUsage, sum_usage
+
 
 
 class HistoryManager:
@@ -25,8 +27,17 @@ class HistoryManager:
             return data[-self.limit :]
         return []
 
-    def add(self, question: str, answer: str) -> None:
-        self.dialogues.append({"question": question, "answer": answer})
+    def add(
+        self,
+        question: str,
+        answer: str,
+        usage: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Дописывает обмен; usage — метрики запроса (None даёт запись прежнего вида)."""
+        record: Dict[str, Any] = {"question": question, "answer": answer}
+        if usage is not None:
+            record["usage"] = usage
+        self.dialogues.append(record)
         self.dialogues = self.dialogues[-self.limit :]
         self.save()
 
@@ -43,3 +54,11 @@ class HistoryManager:
 
     def count(self) -> int:
         return len(self.dialogues)
+
+    def total_usage(self) -> SessionUsage:
+        """Расход всей сохранённой истории: сумма метрик по записям файла.
+
+        Вытесненные за лимит записи уносят свой расход — итог отражает удержанную
+        историю (см. core/usage.sum_usage).
+        """
+        return sum_usage(self.dialogues)

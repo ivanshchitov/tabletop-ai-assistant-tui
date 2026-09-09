@@ -7,6 +7,7 @@ Enter в панели выполняет команду напрямую — т�
 import json
 
 from . import harness
+from .stub_api import answer
 
 
 def _wait_panel_open(session) -> None:
@@ -109,5 +110,43 @@ def test_status_bar_hint_lists_only_exit_and_commands(app, stub):
     assert "/clear" not in status_line
     assert "/logictask" not in status_line
 
+    session.send_line("/exit")
+    session.wait_exit()
+
+
+def test_usage_command_reports_tokens_without_api_calls(app, stub, history_file):
+    stub.always(answer("Короткий ответ stub-модели."))
+    session = app()
+    session.wait_for_prompt()
+    session.send_line("Вопрос про Каркассон")
+    session.wait_for("⏱")
+    session.send_line("/usage")
+    session.wait_on_screen("Учёт токенов")
+    session.wait_on_screen("Последний запрос: токены 50+100=150")
+    session.wait_on_screen("Сессия: запросов 1")
+    session.wait_on_screen("Всего диалога (файл истории): запросов 1")
+    session.wait_on_screen("Окно контекста: 1 из 50 обменов")
+    assert stub.call_count == 1  # отчёт не обращается к модели
+
+    # отчёт не пишется в историю
+    saved = json.loads(history_file.read_text(encoding="utf-8"))
+    assert len(saved) == 1 and "usage" in saved[0]
+
+    session.send_line("/exit")
+    session.wait_exit()
+
+
+def test_empty_truncated_answer_warns_and_session_continues(app, stub):
+    stub.always(answer("", finish_reason="length"))
+    session = app()
+    session.wait_for_prompt()
+    session.send_line("Невозможно сложный вопрос")
+    session.wait_on_screen("исчерпала бюджет")
+    assert stub.call_count == 1
+
+    # сессия продолжается: следующий вопрос обрабатывается нормально
+    stub.always(answer("Ответ после сбоя."))
+    session.send_line("Ещё вопрос")
+    session.wait_on_screen("Ответ после сбоя.")
     session.send_line("/exit")
     session.wait_exit()

@@ -313,3 +313,35 @@ def test_invalid_json_answers(text):
 def test_json_block_wins_over_surrounding_prose():
     """Модель иногда добавляет текст вокруг блока — блок всё равно должен быть распознан."""
     assert is_valid_json_answer('Вот карточка:\n```json\n{"a": 1}\n```\nГотово!') is True
+
+
+# --- день 8: причина завершения генерации ---------------------------------------------
+
+
+@responses.activate
+def test_finish_reason_is_captured_from_response(client):
+    body = _completion("Обрезанный ответ")
+    body["choices"][0]["finish_reason"] = "length"
+    responses.add(responses.POST, config.API_URL, json=body, status=200)
+    meta = client.ask_with_usage("system", "user")
+    assert meta.finish_reason == "length"
+
+
+@responses.activate
+def test_missing_finish_reason_is_none(client):
+    responses.add(responses.POST, config.API_URL, json=_completion("Ответ"), status=200)
+    meta = client.ask_with_usage("system", "user")
+    assert meta.finish_reason is None
+
+
+@responses.activate
+def test_empty_content_with_length_finish_reason_is_still_a_meta(client):
+    """Известный излом reasoning-моделей: бюджет исчерпан, content пуст, ошибки нет."""
+    body = _completion("")
+    body["choices"][0]["finish_reason"] = "length"
+    body["usage"] = {"prompt_tokens": 100, "completion_tokens": 4050, "total_tokens": 4150}
+    responses.add(responses.POST, config.API_URL, json=body, status=200)
+    meta = client.ask_with_usage("system", "user")
+    assert meta.content == ""
+    assert meta.finish_reason == "length"
+    assert meta.completion_tokens == 4050

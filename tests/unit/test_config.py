@@ -137,3 +137,27 @@ def test_model_pricing_covers_every_available_model():
 @pytest.mark.parametrize("attr", ["REQUEST_TIMEOUT", "MAX_RETRIES", "HISTORY_LIMIT", "MAX_INPUT_LENGTH"])
 def test_limits_are_positive(attr):
     assert getattr(config, attr) > 0
+
+
+def test_history_limit_defaults_to_50(monkeypatch):
+    monkeypatch.delenv("TABLETOP_HISTORY_LIMIT", raising=False)
+    reloaded = importlib.reload(config)
+    try:
+        assert reloaded.HISTORY_LIMIT == 50
+    finally:
+        importlib.reload(config)
+
+
+def test_history_limit_override_from_environment(monkeypatch):
+    """Переключатель для демо и e2e: вытеснение ходов видно за секунды, а не за 50+ обменов."""
+    monkeypatch.setenv("TABLETOP_HISTORY_LIMIT", "7")
+    reloaded = importlib.reload(config)
+    try:
+        assert reloaded.HISTORY_LIMIT == 7
+    finally:
+        monkeypatch.delenv("TABLETOP_HISTORY_LIMIT", raising=False)
+        importlib.reload(config)
+
+
+def test_estimated_chars_per_token_is_positive():
+    assert config.ESTIMATED_CHARS_PER_TOKEN > 0

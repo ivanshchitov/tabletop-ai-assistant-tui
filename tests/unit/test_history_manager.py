@@ -93,3 +93,74 @@ def test_limit_is_respected_for_various_sizes(history_path, limit):
     for i in range(limit + 3):
         manager.add(f"q{i}", f"a{i}")
     assert manager.count() == limit
+
+
+"""--- День 8: метрики использования в записях истории ---"""
+
+
+def _usage(prompt_tokens=10, completion_tokens=5, cost_usd=0.5):
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens + completion_tokens,
+        "cost_usd": cost_usd,
+    }
+
+
+def test_add_persists_usage_block(history_path):
+    manager = HistoryManager(path=history_path)
+    manager.add("q", "a", usage=_usage())
+
+    saved = json.loads(history_path.read_text(encoding="utf-8"))
+    assert saved == [{"question": "q", "answer": "a", "usage": _usage()}]
+
+
+def test_add_without_usage_keeps_old_record_shape(history_path):
+    manager = HistoryManager(path=history_path)
+    manager.add("q", "a")
+
+    saved = json.loads(history_path.read_text(encoding="utf-8"))
+    assert saved == [{"question": "q", "answer": "a"}]
+
+
+def test_old_format_file_loads_without_usage(history_path):
+    history_path.write_text(json.dumps([{"question": "q", "answer": "a"}]), encoding="utf-8")
+    manager = HistoryManager(path=history_path)
+
+    assert manager.dialogues == [{"question": "q", "answer": "a"}]
+    assert manager.total_usage().requests == 0
+
+
+def test_total_usage_sums_usage_across_records(history_path):
+    manager = HistoryManager(path=history_path)
+    manager.add("q1", "a1", usage=_usage(prompt_tokens=10, cost_usd=0.5))
+    manager.add("q2", "a2", usage=_usage(prompt_tokens=30, cost_usd=0.25))
+
+    usage = manager.total_usage()
+    assert usage.requests == 2
+    assert usage.prompt_tokens == 40
+    assert usage.completion_tokens == 10
+    assert usage.total_tokens == 50
+    assert usage.cost_usd == 0.75
+
+
+def test_total_usage_unknown_cost_poisons_total(history_path):
+    manager = HistoryManager(path=history_path)
+    manager.add("q", "a", usage=_usage(cost_usd=None))
+    assert manager.total_usage().cost_usd is None
+
+
+def test_evicted_record_takes_its_usage_away(history_path):
+    manager = HistoryManager(path=history_path, limit=2)
+    manager.add("q1", "a1", usage=_usage(prompt_tokens=100))
+    manager.add("q2", "a2", usage=_usage(prompt_tokens=10))
+    manager.add("q3", "a3", usage=_usage(prompt_tokens=20))
+
+    assert manager.total_usage().requests == 2
+    assert manager.total_usage().prompt_tokens == 30
+
+
+def test_usage_block_survives_reload(history_path):
+    HistoryManager(path=history_path).add("q", "a", usage=_usage())
+    reloaded = HistoryManager(path=history_path)
+    assert reloaded.dialogues[0]["usage"] == _usage()

@@ -22,9 +22,14 @@ class FakeClient:
     полагающийся на дефолт клиента (/logictask), от явной передачи значения настройки.
     """
 
-    def __init__(self, answers=None, error: Optional[Exception] = None) -> None:
+    def __init__(self, answers=None, error: Optional[Exception] = None, usages=None,
+                 finish_reason: Optional[str] = None) -> None:
         self.answers = list(answers or ["Ответ по умолчанию"])
         self.error = error
+        # Список (prompt_tokens, completion_tokens, cost_usd) — по одному на вызов;
+        # последний повторяется, если вызовов больше.
+        self.usages = list(usages) if usages else None
+        self.finish_reason = finish_reason
         self.calls: List[dict] = []
 
     def ask(
@@ -57,14 +62,19 @@ class FakeClient:
         model: Optional[str] = None,
     ) -> AnswerMeta:
         content = self.ask(system_message, user_message, max_tokens, temperature, model)
+        if self.usages:
+            prompt, completion, cost = self.usages.pop(0) if len(self.usages) > 1 else self.usages[0]
+        else:
+            prompt, completion, cost = 10, 20, 0.0001
         return AnswerMeta(
             content=content,
             model=model or config.DEFAULT_MODEL,
             elapsed_seconds=0.01,
-            prompt_tokens=10,
-            completion_tokens=20,
-            total_tokens=30,
-            cost_usd=0.0001,
+            prompt_tokens=prompt,
+            completion_tokens=completion,
+            total_tokens=prompt + completion,
+            cost_usd=cost,
+            finish_reason=self.finish_reason,
         )
 
     def ask_with_usage_messages(
@@ -256,7 +266,10 @@ def test_question_reaches_the_client_and_the_answer_is_printed(make_app, recordi
 def test_successful_exchange_is_persisted(make_app, history, history_path):
     make_app(["Вопрос про Splendor", "/exit"], FakeClient(["Ответ"])).run()
 
-    assert history.dialogues == [{"question": "Вопрос про Splendor", "answer": "Ответ"}]
+    record = history.dialogues[0]
+    assert record["question"] == "Вопрос про Splendor"
+    assert record["answer"] == "Ответ"
+    assert record["usage"]["total_tokens"] == 30
     assert json.loads(history_path.read_text(encoding="utf-8"))[0]["question"] == "Вопрос про Splendor"
 
 
@@ -803,6 +816,72 @@ def test_models_is_a_known_command_and_autocomplete_sees_it():
 def test_status_bar_shows_current_model(make_app, recording_console):
     make_app(["/exit"], FakeClient()).run()
     assert f"Модель: {config.DEFAULT_MODEL}" in recording_console.text
+
+
+# --- день 8: предупреждения об усечении, /usage, итоги в статус-баре -------------------
+
+
+def test_empty_answer_with_length_finish_reason_warns_about_budget(make_app, recording_console):
+    """Reasoning-модель исчерпала max_tokens: content пуст, ошибки нет — нужен видимый излом."""
+    client = FakeClient(answers=[""], finish_reason="length", usages=[(100, 4050, 0.01)])
+    make_app(["Вопрос", "/exit"], client).run()
+
+    assert recording_console.contains("исчерпала бюджет")
+
+
+def test_nonempty_answer_with_length_finish_reason_warns_about_truncation(make_app, recording_console):
+    client = FakeClient(answers=["Обрезанный ответ"], finish_reason="length")
+    make_app(["Вопрос", "/exit"], client).run()
+
+    assert recording_console.contains("мог быть обрезан")
+
+
+def test_normal_answer_has_no_truncation_warning(make_app, recording_console):
+    make_app(["Вопрос", "/exit"], FakeClient()).run()
+
+    assert not recording_console.contains("мог быть обрезан")
+    assert not recording_console.contains("исчерпал бюджет")
+
+
+def test_usage_command_prints_report_after_question(make_app, recording_console):
+    client = FakeClient()
+    make_app(["Вопрос", "/usage", "/exit"], client).run()
+
+    assert recording_console.contains("Последний запрос")
+    assert recording_console.contains("Сессия")
+    assert recording_console.contains("Всего диалога")
+    assert recording_console.contains("Окно контекста")
+    assert len(client.calls) == 1  # отчёт не обращается к модели
+
+
+def test_usage_command_before_any_question_reports_nothing_yet(make_app, recording_console):
+    make_app(["/usage", "/exit"], FakeClient()).run()
+
+    assert recording_console.contains("пока не было запросов")
+
+
+def test_usage_command_is_known_and_autocomplete_sees_it():
+    assert "/usage" in tui_app.COMMANDS
+
+
+def test_status_bar_shows_session_totals_after_answers(make_app, recording_console):
+    make_app(["Вопрос 1", "Вопрос 2", "/exit"], FakeClient()).run()
+
+    assert recording_console.contains("Сессия: 60 ток.")
+
+
+def test_status_bar_session_totals_are_zero_before_first_question(make_app, recording_console):
+    make_app(["/exit"], FakeClient()).run()
+
+    assert recording_console.contains("Сессия: 0 ток.")
+
+
+def test_status_bar_session_totals_unknown_cost_when_unpriced(make_app, recording_console):
+    client = FakeClient(usages=[(10, 20, None)])
+    make_app(["Вопрос", "/exit"], client).run()
+
+    assert recording_console.contains("Сессия: 30 ток.")
+    assert recording_console.contains("неизвестно")
 
 
 def test_status_bar_shows_model_after_selection(make_app, recording_console, monkeypatch):

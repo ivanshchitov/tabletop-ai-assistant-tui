@@ -46,7 +46,7 @@ class APIError(Exception):
 
 @dataclass
 class AnswerMeta:
-    """Ответ модели вместе с метриками запроса: время, токены, стоимость."""
+    """Ответ модели вместе с метриками запроса: время, токены, стоимость, причина завершения."""
 
     content: str
     model: str
@@ -55,6 +55,8 @@ class AnswerMeta:
     completion_tokens: int
     total_tokens: int
     cost_usd: Optional[float]
+    # Значение choices[0].finish_reason из ответа API; None, если поле не пришло.
+    finish_reason: Optional[str] = None
 
 
 class APIClient:
@@ -173,6 +175,7 @@ class APIClient:
     @staticmethod
     def _meta_from(data: Dict[str, Any], elapsed: float, model: str) -> AnswerMeta:
         content = data["choices"][0]["message"]["content"].strip()
+        finish_reason = data["choices"][0].get("finish_reason")
         request_usage = data.get("usage") or {}
         prompt_tokens = request_usage.get("prompt_tokens", 0)
         completion_tokens = request_usage.get("completion_tokens", 0)
@@ -186,4 +189,5 @@ class APIClient:
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
             cost_usd=cost_usd,
+            finish_reason=finish_reason,
         )

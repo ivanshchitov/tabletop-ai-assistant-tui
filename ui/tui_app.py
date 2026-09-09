@@ -225,6 +225,9 @@ class TabletopAITUI:
             self.agent.reset()
             self.console.print("[bold green]История диалога очищена.[/bold green]")
             return True
+        if command == "/usage":
+            self._print_usage_report()
+            return True
         if command == "/logictask":
             self._run_logictask()
             return True
@@ -456,9 +459,55 @@ class TabletopAITUI:
         self._print_typing(answer)
         if self.settings.format == AnswerFormat.JSON and not is_valid_json_answer(answer):
             self.console.print("[bold yellow]⚠ Модель не вернула валидный JSON.[/bold yellow]")
+        if meta.finish_reason == "length":
+            if answer:
+                self.console.print(
+                    "[bold yellow]⚠ Ответ мог быть обрезан: модель упёрлась в бюджет "
+                    "max_tokens (finish_reason=length).[/bold yellow]"
+                )
+            else:
+                self.console.print(
+                    "[bold yellow]⚠ Модель исчерпала бюджет max_tokens — ответ не "
+                    "сгенерирован (finish_reason=length). Попробуйте вопрос проще или "
+                    "модель слабее в рассуждениях.[/bold yellow]"
+                )
         self._print_usage_meta(meta)
         self.console.rule(style="dim")
         self.session_count += 1
+
+    def _print_usage_report(self) -> None:
+        """Отчёт /usage: последний запрос, итоги сессии, расход истории, окно контекста.
+
+        Без запросов к модели. Оценка окна — клиентская эвристика (см. core/usage),
+        помечена «≈»; эталонные числа — в метриках последнего запроса.
+        """
+        self.console.print("[bold cyan]Учёт токенов (без обращения к модели):[/bold cyan]")
+        last = self.agent.last_result
+        if last is None:
+            self.console.print("[dim]  Последний запрос: пока не было запросов.[/dim]")
+        else:
+            last_cost = f"${last.cost_usd:.6f}" if last.cost_usd is not None else "неизвестно"
+            self.console.print(
+                f"[dim]  Последний запрос: токены {last.prompt_tokens}+"
+                f"{last.completion_tokens}={last.total_tokens}, стоимость {last_cost}[/dim]"
+            )
+        session = self.agent.session_usage
+        session_cost = f"${session.cost_usd:.4f}" if session.cost_usd is not None else "неизвестно"
+        self.console.print(
+            f"[dim]  Сессия: запросов {session.requests}, вход {session.prompt_tokens}, "
+            f"выход {session.completion_tokens}, всего {session.total_tokens}, "
+            f"стоимость {session_cost}[/dim]"
+        )
+        lifetime = self.agent.history.total_usage()
+        lifetime_cost = f"${lifetime.cost_usd:.4f}" if lifetime.cost_usd is not None else "неизвестно"
+        self.console.print(
+            f"[dim]  Всего диалога (файл истории): запросов {lifetime.requests}, "
+            f"всего {lifetime.total_tokens}, стоимость {lifetime_cost}[/dim]"
+        )
+        self.console.print(
+            f"[dim]  Окно контекста: {self.agent.stack_exchanges} из "
+            f"{config.HISTORY_LIMIT} обменов, ≈ {self.agent.stack_tokens_estimate} токенов[/dim]"
+        )
 
     def _print_usage_meta(self, meta: AnswerMeta) -> None:
         cost = f"${meta.cost_usd:.6f}" if meta.cost_usd is not None else "неизвестно"
@@ -477,13 +526,17 @@ class TabletopAITUI:
 
     def _print_status_bar(self) -> None:
         commands_hint = ", ".join(STATUS_COMMANDS)
+        session = self.agent.session_usage
+        session_cost = f"${session.cost_usd:.4f}" if session.cost_usd is not None else "неизвестно"
         self.console.print(
             f"[dim]Статус: Готов ✅  |  Модель: {self.model}  |  Формат: {FORMAT_LABELS[self.settings.format]}  |  "
             f"Объём: {self.settings.max_words} слов  |  Лимит списка: {self.settings.list_limit}  |  "
             f"Температура: {self.settings.temperature:.1f}  |  "
-            f"Команды: {commands_hint}  |  Диалогов за сессию: {self.session_count}[/dim]"
+            f"Команды: {commands_hint}  |  Диалогов за сессию: {self.session_count}  |  "
+            f"Сессия: {session.total_tokens} ток., {session_cost}[/dim]"
         )
         self.console.rule(style="dim")
+
 
     def _exit(self) -> None:
         self.console.print(f"[bold yellow]{GOODBYE_MESSAGE}[/bold yellow]")

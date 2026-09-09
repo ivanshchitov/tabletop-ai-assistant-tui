@@ -8,9 +8,10 @@
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from . import config, logictask, prompts
+from .usage import SessionLedger, SessionUsage, estimate_tokens
 from .answer_settings import AnswerFormat, AnswerSettings
 from .api_client import APIClient, AnswerMeta
 from .history_manager import HistoryManager
@@ -66,6 +67,8 @@ class TabletopAgent:
         # Ходы user/assistant успешных обменов; system в стеке не хранится (пересобирается).
         self._turns: List[Dict[str, str]] = []
         self._last_result: Optional[AnswerMeta] = None
+        # Учёт расхода сессии: каждый успешный запрос к API (вопрос и /logictask).
+        self._ledger = SessionLedger()
         # Обе памяти агента — свои: стек сессии восстанавливается из файла истории
         # сразу при создании, «забыть вызвать» восстановление невозможно.
         self.restore_context()
@@ -92,6 +95,28 @@ class TabletopAgent:
         """Метрики последнего запроса к API: время, токены, стоимость (только чтение)."""
         return self._last_result
 
+    @property
+    def session_usage(self) -> SessionUsage:
+        """Итоги сессии: накопленные токены и стоимость всех успешных запросов."""
+        return self._ledger.usage
+
+    @property
+    def stack_exchanges(self) -> int:
+        """Число обменов в окне контекста сессии (пары user/assistant)."""
+        return len(self._turns) // 2
+
+    @property
+    def stack_tokens_estimate(self) -> int:
+        """Приближённая оценка токенов отправляемого стека (system + ходы сессии).
+
+        Клиентская эвристика, не реальное число токенов запроса — эталон виден в
+        prompt_tokens последнего ответа. Ходы за потолком окна в стек не входят,
+        поэтому оценка растёт только до заполнения окна.
+        """
+        total = estimate_tokens(prompts.build_system_message(self.config.format))
+        total += sum(estimate_tokens(turn["content"]) for turn in self._turns)
+        return total
+
     def ask(self, question: str) -> AnswerMeta:
         """Задаёт вопрос с контекстом сессии; при ошибке API поднимает APIError."""
         user_prompt = prompts.build_user_prompt(question, self.config.settings)
@@ -102,9 +127,10 @@ class TabletopAgent:
             model=self.config.model,
         )
         self._last_result = meta
+        self._ledger.record(meta)
         self._remember(user_prompt, meta.content)
-        # Долговременная память: пара «вопрос–ответ» — на диск сразу после ответа.
-        self.history.add(question, meta.content)
+        # Долговременная память: пара «вопрос–ответ» с метриками — на диск сразу после ответа.
+        self.history.add(question, meta.content, usage=self._usage_block(meta))
         return meta
 
     def solve_logictask(self, strategy_number: int) -> Iterator[Tuple[Optional[str], AnswerMeta]]:
@@ -129,9 +155,10 @@ class TabletopAgent:
                 yield role, self._logictask_call(*logictask.build_expert_prompts(role))
 
     def reset(self) -> None:
-        """Опустошает стек сообщений и файл истории (команда /clear)."""
+        """Опустошает стек сообщений, файл истории и накопитель сессии (команда /clear)."""
         self._turns.clear()
         self.history.clear()
+        self._ledger.reset()
 
     def restore_context(self) -> None:
         """Засеивает стек ходами из собственной истории агента (пары «вопрос–ответ»).
@@ -177,4 +204,15 @@ class TabletopAgent:
             model=self.config.model,
         )
         self._last_result = meta
+        self._ledger.record(meta)
         return meta
+
+    @staticmethod
+    def _usage_block(meta: AnswerMeta) -> Dict[str, Any]:
+        """Метрики запроса для записи в history.json (cost_usd — None без цены)."""
+        return {
+            "prompt_tokens": meta.prompt_tokens,
+            "completion_tokens": meta.completion_tokens,
+            "total_tokens": meta.total_tokens,
+            "cost_usd": meta.cost_usd,
+        }

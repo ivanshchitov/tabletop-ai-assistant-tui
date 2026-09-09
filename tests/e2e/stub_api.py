@@ -22,20 +22,25 @@ class Reply:
         status: int = 200,
         delay: float = 0.0,
         raw_body: Optional[str] = None,
+        finish_reason: Optional[str] = None,
     ) -> None:
         self.content = content
         self.status = status
         self.delay = delay
         self.raw_body = raw_body
+        self.finish_reason = finish_reason
 
     def body(self) -> str:
         if self.raw_body is not None:
             return self.raw_body
         if self.status != 200:
             return json.dumps({"error": {"message": "stub error"}})
+        choice = {"message": {"content": self.content or ""}}
+        if self.finish_reason is not None:
+            choice["finish_reason"] = self.finish_reason
         return json.dumps(
             {
-                "choices": [{"message": {"content": self.content or ""}}],
+                "choices": [choice],
                 # Фиксированные значения, не зависящие от длины вопроса/ответа — этого достаточно,
                 # чтобы e2e-тесты проверили сам факт проброса usage от API до экрана.
                 "usage": {"prompt_tokens": 50, "completion_tokens": 100, "total_tokens": 150},
@@ -43,8 +48,8 @@ class Reply:
         )
 
 
-def answer(content: str) -> Reply:
-    return Reply(content=content)
+def answer(content: str, finish_reason: Optional[str] = None) -> Reply:
+    return Reply(content=content, finish_reason=finish_reason)
 
 
 def failure(status: int) -> Reply:
