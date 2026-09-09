@@ -120,9 +120,11 @@ parents up (`Path(__file__).resolve().parent.parent`) rather than one — it has
 `core/` to the repo root where `.env`, `assets/`, and `history.json` actually live.
 
 **Environment switches (`core/config.py`):** `OPENCODE_API_URL`, `TABLETOP_HISTORY_FILE`,
-`TABLETOP_REQUEST_TIMEOUT` and `TABLETOP_TYPING_DELAY` (the last one read in `ui/tui_app.py`)
-override the corresponding defaults. They exist so the e2e layer can point the app at a local
-stub server, keep history in a temp file, and collapse the typing animation. `HISTORY_FILE`
+`TABLETOP_REQUEST_TIMEOUT`, `TABLETOP_TYPING_DELAY` (the last one read in `ui/tui_app.py`) and
+`TABLETOP_HISTORY_LIMIT` (the cap for both the history file and the session context window,
+default 50) override the corresponding defaults. They exist so the e2e layer can point the app
+at a local stub server, keep history in a temp file, collapse the typing animation — or shrink
+the context window to demonstrate eviction in seconds instead of 50+ exchanges. `HISTORY_FILE`
 especially: its path derives from `__file__`, not the working directory, so without the override
 *any* run — a test run included — would write to the single real `history.json` in the repo root.
 
@@ -339,14 +341,35 @@ expected cost of context, visible in the usage line.
 
 **`core/usage.py`** — `estimate_cost(model, prompt_tokens, completion_tokens)` is a pure function
 over `config.MODEL_PRICING`; it exists as its own module (not inlined in `api_client.py`) so cost
-math is testable without HTTP mocking.
+math is testable without HTTP mocking. Day-8 additions live here too: `estimate_tokens(text)`
+(a deliberate *approximation* — `ceil(len/ESTIMATED_CHARS_PER_TOKEN)` with
+`ESTIMATED_CHARS_PER_TOKEN = 3`, conservative for Cyrillic; never a real tokenizer, always
+marked "≈" in output), `SessionLedger` (the per-session accumulator the agent feeds with every
+successful `AnswerMeta`; unknown cost of any single request poisons the session cost to `None`)
+and `sum_usage(dialogues)` (totals over `history.json` records carrying a `usage` block).
+
+**`/usage` (`ui/tui_app.py::_print_usage_report`)** — a non-interactive report printed to the
+permanent log, zero API calls: last request, session totals (from the agent's ledger), lifetime
+totals over the saved history, and the context-window state (`N/M exchanges + ≈ tokens`).
+It is wired through `COMMAND_OPTIONS` like every other command. The status bar
+(`_print_status_bar`) additionally shows `Сессия: <tokens> ток., <cost>` after every step —
+session-scoped only, same as the dialog counter (restored exchanges carry no usage metrics).
+Truncation warnings (`finish_reason == "length"` in `AnswerMeta`, captured by the client from
+`choices[0]`): empty content → "модель исчерпала бюджет max_tokens" (the documented reasoning-
+model failure mode), non-empty → "ответ мог быть обрезан". Question path only; `/logictask`
+keeps its pinned `max_tokens` and stays untouched.
 
 **`core/history_manager.py`** — `history.json` (gitignored) is the agent's long-term memory:
 `TabletopAgent` owns the manager (passed at construction, `TabletopAgent(client, history=...)`),
 seeds its message stack from it automatically at creation, appends every successful exchange to
 it immediately inside `ask()`, and empties both memories in `reset()`. The TUI only displays
 its contents (startup replay) — it never writes or clears history itself. Storage cap is
-`config.HISTORY_LIMIT`; a missing or corrupt file reads as empty history.
+`config.HISTORY_LIMIT`; a missing or corrupt file reads as empty history. Each record may carry
+a `usage` block (`{"question", "answer", "usage": {prompt_tokens, completion_tokens,
+total_tokens, cost_usd}}`) written by `ask()`; records in the old shape load unchanged and are
+just skipped by totals. Honest limitation: because records evict at the cap, the "всего диалога"
+total is the spend of the *retained* history, not all-time spend — accepted deliberately
+(comparative, not accounting-grade).
 
 ## Test layout
 
