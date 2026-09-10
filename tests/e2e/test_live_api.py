@@ -75,13 +75,29 @@ def set_number(session, row_presses: int, value: str) -> None:
     close_settings(session)
 
 
-def answer_text(session, question: str) -> str:
-    """Задать вопрос и вернуть напечатанный ответ (без приглашений и статус-бара)."""
+def wait_for_exchange(session, number: int) -> None:
+    """Ждёт завершение обмена номер N: N строк usage «Токены:» в скроллбэке.
+
+    Счётчик диалогов удалён из статус-бара; признак завершённого обмена — строка метрик.
+    """
+    import time
+
+    deadline = time.monotonic() + ANSWER_TIMEOUT
+    while time.monotonic() < deadline:
+        text = _collapse(session.scrollback())
+        if text.count("Токены:") >= number:
+            return
+        time.sleep(0.2)
+    raise AssertionError(f"Не дождались {number} обменов за {ANSWER_TIMEOUT} с.")
+
+
+def answer_text(session, question: str, number: int = 1) -> str:
+    """Задать вопрос номер `number` и вернуть напечатанный ответ."""
     session.wait_for_prompt()
     session.send_line(question)
     session.wait_for("Tabletop AI Assistant:", timeout=ANSWER_TIMEOUT)
-    # Признак завершённого обмена — статус-бар, который печатается уже после ответа.
-    session.wait_for("Диалогов за сессию: 1", timeout=ANSWER_TIMEOUT)
+    # Признак завершённого обмена — строка метрик, которая печатается уже после ответа.
+    wait_for_exchange(session, number)
     log = session.scrollback()
     start = log.index("Tabletop AI Assistant:") + len("Tabletop AI Assistant:")
     end = log.index("Статус: Готов", start)
@@ -106,8 +122,8 @@ def test_live_question_gets_a_real_answer(live_app, history_file):
     assert len(answer.split()) > 10, f"Ответ подозрительно короткий: {answer!r}"
     assert "Ошибка" not in answer
     saved = json.loads(history_file.read_text(encoding="utf-8"))
-    assert saved[0]["question"] == BOARD_GAME_QUESTION
-    assert saved[0]["answer"]
+    assert saved["dialogues"][0]["question"] == BOARD_GAME_QUESTION
+    assert saved["dialogues"][0]["answer"]
 
 
 # --- продуктовые требования к промпту -----------------------------------------------------------
@@ -210,14 +226,13 @@ def test_live_settings_reach_the_model_across_questions(live_app, history_file):
         set_number(session, row_presses=1, value="30")
         session.wait_for("Объём: 30 слов")
         answer_text(session, BOARD_GAME_QUESTION)
-        session.send_line("Во что поиграть вдвоём?")
-        session.wait_for("Диалогов за сессию: 2", timeout=ANSWER_TIMEOUT)
+        answer_text(session, "Во что поиграть вдвоём?", number=2)
         session.send_line("/exit")
         session.wait_exit()
 
     saved = json.loads(history_file.read_text(encoding="utf-8"))
-    assert len(saved) == 2
-    assert all(item["answer"].strip() for item in saved)
+    assert len(saved["dialogues"]) == 2
+    assert all(item["answer"].strip() for item in saved["dialogues"])
 
 
 def test_live_bad_key_reports_unauthorized(live_app):
@@ -236,3 +251,55 @@ def test_live_api_url_is_the_real_service(live_app):
         session.wait_for_prompt()
         session.send_line("/exit")
         assert session.wait_exit() == 0
+
+
+def set_compress_after(session, value: str) -> None:
+    """Порог сжатия — четвёртая строка панели: ↓×4, стереть, набрать, Esc, проверка reopen."""
+    open_settings(session)
+    for _ in range(4):
+        session.send_keys(KEY_DOWN)
+    session.send_keys(*[KEY_BACKSPACE] * 4)
+    session.send_keys(*[c.encode() for c in value])
+    close_settings(session)
+
+    open_settings(session)
+    screen = session.wait_on_screen(f"Сжатие после (5..50 сообщений): {value}")
+    close_settings(session)
+    assert f"Сжатие после (5..50 сообщений): {value}" in screen
+
+
+def _prompt_tokens_from_usage_lines(log: str) -> list:
+    """Числа prompt_tokens из строк метрик «⏱ ... | Токены: N+M=K | ...» в порядке обмена."""
+    return [int(match.group(1)) for match in re.finditer(r"Токены: (\d+)\+\d+=\d+", log)]
+
+
+def test_live_compression_bounds_tokens_and_keeps_early_facts(live_app):
+    """Сравнение до/после в одном сеансе: ранние обмены растут в токенах, после
+    срабатывания порога собранный запрос держится на плато, а факт из давнего
+    обмена достаётся модели через резюме.
+    """
+    with live_app() as session:
+        set_compress_after(session, "5")
+
+        answer_text(session, "Коротко: что такое Каркассон?", number=1)
+        answer_text(session, "Коротко: что такое Catan?", number=2)
+        answer_text(session, "Коротко: что такое Splendor?", number=3)
+
+        session.wait_for_prompt()
+        session.send_line("Коротко: что такое Carcassonne Hunters & Trappers?")
+        session.wait_for("Контекст сжат", timeout=ANSWER_TIMEOUT)
+        wait_for_exchange(session, 4)
+
+        # качество: факт из давнего обмена доступен модели через резюме
+        session.send_line("Какую игру я упоминал в самом первом вопросе?")
+        wait_for_exchange(session, 5)
+        answer = session.scrollback()
+
+    log = _collapse(answer)
+    assert "Каркассон" in log, f"Ответ не назвал игру из давнего обмена:\n{log}"
+    tokens = _prompt_tokens_from_usage_lines(answer)
+    assert len(tokens) == 5, f"Ожидались метрики пяти обменов: {tokens}"
+    # до сжатия: собранный запрос растёт с каждым обменом
+    assert tokens[1] > tokens[0], f"Токены не растут до сжатия: {tokens}"
+    # после срабатывания порога: плато вместо роста (с резюме вместо десяти ходов)
+    assert tokens[3] < tokens[2], f"После сжатия токены не ушли на плато: {tokens}"

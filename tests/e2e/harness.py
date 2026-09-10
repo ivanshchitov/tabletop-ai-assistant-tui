@@ -317,6 +317,25 @@ def normalize_screen(text: str) -> str:
     return "\n".join(lines)
 
 
+def wait_for_answers(
+    session: AppSession, number: int, marker: str = "Токены: 50+100=150",
+    timeout: float = DEFAULT_TIMEOUT,
+) -> str:
+    """Ждёт завершение обмена номер N: N строк usage «Токены:» в скроллбэке.
+
+    Счётчик диалогов удалён из статус-бара; признак завершённого обмена — строка метрик
+    запроса, которая печатается после каждого ответа (маркер — значение stub-сервера).
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _collapse(session.scrollback()).count(marker) >= number:
+            return session.scrollback()
+        time.sleep(0.02)
+    raise AssertionError(
+        f"Не дождались {number} обменов за {timeout} с.\n--- экран ---\n{session.scrollback()}"
+    )
+
+
 def assert_snapshot(actual: str, path: Path, update: bool) -> None:
     """Сравнивает экран с сохранённым снапшотом (или обновляет его по флагу)."""
     actual = normalize_screen(actual)

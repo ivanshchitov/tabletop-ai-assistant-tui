@@ -120,16 +120,19 @@ parents up (`Path(__file__).resolve().parent.parent`) rather than one — it has
 `core/` to the repo root where `.env`, `assets/`, and `history.json` actually live.
 
 **Environment switches (`core/config.py`):** `OPENCODE_API_URL`, `TABLETOP_HISTORY_FILE`,
-`TABLETOP_REQUEST_TIMEOUT`, `TABLETOP_TYPING_DELAY` (the last one read in `ui/tui_app.py`) and
-`TABLETOP_HISTORY_LIMIT` (the cap for both the history file and the session context window,
-default 50) override the corresponding defaults. They exist so the e2e layer can point the app
-at a local stub server, keep history in a temp file, collapse the typing animation — or shrink
-the context window to demonstrate eviction in seconds instead of 50+ exchanges. `HISTORY_FILE`
-especially: its path derives from `__file__`, not the working directory, so without the override
-*any* run — a test run included — would write to the single real `history.json` in the repo root.
+`TABLETOP_REQUEST_TIMEOUT`, `TABLETOP_TYPING_DELAY` (the last one read in `ui/tui_app.py`),
+`TABLETOP_COMPRESS_AFTER` (the session setting's default, messages, default 10) and
+`TABLETOP_MAX_SESSION_TOKENS` (the session setting's default, tokens, default 20000) override
+the corresponding defaults. They exist so the e2e layer can point the app at a local stub
+server, keep history in a temp file, collapse the typing animation — or exercise compression
+and the token ceiling in seconds. `HISTORY_FILE` especially: its path derives from `__file__`,
+not the working directory, so without the override *any* run — a test run included — would
+write to the single real `history.json` in the repo root.
 
 **Settings flow:** `core/answer_settings.AnswerSettings` (`format: AnswerFormat`, `max_words: int`,
-`list_limit: int`, `temperature: float`) is the single source of truth for response control, held on
+`list_limit: int`, `temperature: float`, `compress_after: int` (5..50, default 10 — messages kept
+verbatim before compression fires), `max_session_tokens: int` (5000..50000, default 20000 — the
+ceiling of the assembled request in tokens)) is the single source of truth for response control, held on
 `TabletopAITUI.settings`. Each `with_*` method returns a new validated instance —
 range/enum-invalid input raises `AnswerSettingsError` rather than silently clamping; the caller
 (the `/settings` screen in `ui/tui_app.py`) is responsible for showing that error and keeping the
@@ -313,31 +316,38 @@ two-message sugar over the same `_request()` for callers that don't need the sta
 
 **`core/tabletop_agent.py`** — the agent entity: the single place that decides what goes to the
 LLM. `TabletopAgent` owns the session's message stack (user/assistant turns of successful
-exchanges, capped at `config.HISTORY_LIMIT` exchanges — oldest turns drop out of the *requests*,
-not the screen or `history.json`), rebuilds the system message from the current `AnswerSettings`
-on every `ask()` (a format switch applies to the very next question; past user turns keep the
-word/list instructions of their moment), and forwards the whole stack via
-`client.ask_with_usage_messages()`. `solve_logictask(strategy)` runs the `/logictask` strategies
-as a generator yielding `(label, AnswerMeta)` per request — deliberately outside the conversation
-stack (results never influence later answers) and without session settings (no temperature,
-`max_tokens` pinned to the default word budget). `reset()` (wired to `/clear`) empties the stack.
-`AgentConfig` is the agent's single config object — session `AnswerSettings` plus the session
-`model` (flat read-only views `format`/`max_words`/`list_limit` over the settings; validation
-stays in `AnswerSettings.with_*`). The TUI's `settings`/`model` properties route into it. After
-every successful request — `ask()` and each `/logictask` call — the agent keeps the returned
-`AnswerMeta` on the read-only `last_result` property (response time, token counts, cost), so
-metrics of the last request are always available to readers without the UI having to stash them.
-The agent prints nothing: errors surface as `APIError` to the caller. `TabletopAITUI` is a thin
-view over it. The agent owns both memories: the session stack and the `history.json` manager
+exchanges) plus the compressed summary — the third memory. Every question goes out as
+system (from the current `AnswerSettings`, rebuilt per ask) + an optional summary message +
+the undigested turns + the new user prompt. Compression always runs (no on/off switch):
+before a question, when the client-side token estimate of the assembled request exceeds
+`settings.max_session_tokens` or the undigested messages reach `settings.compress_after`,
+the agent asks the model to fold the oldest turns (all but the last exchange, which always
+stays verbatim) into the summary; turns are dropped from the stack ONLY after a successful
+summarizer call — on APIError the question is not sent, nothing is lost, the next ask retries
+the compression. The summarizer call uses the session model, no temperature, and a pinned
+`max_tokens` from `config.SUMMARY_MAX_WORDS` (150); its spend lands in the session ledger.
+`solve_logictask(strategy)` runs the `/logictask` strategies as a generator yielding
+`(label, AnswerMeta)` per request — deliberately outside the conversation stack (results never
+influence later answers) and without session settings (no temperature, `max_tokens` pinned to
+the default word budget). `reset()` (wired to `/clear`) empties the stack, the summary and the
+file. `AgentConfig` is the agent's single config object — session `AnswerSettings` plus the
+session `model`. The TUI's `settings`/`model` properties route into it. After every successful
+request — `ask()`, each `/logictask` call and each summarizer call — the agent keeps the
+returned `AnswerMeta` on the read-only `last_result` property; the read-only `last_compression`
+holds the last digest report (messages/exchanges folded), the TUI turns its change into the
+«Контекст сжат: …» log line and the `RequestPhase` listener callback into the spinner label
+(`Суммаризация...` during compression, `Отправка...` for the question itself). The agent prints
+nothing: errors surface as `APIError` to the caller. `TabletopAITUI` is a thin view over it.
+The agent owns all memories: the session stack, the summary and the `history.json` manager
 (passed at construction), so the context survives restarts without any UI involvement —
 `TabletopAgent.__init__` calls `restore_context()` itself, and `ask()` appends each successful
-exchange to the file immediately. One deliberate deviation from the live-session rule "past
-user turns keep their own word/list instructions": a restored user turn is rebuilt through
-`build_user_prompt` with the *current* settings, because `history.json` stores the raw question,
-not the assembled prompt — the assistant turn is kept verbatim. Requests are multi-turn: the
-second question in a session (and the first question after a restart with non-empty history)
-carries the prior exchanges, so `prompt_tokens` grows with the conversation up to the cap —
-expected cost of context, visible in the usage line.
+exchange to the file immediately. Restore seeds the stored summary plus the exchanges not
+covered by it (rebuilt through `build_user_prompt` with the *current* settings, because
+`history.json` stores the raw question, not the assembled prompt; the assistant turn is kept
+verbatim); uncovered history is compressed in token-bounded chunks at the first question, by
+the same trigger machinery — no separate restart code. Requests are multi-turn: with
+compression the assembled request stays bounded (summary + a small verbatim tail), so
+`prompt_tokens` plateaus instead of growing — visible in the usage line.
 
 **`core/usage.py`** — `estimate_cost(model, prompt_tokens, completion_tokens)` is a pure function
 over `config.MODEL_PRICING`; it exists as its own module (not inlined in `api_client.py`) so cost
@@ -350,26 +360,31 @@ and `sum_usage(dialogues)` (totals over `history.json` records carrying a `usage
 
 **`/usage` (`ui/tui_app.py::_print_usage_report`)** — a non-interactive report printed to the
 permanent log, zero API calls: last request, session totals (from the agent's ledger), lifetime
-totals over the saved history, and the context-window state (`N/M exchanges + ≈ tokens`).
-It is wired through `COMMAND_OPTIONS` like every other command. The status bar
-(`_print_status_bar`) additionally shows `Сессия: <tokens> ток., <cost>` after every step —
-session-scoped only, same as the dialog counter (restored exchanges carry no usage metrics).
-Truncation warnings (`finish_reason == "length"` in `AnswerMeta`, captured by the client from
-`choices[0]`): empty content → "модель исчерпала бюджет max_tokens" (the documented reasoning-
-model failure mode), non-empty → "ответ мог быть обрезан". Question path only; `/logictask`
-keeps its pinned `max_tokens` and stays untouched.
+totals over the saved history (uncapped now — the file holds every exchange), and the
+context-window state (`N undigested exchanges, M exchanges under the summary, ≈ tokens vs the
+session ceiling`). It is wired through `COMMAND_OPTIONS` like every other command. The status
+bar (`_print_status_bar`) additionally shows `Сессия: <tokens> ток., <cost>` after every step —
+session-scoped only (restored exchanges carry no usage metrics). The per-session dialogue
+counter is removed from the status bar by design. Truncation warnings
+(`finish_reason == "length"` in `AnswerMeta`, captured by the client from `choices[0]`):
+empty content → "модель исчерпала бюджет max_tokens" (the documented reasoning-model failure
+mode), non-empty → "ответ мог быть обрезан". Question path only; `/logictask` keeps its pinned
+`max_tokens` and stays untouched.
 
 **`core/history_manager.py`** — `history.json` (gitignored) is the agent's long-term memory:
 `TabletopAgent` owns the manager (passed at construction, `TabletopAgent(client, history=...)`),
-seeds its message stack from it automatically at creation, appends every successful exchange to
-it immediately inside `ask()`, and empties both memories in `reset()`. The TUI only displays
-its contents (startup replay) — it never writes or clears history itself. Storage cap is
-`config.HISTORY_LIMIT`; a missing or corrupt file reads as empty history. Each record may carry
-a `usage` block (`{"question", "answer", "usage": {prompt_tokens, completion_tokens,
+seeds its context (summary + uncovered tail) from it automatically at creation, appends every
+successful exchange to it immediately inside `ask()`, and empties all memories in `reset()`.
+The TUI only displays its contents (startup replay) — it never writes or clears history itself.
+The file is an envelope `{"summary", "summary_covers", "dialogues"}`; a bare list (the old
+format) loads as an envelope with an empty summary, and a missing or corrupt file reads as
+empty history. There is NO eviction cap — every exchange stays verbatim forever, so the
+«всего диалога» total in `/usage` is now the true all-time spend of the file. Each record may
+carry a `usage` block (`{"question", "answer", "usage": {prompt_tokens, completion_tokens,
 total_tokens, cost_usd}}`) written by `ask()`; records in the old shape load unchanged and are
-just skipped by totals. Honest limitation: because records evict at the cap, the "всего диалога"
-total is the spend of the *retained* history, not all-time spend — accepted deliberately
-(comparative, not accounting-grade).
+just skipped by totals. `summary`/`summary_covers` are updated by the agent's compression (a
+digest of the leading exchanges the model folded) and restored on construction — a lost or
+stale summary is not data loss, it is recomputed from the verbatim records.
 
 ## Test layout
 

@@ -17,7 +17,9 @@ ROW_FORMAT = 0
 ROW_MAX_WORDS = 1
 ROW_LIST_LIMIT = 2
 ROW_TEMPERATURE = 3
-ROWS_COUNT = 4
+ROW_COMPRESS_AFTER = 4
+ROW_MAX_SESSION_TOKENS = 5
+ROWS_COUNT = 6
 
 FORMAT_VALUES: List[AnswerFormat] = list(AnswerFormat)
 
@@ -38,6 +40,8 @@ class SettingsScreenState:
     max_words_input: str = ""
     list_limit_input: str = ""
     temperature_input: str = ""
+    compress_after_input: str = ""
+    max_session_tokens_input: str = ""
 
     @property
     def selected_format(self) -> AnswerFormat:
@@ -51,6 +55,8 @@ def initial_state(settings: AnswerSettings) -> SettingsScreenState:
         max_words_input=str(settings.max_words),
         list_limit_input=str(settings.list_limit),
         temperature_input=_format_temperature(settings.temperature),
+        compress_after_input=str(settings.compress_after),
+        max_session_tokens_input=str(settings.max_session_tokens),
     )
 
 
@@ -90,6 +96,22 @@ def apply_key(state: SettingsScreenState, key: str) -> SettingsScreenState:
             return replace(state, temperature_input=state.temperature_input[:-1])
         if len(key) == 1 and _temperature_key_accepted(state.temperature_input, key):
             return replace(state, temperature_input=state.temperature_input + key)
+
+    if state.row == ROW_COMPRESS_AFTER:
+        if key == keyboard.BACKSPACE:
+            return replace(state, compress_after_input=state.compress_after_input[:-1])
+        if len(key) == 1 and key.isdigit():
+            return replace(state, compress_after_input=state.compress_after_input + key)
+
+    if state.row == ROW_MAX_SESSION_TOKENS:
+        if key == keyboard.BACKSPACE:
+            return replace(
+                state, max_session_tokens_input=state.max_session_tokens_input[:-1]
+            )
+        if len(key) == 1 and key.isdigit():
+            return replace(
+                state, max_session_tokens_input=state.max_session_tokens_input + key
+            )
 
     return state
 
@@ -138,6 +160,22 @@ def apply_to_settings(
         errors.append("Лимит вариантов в списке: введите число.")
 
     result = _apply_temperature(state.temperature_input, result, errors)
+
+    if state.compress_after_input.isdigit():
+        try:
+            result = result.with_compress_after(int(state.compress_after_input))
+        except AnswerSettingsError as exc:
+            errors.append(str(exc))
+    else:
+        errors.append("Порог сжатия: введите число сообщений.")
+
+    if state.max_session_tokens_input.isdigit():
+        try:
+            result = result.with_max_session_tokens(int(state.max_session_tokens_input))
+        except AnswerSettingsError as exc:
+            errors.append(str(exc))
+    else:
+        errors.append("Потолок контекста: введите число токенов.")
 
     return result, errors
 

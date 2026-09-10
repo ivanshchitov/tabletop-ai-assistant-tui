@@ -26,7 +26,7 @@ from core.api_client import (
     is_valid_json_answer,
 )
 from core.history_manager import HistoryManager
-from core.tabletop_agent import TabletopAgent
+from core.tabletop_agent import RequestPhase, TabletopAgent
 
 from . import commands_screen, keyboard, logictask_screen, models_screen, settings_screen
 from .settings_screen import SettingsScreenState
@@ -69,9 +69,9 @@ class TabletopAITUI:
         запрашивать его при старте не нужно.
         """
         self.console = console if console is not None else Console()
-        self.session_count = 0
         self.client: Optional[APIClient] = client
         self.last_error: Optional[str] = None
+        self._printed_compression = None
         # Обе памяти агента — внутри агента: история передаётся ему при создании,
         # и он сам восстанавливает контекст; UI только показывает сохранённое.
         self.agent = TabletopAgent(client, history=history)
@@ -405,26 +405,24 @@ class TabletopAITUI:
         marker_words = "➤" if state.row == settings_screen.ROW_MAX_WORDS else " "
         marker_list_limit = "➤" if state.row == settings_screen.ROW_LIST_LIMIT else " "
         marker_temperature = "➤" if state.row == settings_screen.ROW_TEMPERATURE else " "
-        words_display = (
-            f"[reverse bold]{state.max_words_input or ' '}[/reverse bold]"
-            if state.row == settings_screen.ROW_MAX_WORDS
-            else state.max_words_input
-        )
-        list_limit_display = (
-            f"[reverse bold]{state.list_limit_input or ' '}[/reverse bold]"
-            if state.row == settings_screen.ROW_LIST_LIMIT
-            else state.list_limit_input
-        )
-        temperature_display = (
-            f"[reverse bold]{state.temperature_input or ' '}[/reverse bold]"
-            if state.row == settings_screen.ROW_TEMPERATURE
-            else state.temperature_input
-        )
+        marker_compress = "➤" if state.row == settings_screen.ROW_COMPRESS_AFTER else " "
+        marker_ceiling = "➤" if state.row == settings_screen.ROW_MAX_SESSION_TOKENS else " "
+
+        def highlighted(row: int, value: str) -> str:
+            return f"[reverse bold]{value or ' '}[/reverse bold]" if state.row == row else value
+
         body = (
             f"{marker_format} Формат ответа: {format_line}\n"
-            f"{marker_words} Макс. объём ({config.MIN_MAX_WORDS}..{config.MAX_MAX_WORDS} слов): {words_display}\n"
-            f"{marker_list_limit} Лимит вариантов в списке ({config.MIN_LIST_LIMIT}..{config.MAX_LIST_LIMIT}): {list_limit_display}\n"
-            f"{marker_temperature} Температура ({config.MIN_TEMPERATURE}..{config.MAX_TEMPERATURE}): {temperature_display}\n"
+            f"{marker_words} Макс. объём ({config.MIN_MAX_WORDS}..{config.MAX_MAX_WORDS} слов): "
+            f"{highlighted(settings_screen.ROW_MAX_WORDS, state.max_words_input)}\n"
+            f"{marker_list_limit} Лимит вариантов в списке ({config.MIN_LIST_LIMIT}..{config.MAX_LIST_LIMIT}): "
+            f"{highlighted(settings_screen.ROW_LIST_LIMIT, state.list_limit_input)}\n"
+            f"{marker_temperature} Температура ({config.MIN_TEMPERATURE}..{config.MAX_TEMPERATURE}): "
+            f"{highlighted(settings_screen.ROW_TEMPERATURE, state.temperature_input)}\n"
+            f"{marker_compress} Сжатие после ({config.MIN_COMPRESS_AFTER}..{config.MAX_COMPRESS_AFTER} сообщений): "
+            f"{highlighted(settings_screen.ROW_COMPRESS_AFTER, state.compress_after_input)}\n"
+            f"{marker_ceiling} Потолок контекста ({config.MIN_MAX_SESSION_TOKENS}..{config.MAX_MAX_SESSION_TOKENS} токенов): "
+            f"{highlighted(settings_screen.ROW_MAX_SESSION_TOKENS, state.max_session_tokens_input)}\n"
             "\n"
             "[dim]↑/↓ — поле, ←/→ — формат, цифры/Backspace — числовые поля, Esc — выход и сохранение[/dim]"
         )
@@ -444,16 +442,24 @@ class TabletopAITUI:
         self.last_error = None
         self.console.print(f"[bold blue]Вы:[/bold blue] {question}")
 
-        with self.console.status("[bold yellow]● Отправка...[/bold yellow]", spinner="dots"):
+        with self.console.status("[bold yellow]● Отправка...[/bold yellow]", spinner="dots") as status:
+            def report_phase(phase: "RequestPhase") -> None:
+                if phase is RequestPhase.COMPRESSION:
+                    status.update("● Суммаризация...")
+                elif phase is RequestPhase.REQUEST:
+                    status.update("● Отправка...")
+
             try:
-                meta = self.agent.ask(question)
+                meta = self.agent.ask(question, on_phase=report_phase)
             except APIError as exc:
                 self.last_error = str(exc)
+                self._print_compression_line()
                 self.console.print(f"[bold red]{exc}[/bold red]")
                 self.console.print("[bold red]Попробуйте повторить запрос.[/bold red]")
                 self.console.rule(style="dim")
                 return
 
+        self._print_compression_line()
         answer = meta.content
         self.console.print("[bold magenta]Tabletop AI Assistant:[/bold magenta]")
         self._print_typing(answer)
@@ -473,11 +479,9 @@ class TabletopAITUI:
                 )
         self._print_usage_meta(meta)
         self.console.rule(style="dim")
-        self.session_count += 1
 
     def _print_usage_report(self) -> None:
         """Отчёт /usage: последний запрос, итоги сессии, расход истории, окно контекста.
-
         Без запросов к модели. Оценка окна — клиентская эвристика (см. core/usage),
         помечена «≈»; эталонные числа — в метриках последнего запроса.
         """
@@ -505,8 +509,10 @@ class TabletopAITUI:
             f"всего {lifetime.total_tokens}, стоимость {lifetime_cost}[/dim]"
         )
         self.console.print(
-            f"[dim]  Окно контекста: {self.agent.stack_exchanges} из "
-            f"{config.HISTORY_LIMIT} обменов, ≈ {self.agent.stack_tokens_estimate} токенов[/dim]"
+            f"[dim]  Окно контекста: {self.agent.stack_exchanges} обменов в стеке, "
+            f"{self.agent.history.summary_covers} обменов под резюме, "
+            f"≈ {self.agent.stack_tokens_estimate} токенов из "
+            f"{self.settings.max_session_tokens}[/dim]"
         )
 
     def _print_usage_meta(self, meta: AnswerMeta) -> None:
@@ -515,6 +521,21 @@ class TabletopAITUI:
             f"[dim]⏱ {meta.elapsed_seconds:.2f}с  |  "
             f"Токены: {meta.prompt_tokens}+{meta.completion_tokens}={meta.total_tokens}  |  "
             f"Стоимость: {cost}[/dim]"
+        )
+
+    def _print_compression_line(self) -> None:
+        """Строка о сжатии после ответа/ошибки: печатается, когда сжатие выполнилось.
+
+        Маркер — сам отчёт last_compression: TUI помнит напечатанный объект и печатает
+        строку только когда агент сворачивал что-то заново. В history.json не попадает.
+        """
+        report = self.agent.last_compression
+        if report is None or report is self._printed_compression:
+            return
+        self._printed_compression = report
+        self.console.print(
+            f"[dim]Контекст сжат: {report.messages} сообщений "
+            f"({report.exchanges} обменов) → резюме[/dim]"
         )
 
     def _print_typing(self, answer: str) -> None:
@@ -532,7 +553,7 @@ class TabletopAITUI:
             f"[dim]Статус: Готов ✅  |  Модель: {self.model}  |  Формат: {FORMAT_LABELS[self.settings.format]}  |  "
             f"Объём: {self.settings.max_words} слов  |  Лимит списка: {self.settings.list_limit}  |  "
             f"Температура: {self.settings.temperature:.1f}  |  "
-            f"Команды: {commands_hint}  |  Диалогов за сессию: {self.session_count}  |  "
+            f"Команды: {commands_hint}  |  "
             f"Сессия: {session.total_tokens} ток., {session_cost}[/dim]"
         )
         self.console.rule(style="dim")

@@ -56,9 +56,8 @@ def test_select_model_then_question_uses_it(app, stub, history_file):
 
     session.send_line("/exit")
     session.wait_exit()
-    assert json.loads(history_file.read_text(encoding="utf-8"))[0]["question"] == (
-        "Правила Каркассона?"
-    )
+    saved = json.loads(history_file.read_text(encoding="utf-8"))
+    assert saved["dialogues"][0]["question"] == "Правила Каркассона?"
 
 
 def test_esc_keeps_default_model(app, stub):

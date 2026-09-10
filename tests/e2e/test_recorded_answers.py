@@ -105,7 +105,7 @@ def test_real_answer_is_saved_to_history(app, stub, history_file):
         session.wait_exit()
 
     saved = json.loads(history_file.read_text(encoding="utf-8"))
-    assert saved[0]["answer"] == text
+    assert saved["dialogues"][0]["answer"] == text
 
 
 # --- запись кассет ------------------------------------------------------------------------------

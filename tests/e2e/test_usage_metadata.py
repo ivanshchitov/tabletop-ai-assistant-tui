@@ -32,6 +32,6 @@ def test_usage_metadata_not_saved_to_history(app, stub, history_file):
     session.wait_exit()
 
     saved = json.loads(history_file.read_text(encoding="utf-8"))
-    assert saved[0]["question"] == "Какие правила у игры Каркассон?"
-    assert saved[0]["answer"] == "Ответ stub-сервера."
+    assert saved["dialogues"][0]["question"] == "Какие правила у игры Каркассон?"
+    assert saved["dialogues"][0]["answer"] == "Ответ stub-сервера."
     assert "Токены" not in json.dumps(saved, ensure_ascii=False)

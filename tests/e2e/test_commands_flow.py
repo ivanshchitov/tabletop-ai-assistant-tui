@@ -39,7 +39,11 @@ def test_panel_lists_commands_and_esc_makes_no_requests(app, stub, history_file)
 
     session.send_line("/exit")
     session.wait_exit()
-    assert not history_file.exists() or json.loads(history_file.read_text(encoding="utf-8")) == []
+    assert not history_file.exists() or json.loads(history_file.read_text(encoding="utf-8")) == {
+        "summary": None,
+        "summary_covers": 0,
+        "dialogues": [],
+    }
 
 
 def test_enter_runs_selected_command(app, stub, history_file):
@@ -58,7 +62,11 @@ def test_enter_runs_selected_command(app, stub, history_file):
 
     session.send_line("/exit")
     session.wait_exit()
-    assert not history_file.exists() or json.loads(history_file.read_text(encoding="utf-8")) == []
+    assert not history_file.exists() or json.loads(history_file.read_text(encoding="utf-8")) == {
+        "summary": None,
+        "summary_covers": 0,
+        "dialogues": [],
+    }
 
 
 def test_settings_selection_opens_settings_screen(app, stub):
@@ -96,7 +104,11 @@ def test_exit_selection_terminates_app(app, stub, history_file):
     session.send_key(harness.KEY_ENTER, 1)  # первая строка панели — /exit
     session.wait_exit()
     assert stub.call_count == 0
-    assert not history_file.exists() or json.loads(history_file.read_text(encoding="utf-8")) == []
+    assert not history_file.exists() or json.loads(history_file.read_text(encoding="utf-8")) == {
+        "summary": None,
+        "summary_covers": 0,
+        "dialogues": [],
+    }
 
 
 def test_status_bar_hint_lists_only_exit_and_commands(app, stub):
@@ -125,12 +137,12 @@ def test_usage_command_reports_tokens_without_api_calls(app, stub, history_file)
     session.wait_on_screen("Последний запрос: токены 50+100=150")
     session.wait_on_screen("Сессия: запросов 1")
     session.wait_on_screen("Всего диалога (файл истории): запросов 1")
-    session.wait_on_screen("Окно контекста: 1 из 50 обменов")
+    session.wait_on_screen("1 обменов в стеке")
     assert stub.call_count == 1  # отчёт не обращается к модели
 
     # отчёт не пишется в историю
     saved = json.loads(history_file.read_text(encoding="utf-8"))
-    assert len(saved) == 1 and "usage" in saved[0]
+    assert len(saved["dialogues"]) == 1 and "usage" in saved["dialogues"][0]
 
     session.send_line("/exit")
     session.wait_exit()

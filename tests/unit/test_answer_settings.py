@@ -9,9 +9,92 @@ from core.answer_settings import AnswerFormat, AnswerSettings, AnswerSettingsErr
 def test_defaults_match_config():
     settings = AnswerSettings()
     assert settings.max_words == config.DEFAULT_MAX_WORDS
-    assert settings.list_limit == config.DEFAULT_LIST_LIMIT
     assert settings.format == AnswerFormat.FREE
+    assert settings.list_limit == config.DEFAULT_LIST_LIMIT
     assert settings.temperature == config.TEMPERATURE
+    assert settings.compress_after == config.DEFAULT_COMPRESS_AFTER
+    assert settings.max_session_tokens == config.DEFAULT_MAX_SESSION_TOKENS
+
+
+@pytest.mark.parametrize(
+    "value", [config.MIN_COMPRESS_AFTER, 10, 30, config.MAX_COMPRESS_AFTER]
+)
+def test_with_compress_after_accepts_range_including_edges(value):
+    assert AnswerSettings().with_compress_after(value).compress_after == value
+
+
+@pytest.mark.parametrize(
+    "value", [config.MIN_COMPRESS_AFTER - 1, config.MAX_COMPRESS_AFTER + 1, 0, 999]
+)
+def test_with_compress_after_rejects_out_of_range(value):
+    with pytest.raises(AnswerSettingsError):
+        AnswerSettings().with_compress_after(value)
+
+
+@pytest.mark.parametrize("value", [10.5, 20.0, 10.0001])
+def test_with_compress_after_rejects_non_integer(value):
+    """Порог сжатия задаётся только целым: без округления и усечения."""
+    with pytest.raises(AnswerSettingsError):
+        AnswerSettings().with_compress_after(value)
+
+
+@pytest.mark.parametrize(
+    "value", [config.MIN_MAX_SESSION_TOKENS, 20000, config.MAX_MAX_SESSION_TOKENS]
+)
+def test_with_max_session_tokens_accepts_range_including_edges(value):
+    assert AnswerSettings().with_max_session_tokens(value).max_session_tokens == value
+
+@pytest.mark.parametrize("value", [10.5, 10.0001])
+def test_with_compress_after_rejects_non_integer(value):
+    """Порог сжатия задаётся только целым: без округления и усечения (20.0 допустим)."""
+    with pytest.raises(AnswerSettingsError):
+        AnswerSettings().with_compress_after(value)
+
+
+@pytest.mark.parametrize(
+    "value", [config.MIN_MAX_SESSION_TOKENS - 1, config.MAX_MAX_SESSION_TOKENS + 1, 0, -5, 100_000]
+)
+def test_with_max_session_tokens_rejects_out_of_range(value):
+    with pytest.raises(AnswerSettingsError):
+        AnswerSettings().with_max_session_tokens(value)
+
+
+@pytest.mark.parametrize("value", [20000.5, 6000.25])
+def test_with_max_session_tokens_rejects_non_integer(value):
+    """Потолок токенов задаётся только целым: ошибка, не округление."""
+    with pytest.raises(AnswerSettingsError):
+        AnswerSettings().with_max_session_tokens(value)
+
+
+def test_with_compress_after_preserves_other_fields():
+    settings = AnswerSettings(max_words=100, format=AnswerFormat.JSON, list_limit=7)
+    updated = settings.with_compress_after(20)
+    assert (
+        updated.compress_after,
+        updated.max_words,
+        updated.format,
+        updated.list_limit,
+        updated.max_session_tokens,
+    ) == (20, 100, AnswerFormat.JSON, 7, config.DEFAULT_MAX_SESSION_TOKENS)
+
+
+def test_with_max_session_tokens_preserves_other_fields():
+    settings = AnswerSettings(max_words=100, format=AnswerFormat.JSON, list_limit=7)
+    updated = settings.with_max_session_tokens(6000)
+    assert (
+        updated.max_session_tokens,
+        updated.max_words,
+        updated.format,
+        updated.list_limit,
+        updated.compress_after,
+    ) == (6000, 100, AnswerFormat.JSON, 7, config.DEFAULT_COMPRESS_AFTER)
+
+
+def test_compress_after_rejected_value_leaves_original_untouched():
+    settings = AnswerSettings().with_compress_after(15)
+    with pytest.raises(AnswerSettingsError):
+        settings.with_compress_after(999)
+    assert settings.compress_after == 15
 
 
 @pytest.mark.parametrize("value", [config.MIN_TEMPERATURE, 0.7, 1.2, config.MAX_TEMPERATURE])

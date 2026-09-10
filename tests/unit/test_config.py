@@ -23,11 +23,6 @@ def test_max_tokens_leaves_headroom_above_word_limit():
         assert config.max_tokens_for_words(words) > words
 
 
-def test_ranges_are_sane():
-    assert config.MIN_MAX_WORDS < config.DEFAULT_MAX_WORDS < config.MAX_MAX_WORDS
-    assert config.MIN_LIST_LIMIT <= config.DEFAULT_LIST_LIMIT <= config.MAX_LIST_LIMIT
-
-
 def test_max_words_ceiling_raised_for_reasoning_models():
     """Reasoning-модели (kimi-k2.x, glm-5.1, deepseek-v4-pro) на сложных вопросах тратят весь
     max_tokens на рассуждение раньше, чем дойдут до ответа — 500-словный потолок (2050 токенов)
@@ -134,29 +129,78 @@ def test_model_pricing_covers_every_available_model():
         assert output_price >= 0
 
 
-@pytest.mark.parametrize("attr", ["REQUEST_TIMEOUT", "MAX_RETRIES", "HISTORY_LIMIT", "MAX_INPUT_LENGTH"])
+@pytest.mark.parametrize(
+    "attr",
+    [
+        "REQUEST_TIMEOUT",
+        "MAX_RETRIES",
+        "MAX_INPUT_LENGTH",
+        "SUMMARY_MAX_WORDS",
+        "MIN_COMPRESS_AFTER",
+        "MAX_COMPRESS_AFTER",
+        "MIN_MAX_SESSION_TOKENS",
+        "MAX_MAX_SESSION_TOKENS",
+    ],
+)
 def test_limits_are_positive(attr):
     assert getattr(config, attr) > 0
 
 
-def test_history_limit_defaults_to_50(monkeypatch):
-    monkeypatch.delenv("TABLETOP_HISTORY_LIMIT", raising=False)
+def test_compress_after_defaults_to_10(monkeypatch):
+    monkeypatch.delenv("TABLETOP_COMPRESS_AFTER", raising=False)
     reloaded = importlib.reload(config)
     try:
-        assert reloaded.HISTORY_LIMIT == 50
+        assert reloaded.DEFAULT_COMPRESS_AFTER == 10
     finally:
         importlib.reload(config)
 
 
-def test_history_limit_override_from_environment(monkeypatch):
-    """Переключатель для демо и e2e: вытеснение ходов видно за секунды, а не за 50+ обменов."""
-    monkeypatch.setenv("TABLETOP_HISTORY_LIMIT", "7")
+def test_compress_after_override_from_environment(monkeypatch):
+    """Переключатель для e2e: сжатие видно за секунды, а не за 5+ обменов."""
+    monkeypatch.setenv("TABLETOP_COMPRESS_AFTER", "5")
     reloaded = importlib.reload(config)
     try:
-        assert reloaded.HISTORY_LIMIT == 7
+        assert reloaded.DEFAULT_COMPRESS_AFTER == 5
     finally:
-        monkeypatch.delenv("TABLETOP_HISTORY_LIMIT", raising=False)
+        monkeypatch.delenv("TABLETOP_COMPRESS_AFTER", raising=False)
         importlib.reload(config)
+
+
+def test_max_session_tokens_defaults_to_20000(monkeypatch):
+    monkeypatch.delenv("TABLETOP_MAX_SESSION_TOKENS", raising=False)
+    reloaded = importlib.reload(config)
+    try:
+        assert reloaded.DEFAULT_MAX_SESSION_TOKENS == 20000
+    finally:
+        importlib.reload(config)
+
+
+def test_max_session_tokens_override_from_environment(monkeypatch):
+    """Переключатель для e2e: потолок контекста сессии проверяется на малом значении."""
+    monkeypatch.setenv("TABLETOP_MAX_SESSION_TOKENS", "6000")
+    reloaded = importlib.reload(config)
+    try:
+        assert reloaded.DEFAULT_MAX_SESSION_TOKENS == 6000
+    finally:
+        monkeypatch.delenv("TABLETOP_MAX_SESSION_TOKENS", raising=False)
+        importlib.reload(config)
+
+
+def test_ranges_are_sane():
+    assert config.MIN_MAX_WORDS < config.DEFAULT_MAX_WORDS < config.MAX_MAX_WORDS
+    assert config.MIN_LIST_LIMIT <= config.DEFAULT_LIST_LIMIT <= config.MAX_LIST_LIMIT
+    assert config.MIN_COMPRESS_AFTER < config.DEFAULT_COMPRESS_AFTER < config.MAX_COMPRESS_AFTER
+    assert (
+        config.MIN_MAX_SESSION_TOKENS
+        < config.DEFAULT_MAX_SESSION_TOKENS
+        < config.MAX_MAX_SESSION_TOKENS
+    )
+
+
+def test_summary_max_words_is_a_small_fixed_ceiling():
+    """Резюме — компактный дайджест: потолок выхода ограничивает его рост."""
+    assert 50 <= config.SUMMARY_MAX_WORDS <= 300
+    assert config.max_tokens_for_words(config.SUMMARY_MAX_WORDS) > config.SUMMARY_MAX_WORDS
 
 
 def test_estimated_chars_per_token_is_positive():

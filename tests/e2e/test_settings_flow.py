@@ -9,6 +9,7 @@ import json
 
 import pytest
 
+from . import harness
 from .harness import (
     CTRL_C,
     KEY_BACKSPACE,
@@ -80,7 +81,7 @@ def test_marker_moves_up(app):
         open_settings(session)
         session.send_keys(KEY_UP)
         session.read_for(0.3)
-        assert "➤ Температура" in session.screen_text()
+        assert "➤ Потолок контекста" in session.screen_text()
 
 
 def test_escape_closes_the_screen(app):
@@ -215,9 +216,9 @@ def test_settings_survive_and_apply_to_every_later_question(app, stub):
         session.wait_for("Объём: 30 слов")
 
         session.ask("Первый вопрос", "Ответ stub-сервера")
-        session.wait_for("Диалогов за сессию: 1")
+        harness.wait_for_answers(session, 1)
         session.send_line("Второй вопрос")
-        session.wait_for("Диалогов за сессию: 2")
+        harness.wait_for_answers(session, 2)
 
     assert all("не более 30 слов" in message for message in stub.user_messages())
 
@@ -284,4 +285,4 @@ def test_invalid_json_is_still_saved_to_history(app, stub, history_file):
         session.wait_exit()
 
     saved = json.loads(history_file.read_text(encoding="utf-8"))
-    assert saved[0]["answer"] == "Это не JSON."
+    assert saved["dialogues"][0]["answer"] == "Это не JSON."

@@ -8,6 +8,7 @@ import json
 
 import pytest
 
+from . import harness
 from .harness import CTRL_C, CTRL_D, KEY_TAB
 from .stub_api import answer, failure, hang, malformed
 
@@ -103,11 +104,11 @@ def test_three_questions_keep_the_log_and_count_the_session(app, stub):
     )
     with app() as session:
         session.ask("Вопрос про правила", "Первый ответ")
-        session.wait_for("Диалогов за сессию: 1")
+        harness.wait_for_answers(session, 1)
         session.ask("Вопрос про стратегию", "Второй ответ")
-        session.wait_for("Диалогов за сессию: 2")
+        harness.wait_for_answers(session, 2)
         session.ask("Вопрос про рекомендации", "Третий ответ")
-        session.wait_for("Диалогов за сессию: 3")
+        harness.wait_for_answers(session, 3)
 
         log = session.scrollback()
 
@@ -172,7 +173,8 @@ def test_history_is_replayed_after_restart(app, stub, history_file):
         first.send_line("/exit")
         first.wait_exit()
 
-    assert json.loads(history_file.read_text(encoding="utf-8"))[0]["question"] == "Куда ставить мипла?"
+    saved = json.loads(history_file.read_text(encoding="utf-8"))
+    assert saved["dialogues"][0]["question"] == "Куда ставить мипла?"
 
     with app() as second:
         second.wait_for("Куда ставить мипла?")
@@ -189,7 +191,11 @@ def test_clear_wipes_history_for_the_next_launch(app, stub, history_file):
         first.send_line("/exit")
         first.wait_exit()
 
-    assert json.loads(history_file.read_text(encoding="utf-8")) == []
+    assert json.loads(history_file.read_text(encoding="utf-8")) == {
+        "summary": None,
+        "summary_covers": 0,
+        "dialogues": [],
+    }
 
     with app() as second:
         second.wait_for("Tabletop AI Assistant запущен")
@@ -206,7 +212,7 @@ def test_server_error_is_survivable(app, stub):
         session.ask("Первый вопрос", "Ошибка API")
         session.wait_for("Попробуйте повторить запрос")
         session.ask("Второй вопрос", "А вот теперь всё хорошо")
-        session.wait_for("Диалогов за сессию: 1")
+        harness.wait_for_answers(session, 1)
 
 
 def test_bad_key_is_reported(app, stub):

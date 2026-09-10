@@ -7,7 +7,7 @@ from typing import List, Optional
 
 import pytest
 
-from core import config
+from core import config, context_compressor
 from core.answer_settings import AnswerFormat, AnswerSettings
 from core.api_client import AnswerMeta, APIError
 from core.history_manager import HistoryManager
@@ -270,14 +270,19 @@ def test_successful_exchange_is_persisted(make_app, history, history_path):
     assert record["question"] == "Вопрос про Splendor"
     assert record["answer"] == "Ответ"
     assert record["usage"]["total_tokens"] == 30
-    assert json.loads(history_path.read_text(encoding="utf-8"))[0]["question"] == "Вопрос про Splendor"
+    assert json.loads(history_path.read_text(encoding="utf-8"))["dialogues"][0]["question"] == (
+        "Вопрос про Splendor"
+    )
 
 
-def test_session_counter_grows_with_each_answer(make_app, recording_console):
-    app = make_app(["Вопрос 1", "Вопрос 2", "Вопрос 3", "/exit"], FakeClient(["Ответ"]))
-    app.run()
-    assert app.session_count == 3
-    assert recording_console.contains("Диалогов за сессию: 3")
+def test_status_bar_has_no_dialogue_counter(make_app, recording_console):
+    """Счётчик диалогов за сессию удалён из статус-бара."""
+    make_app(["Вопрос 1", "Вопрос 2", "Вопрос 3", "/exit"], FakeClient(["Ответ"])).run()
+
+    assert "Диалогов за сессию" not in recording_console.text
+    assert recording_console.contains("Сессия: 90 ток.")
+
+
 
 
 def test_long_input_is_truncated_before_sending(make_app, recording_console):
@@ -319,7 +324,6 @@ def test_api_error_is_reported_and_not_persisted(make_app, recording_console, hi
     assert recording_console.contains("Неверный API-ключ.")
     assert recording_console.contains("Попробуйте повторить запрос.")
     assert history.dialogues == []
-    assert app.session_count == 0
 
 
 def test_app_survives_an_error_and_answers_the_next_question(make_app, recording_console, history):
@@ -346,7 +350,11 @@ def test_clear_empties_history_and_file(make_app, recording_console, history, hi
     make_app(["/clear", "/exit"], FakeClient()).run()
 
     assert history.dialogues == []
-    assert json.loads(history_path.read_text(encoding="utf-8")) == []
+    assert json.loads(history_path.read_text(encoding="utf-8")) == {
+        "summary": None,
+        "summary_covers": 0,
+        "dialogues": [],
+    }
     assert recording_console.contains("История диалога очищена.")
 
 
@@ -527,7 +535,6 @@ def test_logictask_opens_panel_and_runs_chosen_strategy(make_app, recording_cons
     assert logictask.LOGIC_TASK in client.calls[0]["user"]
     assert recording_console.contains("Стратегия 2: Пошаговое решение")
     assert recording_console.contains("Пошаговый ответ модели")
-    assert app.session_count == 0
 
 
 def test_question_carries_temperature_setting(make_app):
@@ -646,8 +653,11 @@ def test_logictask_run_is_not_in_history(make_app, history, history_path, monkey
     app.run()
 
     assert history.dialogues == []
-    assert not history_path.exists() or json.loads(history_path.read_text(encoding="utf-8")) == []
-    assert app.session_count == 0
+    assert not history_path.exists() or json.loads(history_path.read_text(encoding="utf-8")) == {
+        "summary": None,
+        "summary_covers": 0,
+        "dialogues": [],
+    }
 
 
 def test_logictask_error_stops_step_but_session_continues(
@@ -671,7 +681,6 @@ def test_logictask_error_stops_step_but_session_continues(
 
     assert len(client.calls) == 3  # 2 шага стратегии (второй упал) + обычный вопрос
     assert recording_console.contains("Тестовая ошибка API.")
-    assert app.session_count == 1
     assert [d["question"] for d in history.dialogues] == ["Обычный вопрос"]
 
 
@@ -698,7 +707,11 @@ def test_commands_panel_enter_runs_selected_clear(
 
     assert "История диалога очищена." in recording_console.text
     assert history.dialogues == []
-    assert json.loads(history_path.read_text(encoding="utf-8")) == []
+    assert json.loads(history_path.read_text(encoding="utf-8")) == {
+        "summary": None,
+        "summary_covers": 0,
+        "dialogues": [],
+    }
     assert client.calls == []  # панель не делает запросов к модели
 
 
@@ -891,4 +904,99 @@ def test_status_bar_shows_model_after_selection(make_app, recording_console, mon
     app.run()
 
     assert f"Модель: {config.AVAILABLE_MODELS[1]}" in recording_console.text
+
+
+
+# --- день 9: строка о сжатии и фаза индикатора ----------------------------------------
+
+
+def test_compression_line_printed_when_threshold_reached(make_app, recording_console):
+    """После срабатывания порога в журнале есть строка о сжатии; до порога её нет."""
+    client = FakeClient(
+        answers=["Ответ 1", "Ответ 2", "Ответ 3", "Ответ 4", "Ответ 5", "РЕЗЮМЕ 1", "Ответ 6"]
+    )
+    make_app(["Вопрос 1", "Вопрос 2", "Вопрос 3", "Вопрос 4", "Вопрос 5", "Вопрос 6", "/exit"], client).run()
+
+    assert recording_console.contains("Контекст сжат: 8 сообщений (4 обменов) → резюме")
+
+
+def test_no_compression_line_without_compression(make_app, recording_console):
+    make_app(["Вопрос 1", "/exit"], FakeClient()).run()
+    assert "Контекст сжат" not in recording_console.text
+
+
+def test_compression_line_not_in_history_file(make_app, history_path):
+    """Строка о сжатии — только экран: в history.json её нет."""
+    client = FakeClient(
+        answers=["Ответ 1", "Ответ 2", "Ответ 3", "Ответ 4", "Ответ 5", "РЕЗЮМЕ 1", "Ответ 6"]
+    )
+    make_app(["Вопрос 1", "Вопрос 2", "Вопрос 3", "Вопрос 4", "Вопрос 5", "Вопрос 6", "/exit"], client).run()
+
+    data = json.loads(history_path.read_text(encoding="utf-8"))
+    assert data["summary"] == "РЕЗЮМЕ 1"
+    assert all("Контекст сжат" not in json.dumps(d) for d in data["dialogues"])
+
+
+def test_compression_line_printed_even_when_question_fails(make_app, recording_console, history):
+    """Резюме могло уйти, а вопрос упасть: строка о сжатии всё равно печатается."""
+    class FlakyClient(FakeClient):
+        def __init__(self):
+            super().__init__(answers=["Ответ 1", "Ответ 2", "Ответ 3", "Ответ 4", "Ответ 5", "НЕВАЖНО"])
+            self.questions = 0
+
+        def ask(self, system_message, user_message, max_tokens=0, temperature=None, model=None):
+            self.calls.append({"system": system_message, "user": user_message})
+            if system_message == context_compressor.summary_instruction():
+                return "РЕЗЮМЕ 1"
+            self.questions += 1
+            if self.questions > 5:
+                raise APIError("Сбой API.")
+            return self.answers.pop(0)
+
+    app = make_app(
+        ["Вопрос 1", "Вопрос 2", "Вопрос 3", "Вопрос 4", "Вопрос 5", "Вопрос 6", "/exit"],
+        FlakyClient(),
+    )
+    app.run()
+
+    assert recording_console.contains("Контекст сжат: 8 сообщений (4 обменов) → резюме")
+    assert recording_console.contains("Сбой API.")
+    assert len(history.dialogues) == 5  # вопросы 1-5 сохранены, шестой не дошёл
+
+
+def test_spinner_label_shows_summarization_during_compression(make_app, monkeypatch):
+    """Фаза сжатия переключает подпись индикатора на «Суммаризация...»."""
+    labels = []
+
+    class StatusStub:
+        def __init__(self, label: str) -> None:
+            labels.append(label)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def update(self, label: str) -> None:
+            labels.append(label)
+
+    class PhaseClient(FakeClient):
+        def ask(self, system_message, user_message, max_tokens=0, temperature=None, model=None):
+            if system_message == context_compressor.summary_instruction():
+                assert labels[-1] == "● Суммаризация..."
+                self.calls.append({"system": system_message, "user": user_message})
+                return "РЕЗЮМЕ 1"
+            return super().ask(system_message, user_message, max_tokens, temperature, model)
+
+    app = make_app(
+        ["Вопрос 1", "Вопрос 2", "Вопрос 3", "Вопрос 4", "Вопрос 5", "Вопрос 6", "/exit"],
+        PhaseClient(answers=["Ответ 1", "Ответ 2", "Ответ 3", "Ответ 4", "Ответ 5", "РЕЗЮМЕ 1", "Ответ 6"]),
+    )
+    monkeypatch.setattr(app.console, "status", lambda label, **kwargs: StatusStub(label))
+    app.run()
+
+    assert labels.count("● Суммаризация...") == 1
+    assert "● Отправка..." in labels[0]
+
 

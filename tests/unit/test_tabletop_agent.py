@@ -4,7 +4,7 @@ import json
 from typing import List, Optional
 
 import pytest
-from core import config, logictask, prompts, tabletop_agent
+from core import config, context_compressor, logictask, prompts, tabletop_agent
 from core.usage import estimate_tokens
 from core.answer_settings import AnswerFormat, AnswerSettings
 from core.api_client import AnswerMeta, APIError
@@ -119,20 +119,60 @@ def test_failed_exchange_is_not_remembered():
     assert [m["role"] for m in client.calls[2]["messages"]][1:] == ["user", "assistant", "user"]
 
 
-def test_stack_is_capped_at_history_limit_exchanges(monkeypatch):
-    monkeypatch.setattr(config, "HISTORY_LIMIT", 2)
-    agent, client = make_agent()
-    for number in range(1, 5):
-        agent.ask(f"Вопрос {number}")
+def test_threshold_reached_collapses_stack_to_summary_and_tail():
+    """Порог в сообщениях: при достижении суммаризатор сворачивает всё, кроме последнего обмена."""
+    agent, client = make_agent(
+        answers=["Ответ 1", "Ответ 2", "Ответ 3", "Ответ 4", "Ответ 5", "РЕЗЮМЕ 1", "Ответ 6"]
+    )
+    for i in range(1, 6):
+        agent.ask(f"Вопрос {i}")
+    meta = agent.ask("Вопрос 6")
 
-    messages = client.calls[-1]["messages"]
-    # system + последние 2 завершённых обмена (4 сообщения) + текущий user-ход = 6
-    assert len(messages) == 6
-    contents = "".join(m["content"] for m in messages)
-    assert "Вопрос 4" in contents
-    assert "Вопрос 3" in contents
-    assert "Вопрос 1" not in contents
+    assert meta.content == "Ответ 6"
+    summary_call, question_call = client.calls[5], client.calls[6]
+    assert summary_call["messages"][0]["content"] == context_compressor.summary_instruction()
+    summary_user = summary_call["messages"][1]["content"]
+    assert "Вопрос 1" in summary_user and "Ответ 4" in summary_user
+    assert "Вопрос 5" not in summary_user and "Ответ 5" not in summary_user
+    assert [m["role"] for m in question_call["messages"]] == [
+        "system", "system", "user", "assistant", "user",
+    ]
+    assert "РЕЗЮМЕ 1" in question_call["messages"][1]["content"]
+    assert "Вопрос 5" in question_call["messages"][2]["content"]
+    assert question_call["messages"][3]["content"] == "Ответ 5"
+    assert "Вопрос 6" in question_call["messages"][4]["content"]
+    assert agent.stack_exchanges == 2  # хвост (обмен 5) + новый обмен 6
 
+
+def test_summarizer_error_keeps_stack_and_summary_intact():
+    """Ходы удаляются из стека только после успешного суммаризатора."""
+    class FlakySummarizer(FakeAgentClient):
+        def __init__(self):
+            super().__init__(
+                answers=["Ответ 1", "Ответ 2", "Ответ 3", "Ответ 4", "Ответ 5", "Ответ 6"]
+            )
+            self.summarizer_calls = 0
+
+        def ask_with_usage_messages(self, messages, **kwargs):
+            if messages[0]["content"] == context_compressor.summary_instruction():
+                self.summarizer_calls += 1
+                raise APIError("Сбой суммаризатора.")
+            return super().ask_with_usage_messages(messages, **kwargs)
+
+    client = FlakySummarizer()
+    agent, _ = make_agent(client=client)
+    for i in range(1, 6):
+        agent.ask(f"Вопрос {i}")
+
+    with pytest.raises(APIError):
+        agent.ask("Вопрос 6")
+    assert agent.stack_exchanges == 5
+    assert agent._summary is None
+    assert [d["question"] for d in agent.history.dialogues] == [f"Вопрос {i}" for i in range(1, 6)]
+
+    with pytest.raises(APIError):
+        agent.ask("Вопрос 6 ещё раз")
+    assert client.summarizer_calls == 2  # следующий вопрос повторяет попытку сжатия
 
 def test_reset_clears_the_stack():
     agent, client = make_agent()
@@ -177,26 +217,31 @@ def test_restored_user_turns_carry_current_settings_instructions():
     assert "не более 7 вариантов" in restored_user
 
 
-def test_memory_is_capped_at_history_limit(monkeypatch):
-    monkeypatch.setattr(config, "HISTORY_LIMIT", 2)
-    first, _ = make_agent()
-    for i in range(1, 5):
-        first.history.add(f"Вопрос {i}", f"Ответ {i}")
+def test_memory_is_unbounded_and_restore_seeds_summary_with_tail():
+    """Файл не вытесняется: рестарт восстанавливает резюме и неотжатый хвост целиком."""
+    first, _ = make_agent(
+        answers=["Ответ 1", "Ответ 2", "Ответ 3", "Ответ 4", "Ответ 5", "РЕЗЮМЕ 1", "Ответ 6"]
+    )
+    for i in range(1, 7):
+        first.ask(f"Вопрос {i}")  # сжатие на 6-м вопросе: резюме обменов 1-4
 
-    second, client = make_agent(history=first.history)
-    second.ask("Новый вопрос")
+    second, client = make_agent(history=first.history, answers=["Ответ 7"])
+    second.ask("Вопрос 7")
 
-    contents = "".join(m["content"] for m in client.calls[0]["messages"])
-    assert "Вопрос 1" not in contents and "Вопрос 2" not in contents
-    assert "Вопрос 3" in contents and "Вопрос 4" in contents
+    messages = client.calls[0]["messages"]
+    contents = "".join(m["content"] for m in messages)
+    assert "Вопрос 1" not in contents and "Вопрос 4" not in contents  # под резюме
+    assert "РЕЗЮМЕ 1" in contents
+    assert "Вопрос 5" in contents and "Вопрос 6" in contents  # неотжатый хвост
 
 def test_ask_persists_exchange_immediately():
     agent, _ = make_agent()
     agent.ask("Вопрос на диск")
     data = json.loads(agent.history.path.read_text(encoding="utf-8"))
-    assert data[0]["question"] == "Вопрос на диск"
-    assert data[0]["answer"] == "Ответ по умолчанию"
-    assert data[0]["usage"]["total_tokens"] == 30
+    assert data["dialogues"][0]["question"] == "Вопрос на диск"
+    assert data["dialogues"][0]["answer"] == "Ответ по умолчанию"
+    assert data["dialogues"][0]["usage"]["total_tokens"] == 30
+    assert data["summary"] is None  # без сжатия резюме пусто
 
 
 def test_failed_exchange_is_not_persisted():
@@ -212,7 +257,11 @@ def test_reset_clears_stack_and_file():
     agent.ask("Вопрос до очистки")
     agent.reset()
 
-    assert json.loads(agent.history.path.read_text(encoding="utf-8")) == []
+    assert json.loads(agent.history.path.read_text(encoding="utf-8")) == {
+        "summary": None,
+        "summary_covers": 0,
+        "dialogues": [],
+    }
     assert agent.history.dialogues == []
 
     agent.ask("Вопрос после очистки")
@@ -225,10 +274,9 @@ def test_logictask_does_not_touch_memory():
     agent, _ = make_agent(answers=["Прямой ответ", "Ещё ответ"])
     agent.ask("Обычный вопрос")
 
-    list(agent.solve_logictask(1))
-
     data = json.loads(agent.history.path.read_text(encoding="utf-8"))
-    assert [d["question"] for d in data] == ["Обычный вопрос"]
+    assert [d["question"] for d in data["dialogues"]] == ["Обычный вопрос"]
+
 
 
 def test_stack_is_rebuilt_from_file_invariant():
@@ -479,11 +527,220 @@ def test_stack_tokens_estimate_grows_with_turns():
     assert agent.stack_tokens_estimate > before
 
 
-def test_stack_tokens_estimate_stops_growing_when_window_is_full(monkeypatch):
-    monkeypatch.setattr(config, "HISTORY_LIMIT", 2)
+
+
+# --- день 9: сжатие истории ------------------------------------------------------------
+
+
+def _padded(answer: str) -> str:
+    return f"{answer} " + "х" * 200
+
+
+def test_summary_is_used_in_following_requests_without_resummarizing():
+    """Резюме участвует в запросах; покрытые обмены не суммаризуются повторно."""
+    agent, client = make_agent(
+        answers=["Ответ 1", "Ответ 2", "Ответ 3", "Ответ 4", "Ответ 5", "РЕЗЮМЕ 1", "Ответ 6", "Ответ 7"]
+    )
+    for i in range(1, 7):
+        agent.ask(f"Вопрос {i}")
+    agent.ask("Вопрос 7")
+
+    # вызовы: 5 вопросов, суммаризатор, вопрос 6, вопрос 7 — второго суммаризатора нет
+    assert len(client.calls) == 8
+    question7 = client.calls[7]
+    assert [m["role"] for m in question7["messages"]] == [
+        "system", "system", "user", "assistant", "user", "assistant", "user",
+    ]
+    assert "РЕЗЮМЕ 1" in question7["messages"][1]["content"]
+    contents = "".join(m["content"] for m in question7["messages"])
+    assert "Вопрос 1" not in contents and "Вопрос 4" not in contents  # под резюме
+    assert "Вопрос 5" in contents and "Вопрос 6" in contents
+
+
+def test_ceiling_estimate_above_limit_triggers_early_compression(monkeypatch):
+    """Потолок токенов: оценка выше потолка сжимает досрочно, независимо от порога.
+
+    EPT=1: система ~1650 ток.; 3 обмена с ответами ~700 симв. дают ~3225 ток. ходов —
+    при потолке 5000 сжатие срабатывает на четвёртом вопросе при raw=6 < порога.
+    """
+    monkeypatch.setattr(config, "ESTIMATED_CHARS_PER_TOKEN", 1)
+    agent, client = make_agent(
+        answers=[f"Ответ {i} " + "х" * 700 for i in range(1, 4)]
+        + ["РЕЗЮМЕ 1", "Ответ 4", "Ответ 5"]
+    )
+    agent.settings = agent.settings.with_max_session_tokens(5000)
+    for i in range(1, 4):
+        agent.ask(f"Вопрос {i}")  # raw=6, оценка ещё под потолком
+    agent.ask("Вопрос 4")  # оценка выше потолка: суммаризатор + вопрос
+    agent.ask("Вопрос 5")  # порог не достигнут: только вопрос
+
+    assert len(client.calls) == 6
+    summary_call, question_call = client.calls[3], client.calls[4]
+    assert summary_call["messages"][0]["content"] == context_compressor.summary_instruction()
+    assert [m["role"] for m in question_call["messages"]] == [
+        "system", "system", "user", "assistant", "user",
+    ]
+    assert "РЕЗЮМЕ 1" in question_call["messages"][1]["content"]
+    assert "Вопрос 3" in question_call["messages"][2]["content"]
+
+
+def test_stack_tokens_estimate_collapses_after_digest():
+    """Оценка стека после сжатия падает: резюме + последний обмен вместо десяти ходов."""
+    agent, client = make_agent(
+        answers=[f"Ответ {i} " + "х" * 700 for i in range(1, 6)]
+        + ["РЕЗЮМЕ 1", "Ответ 6"]
+    )
+    for i in range(1, 6):
+        agent.ask(f"Вопрос {i}")
+    before = agent.stack_tokens_estimate
+    agent.ask("Вопрос 6")
+    assert agent.stack_tokens_estimate < before
+
+
+def test_ceiling_unreachable_when_nothing_to_digest(monkeypatch):
+    """Сжимать нечего (только последний обмен) — запрос уходит как есть, ходы не теряются."""
+    monkeypatch.setattr(config, "ESTIMATED_CHARS_PER_TOKEN", 1)
+    agent, client = make_agent(answers=["Ответ 1", "Ответ 2"])
+    agent.settings = agent.settings.with_max_session_tokens(5000)
+    agent.ask("Вопрос 1")  # raw=2, оценка ~1650+374+360 < 5000 — без сжатия
+    assert len(client.calls) == 1
+
+    agent.ask("в" * 12000)  # оценка системы + ходов + промпта > 5000; сворачивать
+    # нечего: в стеке только последний обмен — запрос уходит как есть, ходы целы
+
+    assert len(client.calls) == 2  # суммаризатора не было
+    assert [m["role"] for m in client.calls[1]["messages"]][:2] == ["system", "user"]
+
+
+def test_summarizer_spend_is_counted_and_last_result_is_answers():
+    agent, client = make_agent(
+        answers=["Ответ 1", "Ответ 2", "Ответ 3", "Ответ 4", "Ответ 5", "РЕЗЮМЕ 1", "Ответ 6"],
+        usages=[(10, 20, 0.0001)] * 5 + [(50, 30, 0.001), (100, 60, 0.002)],
+    )
+    for i in range(1, 6):
+        agent.ask(f"Вопрос {i}")
+    meta = agent.ask("Вопрос 6")
+
+    assert agent.session_usage.requests == 7
+    assert agent.session_usage.cost_usd == pytest.approx(0.0001 * 5 + 0.001 + 0.002)
+    # _last_result после ask() — метрика ответа, а не суммаризатора
+    assert meta.content == "Ответ 6"
+    assert agent.last_result.prompt_tokens == 100
+
+
+def test_restart_with_fresh_summary_needs_no_summarizer(history_path):
+    history = HistoryManager(path=history_path)
+    first = TabletopAgent(
+        FakeAgentClient(
+            answers=["Ответ 1", "Ответ 2", "Ответ 3", "Ответ 4", "Ответ 5", "РЕЗЮМЕ 1", "Ответ 6"]
+        ),
+        history=history,
+    )
+    for i in range(1, 7):
+        first.ask(f"Вопрос {i}")
+
+    second_client = FakeAgentClient(answers=["Ответ 7"])
+    second = TabletopAgent(second_client, history=HistoryManager(path=history_path))
+    second.ask("Вопрос 7")
+
+    assert len(second_client.calls) == 1  # суммаризатор не потребовался
+    messages = second_client.calls[0]["messages"]
+    assert [m["role"] for m in messages] == ["system", "system", "user", "assistant", "user", "assistant", "user"]
+    assert "РЕЗЮМЕ 1" in messages[1]["content"]
+    contents = "".join(m["content"] for m in messages)
+    assert "Вопрос 1" not in contents and "Вопрос 4" not in contents
+    assert "Вопрос 5" in contents and "Вопрос 6" in contents
+
+
+def test_restart_without_summary_catches_up_in_parts_at_first_question(history_path):
+    """Файл без резюме (старый формат): догоняющая суммаризация при первом вопросе."""
+    records = [
+        {"question": f"Вопрос {i}", "answer": _padded(f"Ответ {i}")}
+        for i in range(1, 13)
+    ]
+    history_path.write_text(json.dumps(records), encoding="utf-8")
+
+    client = FakeAgentClient(answers=["РЕЗЮМЕ ВСЕЙ ИСТОРИИ", "Ответ 13"])
+    agent = TabletopAgent(client, history=HistoryManager(path=history_path))
+    agent.ask("Вопрос 13")
+
+    assert len(client.calls) == 2  # суммаризатор + вопрос
+    summary_call, question_call = client.calls[0], client.calls[1]
+    summary_user = summary_call["messages"][1]["content"]
+    assert "Вопрос 1" in summary_user and "Вопрос 11" in summary_user
+    assert "Вопрос 12" not in summary_user  # последний обмен остаётся дословным
+    assert [m["role"] for m in question_call["messages"]] == [
+        "system", "system", "user", "assistant", "user",
+    ]
+    assert "РЕЗЮМЕ ВСЕЙ ИСТОРИИ" in question_call["messages"][1]["content"]
+    assert "Вопрос 12" in question_call["messages"][2]["content"]
+
+
+def test_reset_clears_stack_summary_and_file():
+    agent, _ = make_agent(
+        answers=["Ответ 1", "Ответ 2", "Ответ 3", "Ответ 4", "Ответ 5", "РЕЗЮМЕ 1", "Ответ 6"]
+    )
+    for i in range(1, 6):
+        agent.ask(f"Вопрос {i}")
+    agent.ask("Вопрос 6")
+
+    agent.reset()
+
+    assert agent.stack_exchanges == 0
+    assert agent._summary is None
+    assert agent._summary_covers == 0
+    assert json.loads(agent.history.path.read_text(encoding="utf-8"))["dialogues"] == []
+
+
+def test_stack_tokens_estimate_includes_summary(history_path):
+    history = HistoryManager(path=history_path)
+    history.set_summary("РЕЗЮМЕ ДИАЛОГА ДЛИННОЕ ДЛИННОЕ", 0)
+    agent, _ = make_agent(history=history)
+    system_only = estimate_tokens(prompts.build_system_message(agent.config.format))
+    assert agent.stack_tokens_estimate > system_only
+
+
+def test_last_compression_is_none_before_any_digest():
     agent, _ = make_agent()
-    agent.ask("Вопрос 1")
-    agent.ask("Вопрос 2")
-    full = agent.stack_tokens_estimate
-    agent.ask("Вопрос 3")
-    assert agent.stack_tokens_estimate == full
+    assert agent.last_compression is None
+
+
+def test_last_compression_reports_digest_size_and_skips_idle_asks():
+    agent, client = make_agent(
+        answers=["Ответ 1", "Ответ 2", "Ответ 3", "Ответ 4", "Ответ 5", "РЕЗЮМЕ 1", "Ответ 6", "Ответ 7"]
+    )
+    for i in range(1, 6):
+        agent.ask(f"Вопрос {i}")
+    assert agent.last_compression is None  # до сжатия
+
+    agent.ask("Вопрос 6")
+    report = agent.last_compression
+    assert report is not None
+    assert (report.messages, report.exchanges) == (8, 4)
+
+    agent.ask("Вопрос 7")  # порог не достигнут — сжатия нет
+    assert agent.last_compression is report  # прежний отчёт уцелел
+
+
+def test_phase_listener_signals_compression_then_request():
+    phases = []
+    agent, client = make_agent(
+        answers=["Ответ 1", "Ответ 2", "Ответ 3", "Ответ 4", "Ответ 5", "РЕЗЮМЕ 1", "Ответ 6"]
+    )
+    for i in range(1, 6):
+        agent.ask(f"Вопрос {i}", on_phase=phases.append)
+    agent.ask("Вопрос 6", on_phase=phases.append)
+
+    assert phases.count(tabletop_agent.RequestPhase.REQUEST) == 6
+    assert phases.count(tabletop_agent.RequestPhase.COMPRESSION) == 1
+    assert client.calls[5]["messages"][0]["content"] == context_compressor.summary_instruction()
+
+
+def test_default_listener_is_silent():
+    agent, client = make_agent(
+        answers=["Ответ 1", "Ответ 2", "Ответ 3", "Ответ 4", "Ответ 5", "РЕЗЮМЕ 1", "Ответ 6"]
+    )
+    for i in range(1, 6):
+        agent.ask(f"Вопрос {i}")  # без on_phase — никакого исключения
+    agent.ask("Вопрос 6")
+    assert agent.last_result.content == "Ответ 6"

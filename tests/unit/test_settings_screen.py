@@ -42,6 +42,7 @@ def test_initial_state_shows_temperature_with_one_decimal():
 
 
 def test_down_moves_through_rows_and_wraps(state):
+    keys = [keyboard.DOWN] * 5
     assert press(state, keyboard.DOWN).row == settings_screen.ROW_MAX_WORDS
     assert press(state, keyboard.DOWN, keyboard.DOWN).row == settings_screen.ROW_LIST_LIMIT
     assert press(state, keyboard.DOWN, keyboard.DOWN, keyboard.DOWN).row == (
@@ -49,12 +50,14 @@ def test_down_moves_through_rows_and_wraps(state):
     )
     assert press(
         state, keyboard.DOWN, keyboard.DOWN, keyboard.DOWN, keyboard.DOWN
-    ).row == settings_screen.ROW_FORMAT
+    ).row == settings_screen.ROW_COMPRESS_AFTER
+    assert press(state, *keys).row == settings_screen.ROW_MAX_SESSION_TOKENS
+    assert press(state, *keys, keyboard.DOWN).row == settings_screen.ROW_FORMAT
 
 
 def test_up_moves_backwards(state):
     """Стрелка вверх должна идти вверх, а не повторять поведение стрелки вниз."""
-    assert press(state, keyboard.UP).row == settings_screen.ROW_TEMPERATURE
+    assert press(state, keyboard.UP).row == settings_screen.ROW_MAX_SESSION_TOKENS
     assert press(state, keyboard.DOWN, keyboard.UP).row == settings_screen.ROW_FORMAT
 
 

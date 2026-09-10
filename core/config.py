@@ -71,16 +71,25 @@ MIN_LIST_LIMIT = 1
 MAX_LIST_LIMIT = 10
 
 ASSETS_DIR = BASE_DIR / "assets"
+# Потолок объёма резюме: дайджест — компактный (своя max_tokens-граница от этого объёма).
+SUMMARY_MAX_WORDS = 150
 
-ESTIMATED_CHARS_PER_TOKEN = 3  # приближение для клиентской оценки токенов (кириллица, см. core/usage.py)
+# Порог сжатия контекста: сжимаем, когда неотжатых сообщений набирается столько.
+# Значение-дефолт настройки сессии; переопределяется окружением для e2e (сжатие видно за секунды).
+MIN_COMPRESS_AFTER = 5
+MAX_COMPRESS_AFTER = 50
+DEFAULT_COMPRESS_AFTER = int(os.getenv("TABLETOP_COMPRESS_AFTER", "10"))
 
-MAX_INPUT_LENGTH = 2000
-# Потолок и файловой истории, и окна контекста сессии. Переопределяется окружением:
-# так демо и e2e показывают вытеснение старых ходов за секунды, а не за 50+ обменов.
-HISTORY_LIMIT = int(os.getenv("TABLETOP_HISTORY_LIMIT", "50"))
-# Путь к истории тоже переопределяется через окружение. Он выводится из __file__, а не
-# из текущего каталога, поэтому без такого переключателя любой прогон приложения (в том
-# числе тестовый) писал бы в единственный реальный history.json в корне репозитория.
+# Потолок токенов собираемого запроса: глубину контекста сессии ограничивает не число записей
+# (файл истории теперь неограничен), а оценка запроса против этого потолка — превышение
+# вызывает внеочередное сжатие. Дефолт настройки сессии; переопределяется окружением для e2e.
+MIN_MAX_SESSION_TOKENS = 5000
+MAX_MAX_SESSION_TOKENS = 50000
+DEFAULT_MAX_SESSION_TOKENS = int(os.getenv("TABLETOP_MAX_SESSION_TOKENS", "20000"))
+
+# Путь к файлу истории переопределяется через окружение. Он выводится из __file__, а не из
+# текущего каталога, поэтому без такого переключателя любой прогон приложения (в том числе
+# тестовый) писал бы в единственный реальный history.json в корне репозитория.
 DEFAULT_HISTORY_FILE = BASE_DIR / "history.json"
 HISTORY_FILE = Path(os.getenv("TABLETOP_HISTORY_FILE", str(DEFAULT_HISTORY_FILE)))
 
@@ -89,6 +98,9 @@ HISTORY_FILE = Path(os.getenv("TABLETOP_HISTORY_FILE", str(DEFAULT_HISTORY_FILE)
 REQUEST_TIMEOUT = int(os.getenv("TABLETOP_REQUEST_TIMEOUT", "90"))
 MAX_RETRIES = 3
 
+MAX_INPUT_LENGTH = 2000
+
+ESTIMATED_CHARS_PER_TOKEN = 3  # приближение для клиентской оценки токенов (кириллица, см. core/usage.py)
 
 def get_api_key() -> Optional[str]:
     return os.getenv("OPENCODE_API_KEY")
