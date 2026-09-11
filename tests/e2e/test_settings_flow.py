@@ -10,6 +10,8 @@ import json
 import pytest
 
 from . import harness
+from ui import settings_screen
+
 from .harness import (
     CTRL_C,
     KEY_BACKSPACE,
@@ -47,7 +49,7 @@ def close_settings(session):
 # --- отрисовка и навигация ----------------------------------------------------------------
 
 
-def test_settings_screen_shows_all_four_rows(app):
+def test_settings_screen_shows_all_rows(app):
     with app() as session:
         screen = open_settings(session)
 
@@ -65,7 +67,11 @@ def test_marker_moves_down_between_rows(app):
         session.send_keys(KEY_DOWN)
         session.read_for(0.3)
         after_down = session.screen_text()
-        assert "➤ Макс. объём" in after_down
+        assert "➤ Стратегия контекста" in after_down
+
+        session.send_keys(KEY_DOWN)
+        session.read_for(0.3)
+        assert "➤ Макс. объём" in session.screen_text()
 
         session.send_keys(KEY_DOWN)
         session.read_for(0.3)
@@ -102,10 +108,12 @@ def test_full_settings_walkthrough_changes_the_next_request(app, stub):
         open_settings(session)
         session.send_keys(KEY_RIGHT)  # свободный -> компактный
         session.send_keys(KEY_RIGHT)  # компактный -> JSON
-        session.send_keys(KEY_DOWN)
+        # формат → стратегия → объём
+        session.send_keys(*[KEY_DOWN] * (settings_screen.ROW_MAX_WORDS - settings_screen.ROW_FORMAT))
         session.send_keys(KEY_BACKSPACE, KEY_BACKSPACE, KEY_BACKSPACE)
         session.send_keys(b"5", b"0")
-        session.send_keys(KEY_DOWN)
+        # объём → лимит списка
+        session.send_keys(*[KEY_DOWN] * (settings_screen.ROW_LIST_LIMIT - settings_screen.ROW_MAX_WORDS))
         session.send_keys(KEY_BACKSPACE)
         session.send_keys(b"6")
         session.send_keys(KEY_ESC)
@@ -129,7 +137,7 @@ def test_temperature_setting_changes_the_next_request(app, stub):
     """Температура 1.2, набранная на экране, видна в статус-баре и уходит в payload."""
     with app() as session:
         open_settings(session)
-        session.send_keys(KEY_DOWN, KEY_DOWN, KEY_DOWN)
+        session.send_keys(*[KEY_DOWN] * settings_screen.ROW_TEMPERATURE)
         session.send_keys(KEY_BACKSPACE, KEY_BACKSPACE, KEY_BACKSPACE)
         session.send_keys(b"1", b".", b"2")
         close_settings(session)
@@ -144,7 +152,7 @@ def test_temperature_input_blocks_the_second_decimal_digit(app):
     """Ограничение одного знака после точки видно на экране: 0.5 + «5» → 0.5."""
     with app() as session:
         open_settings(session)
-        session.send_keys(KEY_DOWN, KEY_DOWN, KEY_DOWN)
+        session.send_keys(*[KEY_DOWN] * settings_screen.ROW_TEMPERATURE)
         session.send_keys(KEY_BACKSPACE, KEY_BACKSPACE, KEY_BACKSPACE)
         session.send_keys(b"0", b".", b"5")
         session.read_for(0.3)
@@ -181,7 +189,7 @@ def test_free_format_sends_no_format_instruction(app, stub):
 def test_invalid_value_is_reported_and_previous_value_kept(app, stub):
     with app() as session:
         open_settings(session)
-        session.send_keys(KEY_DOWN)
+        session.send_keys(*[KEY_DOWN] * settings_screen.ROW_MAX_WORDS)
         session.send_keys(KEY_BACKSPACE, KEY_BACKSPACE, KEY_BACKSPACE)
         session.send_keys(b"9", b"9", b"9", b"9")
         session.send_keys(KEY_ESC)
@@ -198,7 +206,7 @@ def test_invalid_value_is_reported_and_previous_value_kept(app, stub):
 def test_emptied_field_is_reported(app):
     with app() as session:
         open_settings(session)
-        session.send_keys(KEY_DOWN)
+        session.send_keys(*[KEY_DOWN] * settings_screen.ROW_MAX_WORDS)
         session.send_keys(*[KEY_BACKSPACE] * 5)
         session.send_keys(KEY_ESC)
 
@@ -209,7 +217,7 @@ def test_emptied_field_is_reported(app):
 def test_settings_survive_and_apply_to_every_later_question(app, stub):
     with app() as session:
         open_settings(session)
-        session.send_keys(KEY_DOWN)
+        session.send_keys(*[KEY_DOWN] * settings_screen.ROW_MAX_WORDS)
         session.send_keys(KEY_BACKSPACE, KEY_BACKSPACE, KEY_BACKSPACE)
         session.send_keys(b"3", b"0")
         close_settings(session)

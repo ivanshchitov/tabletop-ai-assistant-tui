@@ -1,4 +1,4 @@
-"""Контекст сессии в запросах: агент пересылает стек сообщений, /clear и /logictask его не путают."""
+"""Контекст сессии в запросах: агент пересылает ходы лога, /clear его опустошает."""
 
 import json
 import time
@@ -8,6 +8,8 @@ import pytest
 from core import context_compressor
 
 from . import harness
+from ui import settings_screen
+
 from .stub_api import Reply, answer
 
 pytestmark = [pytest.mark.e2e, pytest.mark.pty]
@@ -46,28 +48,6 @@ def test_clear_resets_the_conversation_context(app, stub):
     assert stub.last_payload()["messages"][1]["content"].startswith(
         "Вопрос пользователя: Вопрос после очистки"
     )
-
-def test_logictask_does_not_change_the_conversation_context(app, stub):
-    stub.always(answer("Прямой ответ stub-модели."))
-    with app() as session:
-        session.ask("Обычный вопрос", "Прямой ответ stub-модели.")
-
-        session.send_line("/logictask")
-        session.wait_on_screen("Выберите стратегию")
-        session.send_key(harness.KEY_ENTER, 1)  # стратегия 1 уже выбрана
-        session.wait_for("Стратегия 1: Прямой ответ")
-        session.wait_for("Токены: 50+100=150")
-        session.wait_for_prompt()
-
-        session.send_line("Следующий вопрос")
-        harness.wait_for_answers(session, 3)
-
-    # вызов прогона (запрос 2) — ровно два сообщения, вне стека
-    assert _roles(stub.payload_at(1)) == ["system", "user"]
-    # обычный вопрос после прогона — тот же состав контекста, что и до него
-    payload = stub.payload_at(2)
-    assert _roles(payload) == ["system", "user", "assistant", "user"]
-    assert "Обычный вопрос" in payload["messages"][1]["content"]
 
 def test_restarted_session_carries_restored_context(app, stub, history_file):
     stub.always(answer("Ответ первой сессии."))
@@ -117,9 +97,13 @@ def close_settings(session):
 
 
 def set_compress_after(session, value: str) -> None:
-    """Порог сжатия — строка 4: ↓×4, стереть, набрать значение, Esc."""
+    """Порог сжатия: дойти до его строки (↓ от первой строки экрана), стереть, набрать, Esc.
+
+    Число нажатий берётся из нумерации строк экрана настроек, а не из раскладки: новая
+    строка в экране не должна переписывать e2e-сценарий.
+    """
     open_settings(session)
-    for _ in range(4):
+    for _ in range(settings_screen.ROW_COMPRESS_AFTER):
         session.send_key(harness.KEY_DOWN, 1)
         time.sleep(0.02)
     for _ in range(4):
@@ -247,13 +231,14 @@ def test_clear_wipes_summary_too(app, stub, history_file):
     assert data["summary"] is None and data["summary_covers"] == 0
 
 
-def test_settings_screen_shows_six_rows(app):
+def test_settings_screen_shows_seven_rows(app):
     with app() as session:
         open_settings(session)
         screen = session.screen_text()
 
     for row in (
         "Формат ответа",
+        "Стратегия контекста",
         "Макс. объём",
         "Лимит вариантов",
         "Температура",

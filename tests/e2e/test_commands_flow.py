@@ -29,7 +29,8 @@ def test_panel_lists_commands_and_esc_makes_no_requests(app, stub, history_file)
     session.wait_on_screen("/commands — показать эту панель")
     session.wait_on_screen("/settings — настройки формата и объёма ответа")
     session.wait_on_screen("/clear — очистить историю диалога")
-    session.wait_on_screen("/logictask — решить логическую задачу выбранной стратегией")
+    session.wait_on_screen("/context — состояние контекста: стратегия, память, ветки")
+    session.wait_on_screen("/branches — ветки диалога")
     _wait_panel_open(session)
 
     session.send_key(harness.KEY_ESC, 1)
@@ -140,7 +141,6 @@ def test_usage_command_reports_tokens_without_api_calls(app, stub, history_file)
     session.wait_on_screen("Последний запрос: токены 50+100=150")
     session.wait_on_screen("Сессия: запросов 1")
     session.wait_on_screen("Всего диалога (файл истории): запросов 1")
-    session.wait_on_screen("1 обменов в стеке")
     assert stub.call_count == 1  # отчёт не обращается к модели
 
     # отчёт не пишется в историю

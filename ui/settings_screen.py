@@ -9,19 +9,29 @@ from dataclasses import dataclass, replace
 from typing import List, Tuple
 import re
 
-from core.answer_settings import AnswerFormat, AnswerSettings, AnswerSettingsError
+from core import config
+
+from core.answer_settings import (
+    AnswerFormat,
+    AnswerSettings,
+    AnswerSettingsError,
+    ContextStrategy,
+)
 
 from . import keyboard
 
 ROW_FORMAT = 0
-ROW_MAX_WORDS = 1
-ROW_LIST_LIMIT = 2
-ROW_TEMPERATURE = 3
-ROW_COMPRESS_AFTER = 4
-ROW_MAX_SESSION_TOKENS = 5
-ROWS_COUNT = 6
+ROW_STRATEGY = 1
+ROW_MAX_WORDS = 2
+ROW_LIST_LIMIT = 3
+ROW_TEMPERATURE = 4
+ROW_COMPRESS_AFTER = 5
+ROW_MAX_SESSION_TOKENS = 6
+ROWS_COUNT = 7
 
 FORMAT_VALUES: List[AnswerFormat] = list(AnswerFormat)
+# Порядок переключения стратегий стрелками: тот же список, что в конфиге (и в enum).
+STRATEGY_VALUES: List[ContextStrategy] = [ContextStrategy(name) for name in config.CONTEXT_STRATEGIES]
 
 _TEMPERATURE_RE = re.compile(r"^(\d+)(?:\.(\d))?$")
 
@@ -37,6 +47,7 @@ class SettingsScreenState:
 
     row: int = ROW_FORMAT
     format_index: int = 0
+    strategy_index: int = 0
     max_words_input: str = ""
     list_limit_input: str = ""
     temperature_input: str = ""
@@ -47,11 +58,16 @@ class SettingsScreenState:
     def selected_format(self) -> AnswerFormat:
         return FORMAT_VALUES[self.format_index]
 
+    @property
+    def selected_strategy(self) -> ContextStrategy:
+        return STRATEGY_VALUES[self.strategy_index]
+
 
 def initial_state(settings: AnswerSettings) -> SettingsScreenState:
     return SettingsScreenState(
         row=ROW_FORMAT,
         format_index=FORMAT_VALUES.index(settings.format),
+        strategy_index=STRATEGY_VALUES.index(settings.context_strategy),
         max_words_input=str(settings.max_words),
         list_limit_input=str(settings.list_limit),
         temperature_input=_format_temperature(settings.temperature),
@@ -78,6 +94,12 @@ def apply_key(state: SettingsScreenState, key: str) -> SettingsScreenState:
     if state.row == ROW_FORMAT and key in (keyboard.LEFT, keyboard.RIGHT):
         step = -1 if key == keyboard.LEFT else 1
         return replace(state, format_index=(state.format_index + step) % len(FORMAT_VALUES))
+
+    if state.row == ROW_STRATEGY and key in (keyboard.LEFT, keyboard.RIGHT):
+        step = -1 if key == keyboard.LEFT else 1
+        return replace(
+            state, strategy_index=(state.strategy_index + step) % len(STRATEGY_VALUES)
+        )
 
     if state.row == ROW_MAX_WORDS:
         if key == keyboard.BACKSPACE:
@@ -141,7 +163,9 @@ def apply_to_settings(
     а вызывающий код показывает сообщение — это осознанный отказ от тихого клампинга.
     """
     errors: List[str] = []
-    result = settings.with_format(state.selected_format)
+    result = settings.with_format(state.selected_format).with_context_strategy(
+        state.selected_strategy
+    )
 
     if state.max_words_input.isdigit():
         try:

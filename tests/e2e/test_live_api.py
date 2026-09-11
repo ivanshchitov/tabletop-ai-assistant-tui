@@ -25,6 +25,8 @@ from core.answer_settings import AnswerFormat, AnswerSettings
 from ui.settings_screen import FORMAT_VALUES
 
 from .cassettes import REFUSAL_PHRASE
+from ui import settings_screen
+
 from .harness import KEY_BACKSPACE, KEY_DOWN, KEY_ESC, KEY_RIGHT
 
 pytestmark = [pytest.mark.e2e, pytest.mark.pty, pytest.mark.network]
@@ -198,7 +200,7 @@ def test_live_format_is_not_overridden_by_the_question(live_app):
 def test_live_word_limit_is_respected(live_app):
     """Лимит объёма — инструкция в промпте; проверяем с запасом на разметку и переносы."""
     with live_app() as session:
-        set_number(session, row_presses=1, value="40")
+        set_number(session, row_presses=settings_screen.ROW_MAX_WORDS, value="40")
         session.wait_for("Объём: 40 слов")
         answer = answer_text(session, BOARD_GAME_QUESTION)
 
@@ -209,7 +211,7 @@ def test_live_word_limit_is_respected(live_app):
 def test_live_list_limit_is_respected(live_app):
     """Лимит вариантов в подборке: рекомендаций не больше заданного числа."""
     with live_app() as session:
-        set_number(session, row_presses=2, value="2")
+        set_number(session, row_presses=settings_screen.ROW_LIST_LIMIT, value="2")
         session.wait_for("Лимит списка: 2")
         answer = answer_text(session, RECOMMENDATION_QUESTION)
 
@@ -223,7 +225,7 @@ def test_live_list_limit_is_respected(live_app):
 def test_live_settings_reach_the_model_across_questions(live_app, history_file):
     """Настройки держатся всю сессию, оба ответа сохраняются в историю."""
     with live_app() as session:
-        set_number(session, row_presses=1, value="30")
+        set_number(session, row_presses=settings_screen.ROW_MAX_WORDS, value="30")
         session.wait_for("Объём: 30 слов")
         answer_text(session, BOARD_GAME_QUESTION)
         answer_text(session, "Во что поиграть вдвоём?", number=2)
@@ -254,9 +256,9 @@ def test_live_api_url_is_the_real_service(live_app):
 
 
 def set_compress_after(session, value: str) -> None:
-    """Порог сжатия — четвёртая строка панели: ↓×4, стереть, набрать, Esc, проверка reopen."""
+    """Порог сжатия: ↓ до его строки, стереть, набрать, Esc."""
     open_settings(session)
-    for _ in range(4):
+    for _ in range(settings_screen.ROW_COMPRESS_AFTER):
         session.send_keys(KEY_DOWN)
     session.send_keys(*[KEY_BACKSPACE] * 4)
     session.send_keys(*[c.encode() for c in value])

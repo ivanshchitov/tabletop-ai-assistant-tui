@@ -7,19 +7,19 @@ from typing import List, Optional
 
 import pytest
 
-from core import config, context_compressor
-from core.answer_settings import AnswerFormat, AnswerSettings
+from core import config, context_compressor, context_strategies
+from core.answer_settings import AnswerFormat, AnswerSettings, ContextStrategy
 from core.api_client import AnswerMeta, APIError
 from core.history_manager import HistoryManager
-from ui import keyboard, settings_screen, tui_app
+from ui import branches_screen, keyboard, settings_screen, tui_app
 from ui.tui_app import TabletopAITUI
 
 
 class FakeClient:
     """Подставной клиент: отдаёт заготовленные ответы и запоминает, что у него спросили.
 
-    temperature=None означает «вызывающий не передал температуру» — так отличают вызов,
-    полагающийся на дефолт клиента (/logictask), от явной передачи значения настройки.
+    temperature=None означает «вызывающий не передал температуру» — так отличают
+    вспомогательный запрос стратегии (дефолт клиента) от явной передачи настройки.
     """
 
     def __init__(self, answers=None, error: Optional[Exception] = None, usages=None,
@@ -402,9 +402,11 @@ def test_settings_screen_applies_temperature_change(
 ):
     """Набор 1.2 на строке температуры меняет настройку и виден в статус-баре."""
     keys = iter(
-        [keyboard.DOWN, keyboard.DOWN, keyboard.DOWN]
-        + [keyboard.BACKSPACE] * 3
-        + ["1", ".", "2", keyboard.ESC]
+        _settings_keys(
+            [settings_screen.ROW_TEMPERATURE],
+            *[keyboard.BACKSPACE] * 3,
+            "1", ".", "2", keyboard.ESC,
+        )
     )
     monkeypatch.setattr(keyboard, "read_key", lambda: next(keys))
     monkeypatch.setattr(keyboard, "raw_mode", _noop_context)
@@ -456,9 +458,13 @@ def test_settings_screen_applies_changes_and_updates_status_bar(
 ):
     """Полный путь /settings: клавиши идут в приложение, новые значения видны в статус-баре."""
     keys = iter(
-        [keyboard.RIGHT, keyboard.DOWN]
-        + [keyboard.BACKSPACE] * 3
-        + ["5", "0", keyboard.DOWN, keyboard.BACKSPACE, "6", keyboard.ESC]
+        _settings_keys(
+            [(settings_screen.ROW_FORMAT, keyboard.RIGHT), settings_screen.ROW_MAX_WORDS],
+            *[keyboard.BACKSPACE] * 3,
+            "5", "0",
+            *[keyboard.DOWN],
+            keyboard.BACKSPACE, "6", keyboard.ESC,
+        )
     )
     monkeypatch.setattr(keyboard, "read_key", lambda: next(keys))
     monkeypatch.setattr(keyboard, "raw_mode", _noop_context)
@@ -478,7 +484,12 @@ def test_settings_screen_applies_changes_and_updates_status_bar(
 def test_settings_screen_reports_invalid_value_and_keeps_previous(
     make_app, recording_console, monkeypatch
 ):
-    keys = iter([keyboard.DOWN] + [keyboard.BACKSPACE] * 3 + ["9", "9", "9", "9", keyboard.ESC])
+    keys = iter(
+        _settings_keys(
+            [settings_screen.ROW_MAX_WORDS],
+            *[keyboard.BACKSPACE] * 3, "9", "9", "9", "9", keyboard.ESC,
+        )
+    )
     monkeypatch.setattr(keyboard, "read_key", lambda: next(keys))
     monkeypatch.setattr(keyboard, "raw_mode", _noop_context)
 
@@ -492,8 +503,12 @@ def test_settings_screen_reports_invalid_value_and_keeps_previous(
 def test_settings_change_affects_the_next_request(make_app, monkeypatch):
     """Главное следствие /settings: изменившийся промпт и потолок токенов в следующем запросе."""
     keys = iter(
-        [keyboard.DOWN] + [keyboard.BACKSPACE] * 3 + ["8", "0", keyboard.DOWN,
-                                                      keyboard.BACKSPACE, "2", keyboard.ESC]
+        _settings_keys(
+            [settings_screen.ROW_MAX_WORDS],
+            *[keyboard.BACKSPACE] * 3, "8", "0",
+            *[keyboard.DOWN],
+            keyboard.BACKSPACE, "2", keyboard.ESC,
+        )
     )
     monkeypatch.setattr(keyboard, "read_key", lambda: next(keys))
     monkeypatch.setattr(keyboard, "raw_mode", _noop_context)
@@ -516,26 +531,7 @@ def test_escape_immediately_leaves_settings_untouched(make_app, monkeypatch):
     assert app.settings == before
 
 
-# --- команда /logictask: выбор стратегии и прогон -------------------------------------------
-
-
-def test_logictask_opens_panel_and_runs_chosen_strategy(make_app, recording_console, monkeypatch):
-    """↓ + Enter: выбрана стратегия 2 — ровно один запрос, ответ под её заголовком."""
-    keys = iter([keyboard.DOWN, keyboard.ENTER, keyboard.ESC])
-    monkeypatch.setattr(keyboard, "read_key", lambda: next(keys))
-    monkeypatch.setattr(keyboard, "raw_mode", _noop_context)
-
-    client = FakeClient(["Пошаговый ответ модели"])
-    app = make_app(["/logictask", "/exit"], client)
-    app.run()
-
-    assert len(client.calls) == 1
-    from core import logictask
-
-    assert client.calls[0]["system"] == logictask.STEPWISE_SYSTEM_MESSAGE
-    assert logictask.LOGIC_TASK in client.calls[0]["user"]
-    assert recording_console.contains("Стратегия 2: Пошаговое решение")
-    assert recording_console.contains("Пошаговый ответ модели")
+# --- температура запроса ----------------------------------------------------------------------
 
 
 def test_question_carries_temperature_setting(make_app):
@@ -547,149 +543,14 @@ def test_question_carries_temperature_setting(make_app):
     assert client.calls[0]["temperature"] == 1.2
 
 
-def test_logictask_ignores_temperature_setting(make_app, monkeypatch):
-    """Прогоны /logictask не передают температуру настройки — клиент берёт дефолт."""
-    keys = iter([keyboard.ENTER, keyboard.ESC])
-    monkeypatch.setattr(keyboard, "read_key", lambda: next(keys))
-    monkeypatch.setattr(keyboard, "raw_mode", _noop_context)
-
-    client = FakeClient(["Ответ задачи"])
-    app = make_app(["/logictask", "/exit"], client)
-    app.settings = AnswerSettings().with_temperature(1.2)
-    app.run()
-    assert client.calls[0]["temperature"] is None
-
-
-def test_logictask_panel_visible_before_choice(make_app, recording_console, monkeypatch):
-    """Панель с четырьмя стратегиями и описанием задачи; до Enter/Esc запросов нет."""
-    keys = iter([keyboard.ESC])
-    monkeypatch.setattr(keyboard, "read_key", lambda: next(keys))
-    monkeypatch.setattr(keyboard, "raw_mode", _noop_context)
-
-    from core import logictask
-
+def test_removed_logictask_command_is_sent_as_a_question(make_app, recording_console):
+    """Удалённая команда больше не обрабатывается: ввод с «/» уходит модели как вопрос."""
     client = FakeClient()
     app = make_app(["/logictask", "/exit"], client)
     app.run()
 
-    assert recording_console.contains("Выберите стратегию")
-    for _, title in ((1, "Прямой ответ"), (2, "Пошаговое решение"), (3, "Промпт от модели"), (4, "Панель экспертов")):
-        assert recording_console.contains(title)
-    assert recording_console.contains("волк")
-    assert recording_console.contains("капуст")
-    assert recording_console.contains("Как перевезти всё на другой берег")
-    assert client.calls == []
-
-
-def test_logictask_esc_cancels_without_requests(make_app, monkeypatch):
-    monkeypatch.setattr(keyboard, "read_key", lambda: keyboard.ESC)
-    monkeypatch.setattr(keyboard, "raw_mode", _noop_context)
-
-    from core import logictask
-
-    client = FakeClient()
-    make_app(["/logictask", "Обычный вопрос", "/exit"], client).run()
-
-    # Esc не породил ни одного запроса задачи; обычный вопрос после отмены обработан штатно.
     assert len(client.calls) == 1
-    assert logictask.LOGIC_TASK not in client.calls[0]["user"]
-    assert "Обычный вопрос" in client.calls[0]["user"]
-
-
-def test_logictask_strategy3_runs_both_steps(make_app, recording_console, monkeypatch):
-    """Выбор стратегии 3: составленный моделью промпт используется во втором запросе."""
-    keys = iter([keyboard.DOWN, keyboard.DOWN, keyboard.ENTER, keyboard.ESC])
-    monkeypatch.setattr(keyboard, "read_key", lambda: next(keys))
-    monkeypatch.setattr(keyboard, "raw_mode", _noop_context)
-
-    client = FakeClient(answers=["СОСТАВЛЕННЫЙ ПРОМПТ", "Решение по промпту"])
-    make_app(["/logictask", "/exit"], client).run()
-
-    assert len(client.calls) == 2
-    assert client.calls[1]["system"] == "СОСТАВЛЕННЫЙ ПРОМПТ"
-    assert recording_console.contains("СОСТАВЛЕННЫЙ ПРОМПТ")
-
-
-def test_logictask_strategy4_runs_three_experts(make_app, monkeypatch):
-    keys = iter(
-        [keyboard.DOWN, keyboard.DOWN, keyboard.DOWN, keyboard.ENTER, keyboard.ESC]
-    )
-    monkeypatch.setattr(keyboard, "read_key", lambda: next(keys))
-    monkeypatch.setattr(keyboard, "raw_mode", _noop_context)
-
-    from core import logictask
-
-    client = FakeClient(answers=["Р1", "Р2", "Р3"])
-    make_app(["/logictask", "/exit"], client).run()
-
-    assert len(client.calls) == 3
-    assert [c["system"] for c in client.calls] == list(logictask.EXPERT_ROLES)
-
-
-def test_logictask_ignores_answer_settings(make_app, monkeypatch):
-    """JSON-формат и объём 80 слов не влияют на запросы прогона: ни инструкций, ни потолка токенов."""
-    keys = iter([keyboard.ENTER, keyboard.ESC])
-    monkeypatch.setattr(keyboard, "read_key", lambda: next(keys))
-    monkeypatch.setattr(keyboard, "raw_mode", _noop_context)
-
-    client = FakeClient(["Ответ стратегии"])
-    app = make_app(["/logictask", "/exit"], client)
-    app.settings = AnswerSettings().with_format(AnswerFormat.JSON).with_max_words(80)
-    app.run()
-
-    assert len(client.calls) == 1
-    call = client.calls[0]
-    assert call["max_tokens"] == config.max_tokens_for_words(config.DEFAULT_MAX_WORDS)
-    assert "JSON" not in call["system"] + call["user"]
-    assert "слов" not in call["user"]
-    assert "вариант" not in call["user"]
-
-
-def test_logictask_run_is_not_in_history(make_app, history, history_path, monkeypatch):
-    keys = iter([keyboard.ENTER, keyboard.ESC])
-    monkeypatch.setattr(keyboard, "read_key", lambda: next(keys))
-    monkeypatch.setattr(keyboard, "raw_mode", _noop_context)
-
-    app = make_app(["/logictask", "/exit"], FakeClient(["Ответ стратегии"]))
-    app.run()
-
-    assert history.dialogues == []
-    assert not history_path.exists() or json.loads(history_path.read_text(encoding="utf-8")) == {
-        "summary": None,
-        "summary_covers": 0,
-        "facts": {},
-        "dialogues": [],
-    }
-
-
-def test_logictask_error_stops_step_but_session_continues(
-    make_app, recording_console, history, monkeypatch
-):
-    """Ошибка на втором шаге стратегии 3: остаток не выполняется, сессия живёт."""
-    keys = iter([keyboard.DOWN, keyboard.DOWN, keyboard.ENTER, keyboard.ESC])
-    monkeypatch.setattr(keyboard, "read_key", lambda: next(keys))
-    monkeypatch.setattr(keyboard, "raw_mode", _noop_context)
-
-    class TwoStepClient(FakeClient):
-        def ask(self, system_message, user_message, max_tokens=0, temperature=None, model=None):
-            self.calls.append({"system": system_message, "user": user_message})
-            if len(self.calls) == 2:
-                raise APIError("Тестовая ошибка API.")
-            return "СОСТАВЛЕННЫЙ ПРОМПТ"
-
-    client = TwoStepClient()
-    app = make_app(["/logictask", "Обычный вопрос", "/exit"], client)
-    app.run()
-
-    assert len(client.calls) == 3  # 2 шага стратегии (второй упал) + обычный вопрос
-    assert recording_console.contains("Тестовая ошибка API.")
-    assert [d["question"] for d in history.dialogues] == ["Обычный вопрос"]
-
-
-def test_logictask_is_a_known_command(make_app, recording_console):
-    make_app(["/exit"], FakeClient()).run()
-    assert "/logictask" in tui_app.COMMANDS
-    assert recording_console.contains("Команды: /exit, /commands")
+    assert "/logictask" in client.calls[0]["user"]
 
 
 # --- /commands: панель команд и выполнение выбранной команды --------------------------------
@@ -770,7 +631,7 @@ def test_status_bar_hint_lists_only_exit_and_commands(make_app, recording_consol
     assert "Команды: /exit, /commands" in output
     assert "Команды: /exit, /commands, /settings" not in output
     assert "/clear" not in output.split("Команды: ")[-1]
-    assert "/logictask" not in output.split("Команды: ")[-1]
+    assert "/context" not in output.split("Команды: ")[-1]
 
 
 # --- /models: панель выбора модели ----------------------------------------------------------
@@ -780,6 +641,28 @@ def _panel_keys(monkeypatch, keys) -> None:
     key_iter = iter(keys)
     monkeypatch.setattr(keyboard, "read_key", lambda: next(key_iter))
     monkeypatch.setattr(keyboard, "raw_mode", _noop_context)
+
+
+def _settings_keys(rows, *tail) -> list:
+    """Клавиши экрана настроек: дойти до строк с начала экрана, затем остальное.
+
+    Строки задаются их именами (`settings_screen.ROW_*`), поэтому новая строка экрана не
+    переписывает тесты клавиатурной навигации.
+    """
+    keys, current = [], settings_screen.ROW_FORMAT
+    for row in rows:
+        if isinstance(row, tuple):
+            row, *extra = row
+            while current != row:
+                keys.append(keyboard.DOWN)
+                current += 1
+            keys.extend(extra)
+        else:
+            while current != row:
+                keys.append(keyboard.DOWN)
+                current += 1
+    keys.extend(tail)
+    return keys
 
 
 def test_models_command_selects_session_model(make_app, monkeypatch):
@@ -814,14 +697,22 @@ def test_question_uses_selected_model(make_app, monkeypatch):
     assert client.calls[0]["model"] == "glm-5.1"
 
 
-def test_logictask_uses_selected_model(make_app, monkeypatch):
-    _panel_keys(monkeypatch, [keyboard.DOWN, keyboard.ENTER, keyboard.ENTER])
+def test_strategy_follows_the_selected_model(make_app, monkeypatch):
+    """Вспомогательный запрос стратегии уходит с моделью сессии."""
+    _panel_keys(monkeypatch, [keyboard.DOWN, keyboard.ENTER])  # deepseek-v4-pro
 
-    client = FakeClient(["Ответ стратегии"])
-    make_app(["/models", "/logictask", "/exit"], client).run()
+    client = FakeClient(["Ответ"])
+    make_app(["/models", "Вопрос", "/exit"], client).run()
 
     assert len(client.calls) == 1
     assert client.calls[0]["model"] == config.AVAILABLE_MODELS[1]
+
+
+def test_removed_logictask_is_not_a_known_command(make_app, recording_console):
+    make_app(["/exit"], FakeClient()).run()
+    assert "/logictask" not in tui_app.COMMANDS
+    assert "/context" in tui_app.COMMANDS
+    assert recording_console.contains("Команды: /exit, /commands")
 
 
 def test_models_is_a_known_command_and_autocomplete_sees_it():
@@ -859,6 +750,33 @@ def test_normal_answer_has_no_truncation_warning(make_app, recording_console):
     assert not recording_console.contains("исчерпал бюджет")
 
 
+def test_context_command_prints_context_state_without_requests(
+    make_app, recording_console
+):
+    """`/context` рендерит снимок агента: стратегию, окно, память и оценку токенов."""
+    client = FakeClient(["Ответ про Каркассон"])
+    app = make_app(["Вопрос про Каркассон", "/context", "/exit"], client)
+    app.run()
+
+    assert len(client.calls) == 1  # отчёт не обращается к модели
+    assert recording_console.contains("Состояние контекста")
+    assert recording_console.contains("Стратегия: резюме")
+    assert recording_console.contains("В ближайшем запросе")
+    assert recording_console.contains("Резюме: пока нет")
+    assert recording_console.contains("Ветки: ветка 1 — активная")
+    assert recording_console.contains("Оценка запроса")
+
+
+def test_context_command_after_clear_reports_empty_state(make_app, recording_console):
+    app = make_app(["/clear", "/context", "/exit"], FakeClient())
+    app.run()
+    assert recording_console.contains("из 0 обменов лога сессии")
+
+
+def test_context_is_an_autocomplete_command():
+    assert "/context" in tui_app.COMMANDS
+
+
 def test_usage_command_prints_report_after_question(make_app, recording_console):
     client = FakeClient()
     make_app(["Вопрос", "/usage", "/exit"], client).run()
@@ -866,7 +784,7 @@ def test_usage_command_prints_report_after_question(make_app, recording_console)
     assert recording_console.contains("Последний запрос")
     assert recording_console.contains("Сессия")
     assert recording_console.contains("Всего диалога")
-    assert recording_console.contains("Окно контекста")
+    assert not recording_console.contains("Окно контекста")  # состояние контекста — в /context
     assert len(client.calls) == 1  # отчёт не обращается к модели
 
 
@@ -1003,3 +921,138 @@ def test_spinner_label_shows_summarization_during_compression(make_app, monkeypa
     assert "● Отправка..." in labels[0]
 
 
+
+
+# --- день 10: панели и строки журнала для стратегий -----------------------------------------
+
+
+def test_branches_panel_creates_and_switches_branches(make_app, recording_console, monkeypatch):
+    """`c` — чекпоинт, `n` — новая ветка от него; панель не делает запросов к модели."""
+    client = FakeClient(["Ответ 1", "Ответ 2"])
+    _panel_keys(
+        monkeypatch,
+        # каждая панель закрывается своим исходом: чекпоинт, новая ветка, переключение
+        [branches_screen.KEY_CHECKPOINT, branches_screen.KEY_NEW_BRANCH, keyboard.UP, keyboard.ENTER],
+    )
+    app = make_app(["/branches", "/branches", "/branches", "/exit"], client)
+    app.run()
+
+    assert app.agent.active_branch == "ветка 1"
+    assert [name for name, _ in app.agent.branches] == ["ветка 1", "ветка 2"]
+    assert client.calls == []
+
+
+def test_branches_panel_esc_changes_nothing(make_app, monkeypatch):
+    _panel_keys(monkeypatch, [keyboard.ESC])
+    app = make_app(["/branches", "/exit"], FakeClient())
+    app.run()
+    assert app.agent.branches == (("ветка 1", 0),)
+
+
+def test_branches_command_opens_panel_with_branch_list(
+    make_app, recording_console, monkeypatch
+):
+    """Панель видна на экране: рендер вне Live проверяется напрямую, как у /settings."""
+    _panel_keys(monkeypatch, [keyboard.ESC])
+    app = make_app(["/branches", "/exit"], FakeClient())
+    state = branches_screen.initial_state(app.agent.branches, app.agent.active_branch)
+    recording_console.console.print(app._render_branches_panel(state))
+
+    assert recording_console.contains("Ветки диалога")
+    assert recording_console.contains("ветка 1")
+    assert recording_console.contains("(активная)")
+
+
+def test_facts_line_reports_an_update_and_stays_out_of_history(
+    make_app, recording_console, history, history_path, monkeypatch
+):
+    """Строка о фактах — только экран: в history.json её нет."""
+    class FactsClient(FakeClient):
+        def ask_with_usage_messages(self, messages, **kwargs):
+            if messages[0]["content"] == context_strategies.facts_instruction():
+                self.calls.append({"facts": True})
+                return self._meta('{"цель": "собрать ТЗ"}', kwargs.get("model"))
+            return super().ask_with_usage_messages(messages, **kwargs)
+
+        def _meta(self, content, model):
+            return AnswerMeta(
+                content=content,
+                model=model or config.DEFAULT_MODEL,
+                elapsed_seconds=0.01,
+                prompt_tokens=5,
+                completion_tokens=5,
+                total_tokens=10,
+                cost_usd=0.00001,
+            )
+
+    app = make_app(["Первый вопрос", "/exit"], FactsClient(["Ответ 1"]))
+    app.settings = app.settings.with_context_strategy(ContextStrategy.STICKY_FACTS)
+    app.run()
+
+    assert recording_console.contains("Факты обновлены: 1 ключей")
+    data = json.loads(history_path.read_text(encoding="utf-8"))
+    assert data["facts"] == {"цель": "собрать ТЗ"}
+    assert all("Факты обновлены" not in json.dumps(d) for d in data["dialogues"])
+
+
+def test_facts_line_reports_a_failed_update(make_app, recording_console, monkeypatch):
+    class BrokenFactsClient(FakeClient):
+        def ask_with_usage_messages(self, messages, **kwargs):
+            if messages[0]["content"] == context_strategies.facts_instruction():
+                raise APIError("Извлекатель недоступен.")
+            return super().ask_with_usage_messages(messages, **kwargs)
+
+    app = make_app(["Первый вопрос", "/exit"], BrokenFactsClient(["Ответ 1"]))
+    app.settings = app.settings.with_context_strategy(ContextStrategy.STICKY_FACTS)
+    app.run()
+
+    assert recording_console.contains("Факты не обновлены")
+    assert recording_console.contains("Ответ 1")  # ответ при этом напечатан
+
+
+def test_spinner_label_shows_facts_update_phase(make_app, monkeypatch):
+    """Фаза обновления фактов переключает подпись индикатора."""
+    labels = []
+
+    class StatusStub:
+        def __init__(self, label: str) -> None:
+            labels.append(label)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def update(self, label: str) -> None:
+            labels.append(label)
+
+    class FactsClient(FakeClient):
+        def ask_with_usage_messages(self, messages, **kwargs):
+            if messages[0]["content"] == context_strategies.facts_instruction():
+                return AnswerMeta(
+                    content="{}",
+                    model=config.DEFAULT_MODEL,
+                    elapsed_seconds=0.01,
+                    prompt_tokens=5,
+                    completion_tokens=5,
+                    total_tokens=10,
+                    cost_usd=0.00001,
+                )
+            return super().ask_with_usage_messages(messages, **kwargs)
+
+    app = make_app(["Вопрос", "/exit"], FactsClient(["Ответ"]))
+    app.settings = app.settings.with_context_strategy(ContextStrategy.STICKY_FACTS)
+    monkeypatch.setattr(app.console, "status", lambda label, **kwargs: StatusStub(label))
+    monkeypatch.setattr(tui_app, "TYPING_DELAY", 0)
+    app.run()
+
+    assert "● Обновление фактов..." in labels
+    assert "● Отправка..." in labels
+
+
+def test_switching_strategy_shows_in_the_status_bar(make_app, recording_console):
+    app = make_app(["/exit"], FakeClient())
+    app.settings = app.settings.with_context_strategy(ContextStrategy.BRANCHING)
+    app.run()
+    assert recording_console.contains("Стратегия: ветки")

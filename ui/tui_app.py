@@ -15,8 +15,8 @@ from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
 
-from core import config, logictask
-from core.answer_settings import AnswerFormat, AnswerSettings
+from core import config
+from core.answer_settings import AnswerFormat, AnswerSettings, ContextStrategy
 from core.api_client import (
     API_KEY_CHARSET_ERROR,
     AnswerMeta,
@@ -28,7 +28,7 @@ from core.api_client import (
 from core.history_manager import HistoryManager
 from core.tabletop_agent import RequestPhase, TabletopAgent
 
-from . import commands_screen, keyboard, logictask_screen, models_screen, settings_screen
+from . import branches_screen, commands_screen, keyboard, models_screen, settings_screen
 from .settings_screen import SettingsScreenState
 
 APP_TITLE = "🎲 TABLETOP AI ASSISTANT — эксперт по настольным играм"
@@ -54,6 +54,13 @@ FORMAT_LABELS = {
     AnswerFormat.FREE: "свободный",
 }
 
+STRATEGY_LABELS = {
+    ContextStrategy.SUMMARY: "резюме",
+    ContextStrategy.SLIDING_WINDOW: "окно",
+    ContextStrategy.STICKY_FACTS: "факты",
+    ContextStrategy.BRANCHING: "ветки",
+}
+
 
 class TabletopAITUI:
     def __init__(
@@ -72,6 +79,7 @@ class TabletopAITUI:
         self.client: Optional[APIClient] = client
         self.last_error: Optional[str] = None
         self._printed_compression = None
+        self._printed_facts = None
         # Обе памяти агента — внутри агента: история передаётся ему при создании,
         # и он сам восстанавливает контекст; UI только показывает сохранённое.
         self.agent = TabletopAgent(client, history=history)
@@ -228,8 +236,11 @@ class TabletopAITUI:
         if command == "/usage":
             self._print_usage_report()
             return True
-        if command == "/logictask":
-            self._run_logictask()
+        if command == "/context":
+            self._print_context_report()
+            return True
+        if command == "/branches":
+            self._open_branches_screen()
             return True
         return False
 
@@ -310,68 +321,47 @@ class TabletopAITUI:
         body = "\n".join(lines) + "\n\n[dim]↑/↓ — выбор, Enter — применить, Esc — отмена[/dim]"
         return Panel(body, title="Модель", style="cyan")
 
-    def _run_logictask(self) -> None:
-        """Прогон фиксированной задачи выбранной стратегией промптинга.
+    def _open_branches_screen(self) -> None:
+        """Панель веток диалога: ↑/↓ — выбор, Enter — переключить, «c» — чекпоинт, «n» — новая ветка, Esc — отмена.
 
-        Экспериментальный режим: результаты не пишутся в историю и не считаются диалогами.
-        Панель выбора работает по той же схеме, что экран `/settings`: логика клавиш — в
-        редьюсере `logictask_screen`, здесь только raw_mode, Live и read-key/redraw.
-        Ошибка API прерывает остаток прогона, но не сессию.
+        Та же схема, что у панели моделей: редьюсер `ui.branches_screen` решает, как клавиши
+        меняют экран, здесь только raw_mode, Live и read-key/redraw. Панель не делает
+        запросов к модели: она переключает вид активной стратегии веток и точки ветвления.
         """
-        self.console.print("[bold cyan]Выберите стратегию решения логической задачи:[/bold cyan]")
-        self.console.print(logictask.LOGIC_TASK)
-        for number, title in logictask_screen.STRATEGY_OPTIONS:
-            self.console.print(f"  {number}. {title}")
-        state = logictask_screen.initial_state()
+        state = branches_screen.initial_state(self.agent.branches, self.agent.active_branch)
+
         with Live(console=self.console, refresh_per_second=30, transient=True) as live, keyboard.raw_mode():
-            live.update(self._render_logictask_panel(state))
+            live.update(self._render_branches_panel(state))
             while True:
                 key = keyboard.read_key()
-                if key == keyboard.ESC:
-                    return
-                if key == keyboard.ENTER:
+                state = branches_screen.apply_key(state, key)
+                if state.finished:
                     break
-                state = logictask_screen.apply_key(state, key)
-                live.update(self._render_logictask_panel(state))
+                live.update(self._render_branches_panel(state))
 
-        number, title = state.selected
-        self._run_strategy(number, title)
+        if state.checkpoint_requested:
+            self.agent.checkpoint()
+            self.console.print("[dim]Чекпоинт поставлен в активной ветке.[/dim]")
+        elif state.new_branch_requested:
+            name = self.agent.new_branch()
+            self.console.print(f"[bold green]Создана ветка {name}.[/bold green]")
+        elif state.switched:
+            self.agent.switch_branch(state.selected_name)
 
-    def _render_logictask_panel(self, state: logictask_screen.LogictaskScreenState) -> Panel:
+    def _render_branches_panel(self, state: branches_screen.BranchesScreenState) -> Panel:
         lines = []
-        for index, (number, title) in enumerate(logictask_screen.STRATEGY_OPTIONS):
+        for index, (name, exchanges) in enumerate(state.branches):
             if index == state.selected_index:
-                lines.append(f"➤ [reverse bold]{number}. {title}[/reverse bold]")
+                line = f"➤ [reverse bold]{name}[/reverse bold]"
             else:
-                lines.append(f"  {number}. {title}")
-        body = "\n".join(lines) + "\n\n[dim]↑/↓ — выбор, Enter — решить, Esc — отмена[/dim]"
-        return Panel(body, title="Логическая задача", style="cyan")
-
-    def _run_strategy(self, number: int, title: str) -> None:
-        """Показ прогона: агент решает, UI печатает по мере прихода результатов.
-
-        Каждый next() генератора выполняет один запрос к API — спиннер включается на
-        время запроса. Ошибка API прерывает остаток прогона, но не сессию.
-        """
-        self.last_error = None
-        self.console.print(f"[bold cyan]Стратегия {number}: {title}[/bold cyan]")
-        results = self.agent.solve_logictask(number)
-        while True:
-            try:
-                with self.console.status("[bold yellow]● Отправка...[/bold yellow]", spinner="dots"):
-                    label, meta = next(results)
-            except StopIteration:
-                break
-            except APIError as exc:
-                self.last_error = str(exc)
-                self.console.print(f"[bold red]{exc}[/bold red]")
-                self.console.print("[bold red]Попробуйте повторить запрос.[/bold red]")
-                return
-            if label:
-                self.console.print(f"[dim]{label}[/dim]")
-            self._print_typing(meta.content)
-            self._print_usage_meta(meta)
-        self.console.rule(style="dim")
+                line = f"  {name}"
+            suffix = " (активная)" if name == state.active else ""
+            lines.append(f"{line} — обменов: {exchanges}{suffix}")
+        body = (
+            "\n".join(lines)
+            + "\n\n[dim]↑/↓ — выбор, Enter — переключить, c — чекпоинт, n — новая ветка, Esc — закрыть[/dim]"
+        )
+        return Panel(body, title="Ветки диалога", style="cyan")
 
     def _open_settings_screen(self) -> None:
         """Экран настроек: ↑/↓ — выбор поля, ←/→ — формат, цифры/Backspace — числовые поля, Esc — выход.
@@ -401,7 +391,12 @@ class TabletopAITUI:
             f"[reverse bold]{FORMAT_LABELS[f]}[/reverse bold]" if i == state.format_index else FORMAT_LABELS[f]
             for i, f in enumerate(settings_screen.FORMAT_VALUES)
         )
+        strategy_line = "   ".join(
+            f"[reverse bold]{STRATEGY_LABELS[s]}[/reverse bold]" if i == state.strategy_index else STRATEGY_LABELS[s]
+            for i, s in enumerate(settings_screen.STRATEGY_VALUES)
+        )
         marker_format = "➤" if state.row == settings_screen.ROW_FORMAT else " "
+        marker_strategy = "➤" if state.row == settings_screen.ROW_STRATEGY else " "
         marker_words = "➤" if state.row == settings_screen.ROW_MAX_WORDS else " "
         marker_list_limit = "➤" if state.row == settings_screen.ROW_LIST_LIMIT else " "
         marker_temperature = "➤" if state.row == settings_screen.ROW_TEMPERATURE else " "
@@ -413,6 +408,7 @@ class TabletopAITUI:
 
         body = (
             f"{marker_format} Формат ответа: {format_line}\n"
+            f"{marker_strategy} Стратегия контекста: {strategy_line}\n"
             f"{marker_words} Макс. объём ({config.MIN_MAX_WORDS}..{config.MAX_MAX_WORDS} слов): "
             f"{highlighted(settings_screen.ROW_MAX_WORDS, state.max_words_input)}\n"
             f"{marker_list_limit} Лимит вариантов в списке ({config.MIN_LIST_LIMIT}..{config.MAX_LIST_LIMIT}): "
@@ -424,7 +420,8 @@ class TabletopAITUI:
             f"{marker_ceiling} Потолок контекста ({config.MIN_MAX_SESSION_TOKENS}..{config.MAX_MAX_SESSION_TOKENS} токенов): "
             f"{highlighted(settings_screen.ROW_MAX_SESSION_TOKENS, state.max_session_tokens_input)}\n"
             "\n"
-            "[dim]↑/↓ — поле, ←/→ — формат, цифры/Backspace — числовые поля, Esc — выход и сохранение[/dim]"
+            "[dim]↑/↓ — поле, ←/→ — формат и стратегия, цифры/Backspace — числовые поля, "
+            "Esc — выход и сохранение[/dim]"
         )
         return Panel(body, title="Настройки", style="cyan")
 
@@ -446,6 +443,8 @@ class TabletopAITUI:
             def report_phase(phase: "RequestPhase") -> None:
                 if phase is RequestPhase.COMPRESSION:
                     status.update("● Суммаризация...")
+                elif phase is RequestPhase.FACTS_UPDATE:
+                    status.update("● Обновление фактов...")
                 elif phase is RequestPhase.REQUEST:
                     status.update("● Отправка...")
 
@@ -454,12 +453,14 @@ class TabletopAITUI:
             except APIError as exc:
                 self.last_error = str(exc)
                 self._print_compression_line()
+                self._print_facts_line()
                 self.console.print(f"[bold red]{exc}[/bold red]")
                 self.console.print("[bold red]Попробуйте повторить запрос.[/bold red]")
                 self.console.rule(style="dim")
                 return
 
         self._print_compression_line()
+        self._print_facts_line()
         answer = meta.content
         self.console.print("[bold magenta]Tabletop AI Assistant:[/bold magenta]")
         self._print_typing(answer)
@@ -481,9 +482,9 @@ class TabletopAITUI:
         self.console.rule(style="dim")
 
     def _print_usage_report(self) -> None:
-        """Отчёт /usage: последний запрос, итоги сессии, расход истории, окно контекста.
-        Без запросов к модели. Оценка окна — клиентская эвристика (см. core/usage),
-        помечена «≈»; эталонные числа — в метриках последнего запроса.
+        """Отчёт /usage: последний запрос, итоги сессии и расход сохранённой истории.
+
+        Состояние контекста сюда не входит — его показывает `/context`. Без запросов к модели.
         """
         self.console.print("[bold cyan]Учёт токенов (без обращения к модели):[/bold cyan]")
         last = self.agent.last_result
@@ -508,11 +509,46 @@ class TabletopAITUI:
             f"[dim]  Всего диалога (файл истории): запросов {lifetime.requests}, "
             f"всего {lifetime.total_tokens}, стоимость {lifetime_cost}[/dim]"
         )
+
+
+    def _print_context_report(self) -> None:
+        """Отчёт /context: состояние контекста из снимка агента, без запросов к модели.
+
+        Терминальный слой ничего не знает о внутренностях агента: он рендерит снимок —
+        стратегию, границы окна и потолка, память стратегии и приближённую оценку токенов.
+        """
+        report = self.agent.context_report()
+        self.console.print("[bold cyan]Состояние контекста (без обращения к модели):[/bold cyan]")
         self.console.print(
-            f"[dim]  Окно контекста: {self.agent.stack_exchanges} обменов в стеке, "
-            f"{self.agent.history.summary_covers} обменов под резюме, "
-            f"≈ {self.agent.stack_tokens_estimate} токенов из "
-            f"{self.settings.max_session_tokens}[/dim]"
+            f"[dim]  Стратегия: {STRATEGY_LABELS[report.strategy]}, "
+            f"окно {report.window} сообщений, потолок {report.max_session_tokens} токенов[/dim]"
+        )
+        self.console.print(
+            f"[dim]  В ближайшем запросе: {report.request_turns} ходов из "
+            f"{report.log_exchanges} обменов лога сессии[/dim]"
+        )
+        if report.has_summary:
+            self.console.print(
+                f"[dim]  Резюме: {report.summary_covers} обменов свёрнуто[/dim]"
+            )
+        else:
+            self.console.print("[dim]  Резюме: пока нет[/dim]")
+        if report.facts:
+            self.console.print(f"[dim]  Факты ({len(report.facts)}):[/dim]")
+            for key, value in report.facts.items():
+                self.console.print(f"[dim]    {key}: {value}[/dim]")
+        else:
+            self.console.print("[dim]  Факты: блок пуст[/dim]")
+        branch_list = ", ".join(
+            f"{name} ({exchanges})" for name, exchanges in report.branches
+        )
+        self.console.print(
+            f"[dim]  Ветки: {report.branch} — активная; всего {len(report.branches)}: "
+            f"{branch_list}[/dim]"
+        )
+        self.console.print(
+            f"[dim]  Оценка запроса: ≈ {report.tokens_estimate} токенов из "
+            f"{report.max_session_tokens}[/dim]"
         )
 
     def _print_usage_meta(self, meta: AnswerMeta) -> None:
@@ -538,6 +574,22 @@ class TabletopAITUI:
             f"({report.exchanges} обменов) → резюме[/dim]"
         )
 
+    def _print_facts_line(self) -> None:
+        """Строка о блоке фактов: печатается один раз на изменение отчёта агента.
+
+        Маркер — сам отчёт last_facts: TUI помнит напечатанный объект. Сбой извлекателя
+        виден пользователю, но ответ на вопрос уже напечатан — блок остался прежним.
+        Строки о фактах в history.json не попадают.
+        """
+        report = self.agent.last_facts
+        if report is None or report is self._printed_facts:
+            return
+        self._printed_facts = report
+        if report.updated:
+            self.console.print(f"[dim]Факты обновлены: {report.keys} ключей.[/dim]")
+        else:
+            self.console.print("[dim]Факты не обновлены.[/dim]")
+
     def _print_typing(self, answer: str) -> None:
         with Live(console=self.console, refresh_per_second=30) as live:
             for end in range(TYPING_CHUNK_SIZE, len(answer) + TYPING_CHUNK_SIZE, TYPING_CHUNK_SIZE):
@@ -551,6 +603,7 @@ class TabletopAITUI:
         session_cost = f"${session.cost_usd:.4f}" if session.cost_usd is not None else "неизвестно"
         self.console.print(
             f"[dim]Статус: Готов ✅  |  Модель: {self.model}  |  Формат: {FORMAT_LABELS[self.settings.format]}  |  "
+            f"Стратегия: {STRATEGY_LABELS[self.settings.context_strategy]}  |  "
             f"Объём: {self.settings.max_words} слов  |  Лимит списка: {self.settings.list_limit}  |  "
             f"Температура: {self.settings.temperature:.1f}  |  "
             f"Команды: {commands_hint}  |  "
