@@ -33,6 +33,7 @@ def test_add_appends_and_persists_immediately(history_path):
     assert saved == {
         "summary": None,
         "summary_covers": 0,
+        "facts": {},
         "dialogues": [{"question": "Правила Splendor?", "answer": "Собирайте фишки."}],
     }
 
@@ -97,6 +98,7 @@ def test_clear_writes_empty_envelope(history_path):
     assert json.loads(history_path.read_text(encoding="utf-8")) == {
         "summary": None,
         "summary_covers": 0,
+        "facts": {},
         "dialogues": [],
     }
 
@@ -178,3 +180,51 @@ def test_usage_block_survives_reload(history_path):
     HistoryManager(path=history_path).add("q", "a", usage=_usage())
     reloaded = HistoryManager(path=history_path)
     assert reloaded.dialogues[0]["usage"] == _usage()
+
+
+# --- день 10: блок фактов в конверте ----------------------------------------------------
+
+
+def test_facts_are_saved_and_reloaded(history_path):
+    manager = HistoryManager(path=history_path)
+    manager.set_facts({"цель": "собрать ТЗ", "жанр": "настольные игры"})
+
+    saved = json.loads(history_path.read_text(encoding="utf-8"))
+    assert saved["facts"] == {"цель": "собрать ТЗ", "жанр": "настольные игры"}
+
+    reloaded = HistoryManager(path=history_path)
+    assert reloaded.facts == {"цель": "собрать ТЗ", "жанр": "настольные игры"}
+
+
+def test_missing_facts_key_reads_as_an_empty_block(history_path):
+    history_path.write_text(
+        json.dumps(
+            {
+                "summary": None,
+                "summary_covers": 0,
+        "facts": {},
+                "dialogues": [{"question": "q", "answer": "a"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    manager = HistoryManager(path=history_path)
+
+    assert manager.facts == {}
+    assert manager.dialogues == [{"question": "q", "answer": "a"}]
+
+
+def test_clear_wipes_facts_too(history_path):
+    manager = HistoryManager(path=history_path)
+    manager.add("q", "a")
+    manager.set_facts({"цель": "ТЗ"})
+    manager.clear()
+
+    assert manager.facts == {}
+    assert json.loads(history_path.read_text(encoding="utf-8")) == {
+        "summary": None,
+        "summary_covers": 0,
+        "facts": {},
+        "dialogues": [],
+    }

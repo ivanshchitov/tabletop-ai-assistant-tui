@@ -353,6 +353,7 @@ def test_clear_empties_history_and_file(make_app, recording_console, history, hi
     assert json.loads(history_path.read_text(encoding="utf-8")) == {
         "summary": None,
         "summary_covers": 0,
+        "facts": {},
         "dialogues": [],
     }
     assert recording_console.contains("История диалога очищена.")
@@ -656,6 +657,7 @@ def test_logictask_run_is_not_in_history(make_app, history, history_path, monkey
     assert not history_path.exists() or json.loads(history_path.read_text(encoding="utf-8")) == {
         "summary": None,
         "summary_covers": 0,
+        "facts": {},
         "dialogues": [],
     }
 
@@ -710,6 +712,7 @@ def test_commands_panel_enter_runs_selected_clear(
     assert json.loads(history_path.read_text(encoding="utf-8")) == {
         "summary": None,
         "summary_covers": 0,
+        "facts": {},
         "dialogues": [],
     }
     assert client.calls == []  # панель не делает запросов к модели

@@ -194,6 +194,7 @@ def test_clear_wipes_history_for_the_next_launch(app, stub, history_file):
     assert json.loads(history_file.read_text(encoding="utf-8")) == {
         "summary": None,
         "summary_covers": 0,
+        "facts": {},
         "dialogues": [],
     }
 

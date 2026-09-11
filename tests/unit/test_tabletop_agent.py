@@ -1,12 +1,13 @@
-"""Агент: стек сообщений сессии, пересылка LLM, решение логической задачи."""
+"""Агент: память диалога, стратегии контекста и пересылка LLM."""
 
 import json
 from typing import List, Optional
 
 import pytest
-from core import config, context_compressor, logictask, prompts, tabletop_agent
+from core import config, context_compressor, context_strategies, prompts, tabletop_agent
+from core import context_strategies as strategies
 from core.usage import estimate_tokens
-from core.answer_settings import AnswerFormat, AnswerSettings
+from core.answer_settings import AnswerFormat, AnswerSettings, ContextStrategy
 from core.api_client import AnswerMeta, APIError
 from core.history_manager import HistoryManager
 from core.tabletop_agent import TabletopAgent
@@ -15,8 +16,8 @@ from core.tabletop_agent import TabletopAgent
 class FakeAgentClient:
     """Подставной клиент в терминах сообщений: запоминает полный список messages.
 
-    temperature=None означает «вызывающий не передал температуру» — так отличают вызов
-    /logictask (клиентский дефолт) от явной передачи значения настройки.
+    temperature=None означает «вызывающий не передал температуру» — так отличают
+    вспомогательный запрос стратегии (клиентский дефолт) от явной передачи настройки.
     """
 
     def __init__(self, answers=None, error: Optional[Exception] = None, usages=None) -> None:
@@ -141,7 +142,9 @@ def test_threshold_reached_collapses_stack_to_summary_and_tail():
     assert "Вопрос 5" in question_call["messages"][2]["content"]
     assert question_call["messages"][3]["content"] == "Ответ 5"
     assert "Вопрос 6" in question_call["messages"][4]["content"]
-    assert agent.stack_exchanges == 2  # хвост (обмен 5) + новый обмен 6
+    report = agent.context_report()
+    assert report.summary_covers == 4
+    assert report.log_exchanges == 6  # свёрнутые обмены остались в логе
 
 
 def test_summarizer_error_keeps_stack_and_summary_intact():
@@ -166,7 +169,7 @@ def test_summarizer_error_keeps_stack_and_summary_intact():
 
     with pytest.raises(APIError):
         agent.ask("Вопрос 6")
-    assert agent.stack_exchanges == 5
+    assert agent.context_report().log_exchanges == 5
     assert agent._summary is None
     assert [d["question"] for d in agent.history.dialogues] == [f"Вопрос {i}" for i in range(1, 6)]
 
@@ -260,6 +263,7 @@ def test_reset_clears_stack_and_file():
     assert json.loads(agent.history.path.read_text(encoding="utf-8")) == {
         "summary": None,
         "summary_covers": 0,
+        "facts": {},
         "dialogues": [],
     }
     assert agent.history.dialogues == []
@@ -268,14 +272,6 @@ def test_reset_clears_stack_and_file():
     messages = client.calls[-1]["messages"]
     assert [m["role"] for m in messages] == ["system", "user"]
     assert "Вопрос до очистки" not in messages[1]["content"]
-
-
-def test_logictask_does_not_touch_memory():
-    agent, _ = make_agent(answers=["Прямой ответ", "Ещё ответ"])
-    agent.ask("Обычный вопрос")
-
-    data = json.loads(agent.history.path.read_text(encoding="utf-8"))
-    assert [d["question"] for d in data["dialogues"]] == ["Обычный вопрос"]
 
 
 
@@ -340,72 +336,6 @@ def test_ask_returns_answer_meta():
     assert meta.total_tokens == 30
 
 
-# --- логическая задача -----------------------------------------------------------------
-
-
-def test_logictask_strategy_1_sends_one_call_outside_the_stack():
-    agent, client = make_agent()
-    agent.ask("Обычный вопрос")
-    results = list(agent.solve_logictask(1))
-
-    assert len(results) == 1
-    label, meta = results[0]
-    assert meta.total_tokens == 30
-    call = client.calls[1]
-    assert [m["role"] for m in call["messages"]] == ["system", "user"]
-    assert call["messages"][0]["content"] == logictask.DIRECT_SYSTEM_MESSAGE
-    assert logictask.LOGIC_TASK in call["messages"][1]["content"]
-    assert call["max_tokens"] == config.max_tokens_for_words(config.DEFAULT_MAX_WORDS)
-    assert call["temperature"] is None  # клиентский дефолт, настройки сессии не применяются
-    # стек после прогона идентичен стеку до него
-
-
-def test_logictask_does_not_touch_the_conversation_stack():
-    agent, client = make_agent()
-    agent.ask("Обычный вопрос")
-    stack_before = [dict(m) for m in client.calls[0]["messages"]]
-
-    list(agent.solve_logictask(1))
-
-    agent.ask("Следующий вопрос")
-    messages = client.calls[-1]["messages"]
-    assert [m["role"] for m in messages] == ["system", "user", "assistant", "user"]
-    assert all(
-        before["role"] == after["role"] and before["content"] == after["content"]
-        for before, after in zip(stack_before, messages)
-    )
-
-
-def test_logictask_strategy_3_makes_two_calls_with_labels():
-    agent, client = make_agent(answers=["СОСТАВЛЕННЫЙ ПРОМПТ", "РЕШЕНИЕ"])
-    results = list(agent.solve_logictask(3))
-
-    assert [label for label, _ in results] == [
-        "Составленный моделью промпт",
-        None,
-    ]
-    assert client.calls[0]["messages"][0]["content"] == logictask.COMPOSE_SYSTEM_MESSAGE
-    assert client.calls[1]["messages"][0]["content"] == "СОСТАВЛЕННЫЙ ПРОМПТ"
-    assert client.calls[1]["messages"][1]["content"] == logictask.LOGIC_TASK
-
-
-def test_logictask_strategy_4_makes_three_expert_calls():
-    agent, client = make_agent()
-    results = list(agent.solve_logictask(4))
-
-    assert len(results) == 3
-    assert [label for label, _ in results] == list(logictask.EXPERT_ROLES)
-    assert [c["messages"][0]["content"] for c in client.calls] == list(logictask.EXPERT_ROLES)
-
-
-def test_logictask_strategy_2_sends_one_call():
-    agent, client = make_agent()
-    results = list(agent.solve_logictask(2))
-    assert len(results) == 1
-    assert results[0][0] is None
-    assert logictask.LOGIC_TASK in client.calls[0]["messages"][1]["content"]
-
-
 # --- конфиг агента и метрики последнего запроса -----------------------------------------
 
 
@@ -445,14 +375,6 @@ def test_last_result_holds_metrics_of_the_last_question():
     assert agent.last_result.cost_usd == 0.0001
 
 
-def test_last_result_is_updated_by_logictask_calls():
-    agent, client = make_agent(answers=["Первый", "РЕШЕНИЕ ЗАДАЧИ"])
-    agent.ask("Обычный вопрос")
-    list(agent.solve_logictask(2))
-
-    assert agent.last_result.content == "РЕШЕНИЕ ЗАДАЧИ"
-
-
 def test_last_result_is_read_only():
     agent, _ = make_agent()
     with pytest.raises(AttributeError):
@@ -470,12 +392,6 @@ def test_session_usage_accumulates_successful_questions():
     assert usage.requests == 2
     assert usage.total_tokens == 60
     assert usage.cost_usd == 0.0002
-
-
-def test_session_usage_counts_logictask_calls():
-    agent, _ = make_agent(answers=["Прямой ответ"])
-    list(agent.solve_logictask(1))
-    assert agent.session_usage.requests == 1
 
 
 def test_failed_request_is_not_counted():
@@ -513,18 +429,19 @@ def test_lifetime_usage_survives_restart_through_history_file():
     assert lifetime.requests == 1
     assert lifetime.total_tokens == 150
 
-def test_stack_tokens_estimate_counts_system_message():
+def test_context_tokens_estimate_counts_system_message():
     agent, _ = make_agent()
-    assert agent.stack_tokens_estimate == estimate_tokens(
+    # оценка собираемого запроса без ходов — системное сообщение (плюс пустой вопрос)
+    assert agent.context_report().tokens_estimate >= estimate_tokens(
         prompts.build_system_message(agent.config.format)
     )
 
 
-def test_stack_tokens_estimate_grows_with_turns():
+def test_context_tokens_estimate_grows_with_turns():
     agent, _ = make_agent()
-    before = agent.stack_tokens_estimate
+    before = agent.context_report().tokens_estimate
     agent.ask("Вопрос")
-    assert agent.stack_tokens_estimate > before
+    assert agent.context_report().tokens_estimate > before
 
 
 
@@ -584,17 +501,17 @@ def test_ceiling_estimate_above_limit_triggers_early_compression(monkeypatch):
     assert "Вопрос 3" in question_call["messages"][2]["content"]
 
 
-def test_stack_tokens_estimate_collapses_after_digest():
-    """Оценка стека после сжатия падает: резюме + последний обмен вместо десяти ходов."""
+def test_context_tokens_estimate_collapses_after_digest():
+    """Оценка запроса после сжатия падает: резюме + хвост вместо десяти дословных ходов."""
     agent, client = make_agent(
         answers=[f"Ответ {i} " + "х" * 700 for i in range(1, 6)]
         + ["РЕЗЮМЕ 1", "Ответ 6"]
     )
     for i in range(1, 6):
         agent.ask(f"Вопрос {i}")
-    before = agent.stack_tokens_estimate
+    before = agent.context_report().tokens_estimate
     agent.ask("Вопрос 6")
-    assert agent.stack_tokens_estimate < before
+    assert agent.context_report().tokens_estimate < before
 
 
 def test_ceiling_unreachable_when_nothing_to_digest(monkeypatch):
@@ -686,18 +603,18 @@ def test_reset_clears_stack_summary_and_file():
 
     agent.reset()
 
-    assert agent.stack_exchanges == 0
+    assert agent.context_report().log_exchanges == 0
     assert agent._summary is None
     assert agent._summary_covers == 0
     assert json.loads(agent.history.path.read_text(encoding="utf-8"))["dialogues"] == []
 
 
-def test_stack_tokens_estimate_includes_summary(history_path):
+def test_context_tokens_estimate_includes_summary(history_path):
     history = HistoryManager(path=history_path)
     history.set_summary("РЕЗЮМЕ ДИАЛОГА ДЛИННОЕ ДЛИННОЕ", 0)
     agent, _ = make_agent(history=history)
     system_only = estimate_tokens(prompts.build_system_message(agent.config.format))
-    assert agent.stack_tokens_estimate > system_only
+    assert agent.context_report().tokens_estimate > system_only
 
 
 def test_last_compression_is_none_before_any_digest():
@@ -744,3 +661,359 @@ def test_default_listener_is_silent():
         agent.ask(f"Вопрос {i}")  # без on_phase — никакого исключения
     agent.ask("Вопрос 6")
     assert agent.last_result.content == "Ответ 6"
+
+
+# --- день 10: стратегии управления контекстом -------------------------------------------
+
+
+class StrategyClient(FakeAgentClient):
+    """Клиент, различающий роль запроса: извлекатель фактов, суммаризатор, вопрос.
+
+    Стратегии шлют вспомогательные запросы помимо вопроса, поэтому ответы выбираются по
+    системному сообщению, а не по порядку вызовов: тест тогда проверяет, что именно ушло
+    модели, а не сколько раз её дёрнули.
+    """
+
+    def __init__(self, answers=None, facts_answers=None, summary_answers=None) -> None:
+        super().__init__(answers=answers)
+        # Строка — ответ извлекателя, Exception — сбой этого запроса.
+        self.facts_answers = list(facts_answers or ["{}"])
+        self.summary_answers = list(summary_answers or [])
+        self.facts_prompts: List[str] = []
+        self.summary_prompts: List[str] = []
+        self.question_messages: List[List[dict]] = []
+
+    def ask_with_usage_messages(self, messages, **kwargs):
+        system = messages[0]["content"]
+        if system == context_strategies.facts_instruction():
+            self.facts_prompts.append(messages[1]["content"])
+            answer = self._next(self.facts_answers)
+            if isinstance(answer, Exception):
+                raise answer
+            return self._meta(answer, kwargs.get("model"))
+        if system == context_compressor.summary_instruction():
+            self.summary_prompts.append(messages[1]["content"])
+            if not self.summary_answers:
+                raise APIError("Суммаризатор не должен вызываться на этой стратегии.")
+            return self._meta(self._next(self.summary_answers), kwargs.get("model"))
+        self.question_messages.append([dict(message) for message in messages])
+        return super().ask_with_usage_messages(messages, **kwargs)
+
+    @staticmethod
+    def _next(items):
+        return items.pop(0) if len(items) > 1 else items[0]
+
+    def _meta(self, content, model) -> AnswerMeta:
+        return AnswerMeta(
+            content=content,
+            model=model or config.DEFAULT_MODEL,
+            elapsed_seconds=0.01,
+            prompt_tokens=5,
+            completion_tokens=5,
+            total_tokens=10,
+            cost_usd=0.00001,
+        )
+
+
+def with_strategy(agent, strategy, **settings):
+    """Переключает стратегию и настройки сессии так, как это сделал бы экран /settings."""
+    updated = agent.settings.with_context_strategy(strategy)
+    for name, value in settings.items():
+        updated = getattr(updated, f"with_{name}")(value)
+    agent.settings = updated
+
+
+def strategy_agent(**kwargs):
+    """Агент с клиентом, различающим роль запроса; возвращает (агент, клиент)."""
+    client = StrategyClient(**kwargs)
+    agent, _ = make_agent(client=client)
+    return agent, client
+
+
+def roles(messages):
+    return [message["role"] for message in messages]
+
+
+def test_digested_turns_stay_in_the_log():
+    """Сжатие больше не выбрасывает ходы: они остаются в логе сессии."""
+    agent, client = make_agent(
+        answers=["Ответ 1", "Ответ 2", "Ответ 3", "Ответ 4", "Ответ 5", "РЕЗЮМЕ 1", "Ответ 6"]
+    )
+    for i in range(1, 6):
+        agent.ask(f"Вопрос {i}")
+    agent.ask("Вопрос 6")
+
+    assert agent.context_report().log_exchanges == 6
+    assert agent.context_report().summary_covers == 4
+
+
+def test_switching_to_window_brings_digested_turns_back():
+    """Резюме лишь накрывает префикс лога: стратегия окна снова отправляет эти ходы."""
+    agent, client = make_agent(
+        answers=["Ответ 1", "Ответ 2", "Ответ 3", "Ответ 4", "Ответ 5", "РЕЗЮМЕ 1", "Ответ 6", "Ответ 7"]
+    )
+    for i in range(1, 6):
+        agent.ask(f"Вопрос {i}")
+    agent.ask("Вопрос 6")  # сжатие свернуло обмены 1-4
+
+    with_strategy(agent, ContextStrategy.SLIDING_WINDOW, compress_after=config.MAX_COMPRESS_AFTER)
+    agent.ask("Вопрос 7")
+
+    messages = client.calls[-1]["messages"]
+    contents = "".join(message["content"] for message in messages)
+    assert roles(messages)[0] == "system"
+    assert "РЕЗЮМЕ 1" not in contents  # окно на резюме не смотрит
+    assert "Вопрос 1" in contents  # свёрнутый ход вернулся дословно
+    assert "Вопрос 6" in contents and "Вопрос 7" in contents
+
+
+def test_window_strategy_sends_only_the_last_messages_and_no_summarizer():
+    agent, client = strategy_agent(
+        answers=["Ответ 1", "Ответ 2", "Ответ 3", "Ответ 4", "Ответ 5", "Ответ 6"]
+    )
+    with_strategy(agent, ContextStrategy.SLIDING_WINDOW, compress_after=5)
+    for i in range(1, 7):
+        agent.ask(f"Вопрос {i}")
+
+    messages = client.question_messages[-1]
+    # окно 5 сообщений — целыми обменами это последние два обмена плюс новый user-ход
+    assert roles(messages) == ["system", "user", "assistant", "user", "assistant", "user"]
+    contents = "".join(message["content"] for message in messages)
+    assert "Вопрос 3" not in contents
+    assert "Вопрос 4" in contents and "Вопрос 5" in contents and "Вопрос 6" in contents
+    assert client.summary_prompts == []  # окно суммаризатор не зовёт
+
+
+def test_window_over_the_ceiling_drops_oldest_exchanges_but_keeps_the_last():
+    agent, client = strategy_agent(answers=["Ответ 1", "Ответ 2", "Ответ 3", "Ответ 4"])
+    with_strategy(agent, ContextStrategy.SLIDING_WINDOW, compress_after=8, max_session_tokens=5000)
+    for i in range(1, 5):
+        agent.ask(f"Вопрос {i}" if i < 4 else "Вопрос 4 " + "о" * 20000)
+
+    messages = client.question_messages[-1]
+    contents = "".join(message["content"] for message in messages)
+    assert "Вопрос 1" not in contents and "Вопрос 2" not in contents
+    assert "Вопрос 3" in contents
+    assert roles(messages)[-2:] == ["assistant", "user"]
+    assert client.summary_prompts == []  # потолок не включает суммаризатор
+
+
+def test_facts_strategy_updates_the_block_before_the_question():
+    agent, client = strategy_agent(
+        answers=["Ответ 1"],
+        facts_answers=['{"цель": "собрать ТЗ по Каркассону"}'],
+    )
+    with_strategy(agent, ContextStrategy.STICKY_FACTS)
+
+    agent.ask("Помоги собрать ТЗ по Каркассону")
+
+    assert len(client.facts_prompts) == 1
+    assert "Помоги собрать ТЗ по Каркассону" in client.facts_prompts[0]
+    messages = client.question_messages[0]
+    assert roles(messages) == ["system", "system", "user"]
+    assert "цель: собрать ТЗ по Каркассону" in messages[1]["content"]
+    assert "Помоги собрать ТЗ по Каркассону" in messages[2]["content"]
+
+
+def test_facts_block_replaces_the_value_of_a_known_key():
+    agent, client = strategy_agent(
+        answers=["Ответ 1", "Ответ 2"],
+        facts_answers=['{"цель": "собираем ТЗ"}', '{"цель": "собираем ТЗ по игре"}'],
+    )
+    with_strategy(agent, ContextStrategy.STICKY_FACTS)
+
+    agent.ask("Первый вопрос")
+    agent.ask("Теперь конкретнее по игре")
+
+    block = client.question_messages[1][1]["content"]
+    assert "цель: собираем ТЗ по игре" in block
+    assert block.count("цель:") == 1
+    assert "собираем ТЗ\n" not in block
+
+
+def test_facts_only_pending_messages_go_to_the_next_update():
+    agent, client = strategy_agent(
+        answers=["Ответ 1", "Ответ 2"],
+        facts_answers=['{"цель": "ТЗ"}', "{}"],
+    )
+    with_strategy(agent, ContextStrategy.STICKY_FACTS)
+
+    agent.ask("Первый вопрос")
+    agent.ask("Второй вопрос")
+
+    second_prompt = client.facts_prompts[1]
+    assert "цель: ТЗ" in second_prompt  # текущий блок передан целиком
+    assert "Первый вопрос" not in second_prompt  # уже переработанное не повторяется
+    assert "Второй вопрос" in second_prompt
+
+
+def test_facts_extractor_failure_keeps_the_answer_and_repends_the_message():
+    agent, client = strategy_agent(
+        answers=["Ответ 1", "Ответ 2"],
+        facts_answers=[APIError("Извлекатель упал."), '{"цель": "ТЗ"}'],
+    )
+    with_strategy(agent, ContextStrategy.STICKY_FACTS)
+
+    meta = agent.ask("Первый вопрос")
+
+    assert meta.content == "Ответ 1"  # сбой вспомогательного запроса не отменяет ответ
+    report = agent.last_facts
+    assert report.updated is False
+    assert "Извлекатель упал." in report.error
+
+    agent.ask("Второй вопрос")
+    assert "Первый вопрос" in client.facts_prompts[1]  # накопленное ушло со следующей попыткой
+    assert "Второй вопрос" in client.facts_prompts[1]
+    assert agent.last_facts.updated is True
+    assert agent.last_facts.keys == 1
+
+
+def test_facts_extractor_non_json_is_a_failure_not_an_empty_block():
+    agent, client = strategy_agent(
+        answers=["Ответ 1"],
+        facts_answers=["Фактов не нашёл."],
+    )
+    with_strategy(agent, ContextStrategy.STICKY_FACTS)
+
+    agent.ask("Первый вопрос")
+
+    assert agent.last_facts.updated is False
+    assert agent.context_report().facts == {}
+    assert roles(client.question_messages[0]) == ["system", "user"]  # пустой блок не отправляется
+
+
+def test_facts_empty_object_clears_the_queue():
+    agent, client = strategy_agent(
+        answers=["Ответ 1", "Ответ 2"],
+        facts_answers=["{}", '{"ограничение": "не более 10 сообщений"}'],
+    )
+    with_strategy(agent, ContextStrategy.STICKY_FACTS)
+
+    agent.ask("Первый вопрос")
+    agent.ask("Второй вопрос")
+
+    assert "Первый вопрос" not in client.facts_prompts[1]  # {} — успешное обновление, не сбой
+
+
+def test_facts_are_saved_to_history_and_restored():
+    agent, client = strategy_agent(
+        answers=["Ответ 1"],
+        facts_answers=['{"цель": "ТЗ"}'],
+    )
+    with_strategy(agent, ContextStrategy.STICKY_FACTS)
+    agent.ask("Первый вопрос")
+
+    saved = json.loads(agent.history.path.read_text(encoding="utf-8"))
+    assert saved["facts"] == {"цель": "ТЗ"}
+
+    restored, restored_client = make_agent(history=agent.history, answers=["Ответ 2"])
+    restored.settings = restored.settings.with_context_strategy(ContextStrategy.STICKY_FACTS)
+    restored.ask("Второй вопрос")
+
+    messages = restored_client.calls[0]["messages"]
+    assert "цель: ТЗ" in messages[1]["content"]
+
+
+def test_facts_spend_and_phase_are_reported():
+    phases = []
+    agent, client = strategy_agent(
+        answers=["Ответ 1"],
+        facts_answers=['{"цель": "ТЗ"}'],
+    )
+    with_strategy(agent, ContextStrategy.STICKY_FACTS)
+
+    agent.ask("Первый вопрос", on_phase=phases.append)
+
+    assert phases == [
+        tabletop_agent.RequestPhase.FACTS_UPDATE,
+        tabletop_agent.RequestPhase.REQUEST,
+    ]
+    assert agent.session_usage.requests == 2  # извлекатель плюс вопрос
+    assert agent.last_result.content == "Ответ 1"
+
+
+def test_branching_strategy_sends_only_the_active_branch():
+    agent, client = strategy_agent(answers=["Ответ 1", "Ответ 2", "Ответ 3"])
+    with_strategy(agent, ContextStrategy.BRANCHING)
+    agent.ask("Вопрос ветки 1")
+    agent.checkpoint()
+    agent.new_branch()
+
+    agent.ask("Вопрос ветки 2")
+
+    messages = client.question_messages[-1]
+    contents = "".join(message["content"] for message in messages)
+    assert "Вопрос ветки 2" in contents
+    assert "Вопрос ветки 1" in contents  # ветка скопировала ходы до чекпоинта
+    assert "Ответ 1" in contents
+
+    assert agent.switch_branch("ветка 1") is True
+    agent.ask("Вопрос обратно в ветке 1")
+    contents = "".join(m["content"] for m in client.question_messages[-1])
+    assert "Вопрос ветки 2" not in contents  # обмен второй ветки остался в ней
+
+
+def test_switch_to_unknown_branch_reports_failure_and_keeps_the_active_one():
+    agent, _ = make_agent()
+    with_strategy(agent, ContextStrategy.BRANCHING)
+
+    assert agent.switch_branch("нет такой ветки") is False
+    assert agent.context_report().branch == strategies.DEFAULT_BRANCH_NAME
+
+
+def test_context_report_describes_the_active_strategy():
+    agent, client = make_agent(answers=["Ответ 1", "Ответ 2"])
+    agent.ask("Первый вопрос")
+
+    report = agent.context_report()
+
+    assert report.strategy is ContextStrategy.SUMMARY
+    assert report.window == agent.settings.compress_after
+    assert report.max_session_tokens == agent.settings.max_session_tokens
+    assert report.log_exchanges == 1
+    assert report.request_turns == 2
+    assert report.has_summary is False
+    assert report.facts == {}
+    assert report.branches == ((strategies.DEFAULT_BRANCH_NAME, 1),)
+    assert report.tokens_estimate > 0
+    assert len(client.calls) == 1  # снимок не обращается к модели
+
+
+def test_context_report_carries_facts_and_branches():
+    agent, client = strategy_agent(answers=["Ответ 1"], facts_answers=['{"цель": "ТЗ"}'])
+    with_strategy(agent, ContextStrategy.STICKY_FACTS)
+    agent.ask("Первый вопрос")
+    agent.checkpoint()
+    agent.new_branch()
+
+    report = agent.context_report()
+
+    assert report.strategy is ContextStrategy.STICKY_FACTS
+    assert report.facts == {"цель": "ТЗ"}
+    assert report.branch == "ветка 2"
+    assert [name for name, _ in report.branches] == ["ветка 1", "ветка 2"]
+
+
+def test_reset_clears_facts_and_branches():
+    agent, client = strategy_agent(answers=["Ответ 1"], facts_answers=['{"цель": "ТЗ"}'])
+    with_strategy(agent, ContextStrategy.STICKY_FACTS)
+    agent.ask("Первый вопрос")
+    agent.new_branch()
+
+    agent.reset()
+
+    report = agent.context_report()
+    assert report.facts == {}
+    assert report.branches == ((strategies.DEFAULT_BRANCH_NAME, 0),)
+    assert report.log_exchanges == 0
+
+
+def test_other_strategies_never_call_the_summarizer():
+    """Под окном порог сжатия не имеет значения: ходы просто не попадают в запрос."""
+    agent, client = strategy_agent(answers=["Ответ 1", "Ответ 2"])
+    with_strategy(agent, ContextStrategy.SLIDING_WINDOW, compress_after=5)
+    agent.ask("Вопрос 1")
+    agent.ask("Вопрос 2")
+
+    assert client.summary_prompts == []
+    assert len(client.question_messages) == 2

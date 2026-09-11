@@ -42,6 +42,7 @@ def test_panel_lists_commands_and_esc_makes_no_requests(app, stub, history_file)
     assert not history_file.exists() or json.loads(history_file.read_text(encoding="utf-8")) == {
         "summary": None,
         "summary_covers": 0,
+        "facts": {},
         "dialogues": [],
     }
 
@@ -65,6 +66,7 @@ def test_enter_runs_selected_command(app, stub, history_file):
     assert not history_file.exists() or json.loads(history_file.read_text(encoding="utf-8")) == {
         "summary": None,
         "summary_covers": 0,
+        "facts": {},
         "dialogues": [],
     }
 
@@ -107,6 +109,7 @@ def test_exit_selection_terminates_app(app, stub, history_file):
     assert not history_file.exists() or json.loads(history_file.read_text(encoding="utf-8")) == {
         "summary": None,
         "summary_covers": 0,
+        "facts": {},
         "dialogues": [],
     }
 
