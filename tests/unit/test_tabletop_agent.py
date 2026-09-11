@@ -1017,3 +1017,75 @@ def test_other_strategies_never_call_the_summarizer():
 
     assert client.summary_prompts == []
     assert len(client.question_messages) == 2
+
+
+def test_empty_summarizer_answer_is_a_failure_not_an_empty_summary():
+    """Пустой ответ суммаризатора — сбой, а не «резюме из пустоты».
+
+    Принять пустоту за резюме значит поднять счётчик покрытых обменов, не подставив в запрос
+    ничего взамен: свёрнутые ходы исчезают из контекста бесследно (проверено на живом
+    прогоне — reasoning-модель вернула пустой дайджест при finish_reason=length).
+    """
+    agent, client = make_agent(
+        answers=[
+            "Ответ 1", "Ответ 2", "Ответ 3", "Ответ 4", "Ответ 5",
+            "",  # пустой дайджест суммаризатора
+            "РЕЗЮМЕ 1",
+            "Ответ 6",
+        ]
+    )
+    for i in range(1, 6):
+        agent.ask(f"Вопрос {i}")
+
+    with pytest.raises(APIError):
+        agent.ask("Вопрос 6")
+
+    # ничего не свёрнуто и не потеряно: вопрос не ушёл, резюме и счётчики не изменились
+    assert len(client.calls) == 6  # пять вопросов плюс пустой суммаризатор
+    report = agent.context_report()
+    assert report.has_summary is False
+    assert report.summary_covers == 0
+    assert report.log_exchanges == 5
+
+    # следующий вопрос повторяет сжатие и на этот раз получает настоящее резюме
+    meta = agent.ask("Вопрос 6 ещё раз")
+    assert meta.content == "Ответ 6"
+    question_call = client.calls[-1]
+    assert "РЕЗЮМЕ 1" in question_call["messages"][1]["content"]
+    contents = "".join(m["content"] for m in question_call["messages"])
+    assert "Вопрос 1" not in contents and "Вопрос 4" not in contents  # под резюме
+    assert "Вопрос 5" in contents
+
+
+def test_whitespace_only_summarizer_answer_is_also_a_failure():
+    """Пробельный ответ бесполезен так же, как пустой: подставлять его в запрос нечего."""
+    agent, client = make_agent(
+        answers=["Ответ 1", "Ответ 2", "Ответ 3", "Ответ 4", "Ответ 5", "   \n  "]
+    )
+    for i in range(1, 6):
+        agent.ask(f"Вопрос {i}")
+
+    with pytest.raises(APIError):
+        agent.ask("Вопрос 6")
+    assert agent.context_report().summary_covers == 0
+
+
+def test_empty_facts_extractor_answer_is_a_failure_not_an_empty_block():
+    """Пустой ответ извлекателя не должен выглядеть как «новых фактов нет».
+
+    `{}` — успешное обновление с пустым блоком; пустая строка — сбой, и очередь сообщений
+    обязана остаться на месте, иначе сообщение пользователя пропадёт из блока навсегда.
+    """
+    agent, client = strategy_agent(
+        answers=["Ответ 1", "Ответ 2"],
+        facts_answers=["", '{"цель": "ТЗ"}'],
+    )
+    with_strategy(agent, ContextStrategy.STICKY_FACTS)
+
+    agent.ask("Первый вопрос")
+    assert agent.last_facts.updated is False
+    assert agent.context_report().facts == {}
+
+    agent.ask("Второй вопрос")
+    assert "Первый вопрос" in client.facts_prompts[1]  # необработанное сообщение не потеряно
+    assert agent.last_facts.updated is True

@@ -182,10 +182,17 @@ sees; the strategy is a *view* on the session log, never its mutator. Deliberate
   (`assets/facts_prompt.md`, parsed client-side by `context_strategies.parse_facts_response`; no
   `response_format`, for the same reasoning-model reliability reasons as the summarizer).
   `merge_facts` replaces a known key's value and evicts the earliest keys past `MAX_FACTS_KEYS`.
-  A failed extractor (API error or non-JSON) never blocks the answer (user's call): the question goes
-  out with the previous block, the message stays in `_facts_pending` for the next update, and the
-  journal prints "Факты не обновлены". `{}` is a *successful* empty update, not a failure — that
-  distinction is what clears the pending queue.
+  A failed extractor (API error, empty or non-JSON answer) never blocks the answer (user's call):
+  the question goes out with the previous block, the message stays in `_facts_pending` for the next
+  update, and the journal prints "Факты не обновлены". `{}` is a *successful* empty update, not a
+  failure — that distinction is what clears the pending queue; an empty body is a failure, because
+  treating it as an empty block would drop the user's message from the memory for good.
+- **An empty digest is a failure, not a summary.** `_digest_before_request` raises `APIError` when
+  the summarizer returns empty or whitespace-only content (the reasoning-model `finish_reason=length`
+  case, caught in a live run): the spend is recorded, but the summary and both coverage counters stay
+  put. Without that guard the counter advanced while nothing replaced the covered turns — the request
+  silently lost context, and `/context` reported "резюме нет" next to a non-zero coverage. Same rule
+  as the summarizer's error path: nothing is lost, the next question retries the compression.
 - `branching`: `context_strategies.BranchTree` keeps branches as index lists into the same log, so
   branches share messages instead of copying them. A checkpoint marks a position in the active
   branch; a new branch starts as a copy of the active branch's turns up to it. Branches are

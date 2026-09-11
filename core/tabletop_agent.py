@@ -453,6 +453,19 @@ class TabletopAgent:
             )
             self._last_result = meta
             self._ledger.record(meta)
+            # Пустой дайджест — это сбой, а не резюме: принять его значит поднять счётчик
+            # покрытых обменов, ничего не подставив в запрос, и бесследно выбросить ходы из
+            # контекста. Запрос уже потрачен, поэтому расход учтён, а состояние памяти
+            # остаётся прежним: следующий вопрос повторит сжатие.
+            if not meta.content.strip():
+                reason = (
+                    " (finish_reason=length: модель израсходовала бюджет на рассуждение)"
+                    if meta.finish_reason == "length"
+                    else ""
+                )
+                raise APIError(
+                    "Суммаризатор вернул пустой ответ — контекст не сжат" + reason + "."
+                )
             self._summary = meta.content
             self._summary_covers += len(batch) // 2
             self._log_covered += len(batch) // 2
