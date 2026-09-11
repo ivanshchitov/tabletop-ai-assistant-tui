@@ -205,3 +205,20 @@ def test_summary_max_words_is_a_small_fixed_ceiling():
 
 def test_estimated_chars_per_token_is_positive():
     assert config.ESTIMATED_CHARS_PER_TOKEN > 0
+
+
+def test_context_strategies_list_is_fixed_with_summary_first():
+    assert list(config.CONTEXT_STRATEGIES) == [
+        "summary",
+        "sliding_window",
+        "sticky_facts",
+        "branching",
+    ]
+    assert config.DEFAULT_CONTEXT_STRATEGY == config.CONTEXT_STRATEGIES[0]
+
+
+def test_facts_limits_bound_the_extractor_output():
+    """Блок фактов — компактный словарь: потолок выхода и предел числа ключей."""
+    assert 50 <= config.FACTS_MAX_WORDS <= 300
+    assert config.max_tokens_for_words(config.FACTS_MAX_WORDS) > config.FACTS_MAX_WORDS
+    assert 1 < config.MAX_FACTS_KEYS <= 100

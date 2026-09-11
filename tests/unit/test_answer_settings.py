@@ -3,7 +3,12 @@
 import pytest
 
 from core import config
-from core.answer_settings import AnswerFormat, AnswerSettings, AnswerSettingsError
+from core.answer_settings import (
+    AnswerFormat,
+    AnswerSettings,
+    AnswerSettingsError,
+    ContextStrategy,
+)
 
 
 def test_defaults_match_config():
@@ -14,6 +19,56 @@ def test_defaults_match_config():
     assert settings.temperature == config.TEMPERATURE
     assert settings.compress_after == config.DEFAULT_COMPRESS_AFTER
     assert settings.max_session_tokens == config.DEFAULT_MAX_SESSION_TOKENS
+    assert settings.context_strategy == ContextStrategy.SUMMARY
+
+
+@pytest.mark.parametrize("value", list(ContextStrategy))
+def test_with_context_strategy_accepts_every_member(value):
+    assert AnswerSettings().with_context_strategy(value).context_strategy == value
+
+
+def test_context_strategy_values_match_the_config_list():
+    """Список стратегий в конфиге и enum настроек обязаны совпадать: конфиг задаёт порядок
+    переключения стрелками и значение по умолчанию, enum — типы."""
+    assert [strategy.value for strategy in ContextStrategy] == config.CONTEXT_STRATEGIES
+
+
+def test_context_strategy_default_is_the_config_default():
+    assert ContextStrategy(config.DEFAULT_CONTEXT_STRATEGY) == AnswerSettings().context_strategy
+
+
+def test_with_context_strategy_rejects_unknown_value():
+    with pytest.raises(AnswerSettingsError):
+        AnswerSettings().with_context_strategy("нет такой стратегии")
+
+
+def test_with_context_strategy_preserves_other_fields():
+    settings = AnswerSettings(max_words=100, format=AnswerFormat.JSON, list_limit=7)
+    updated = settings.with_context_strategy(ContextStrategy.SLIDING_WINDOW)
+    assert (
+        updated.context_strategy,
+        updated.max_words,
+        updated.format,
+        updated.list_limit,
+        updated.temperature,
+        updated.compress_after,
+        updated.max_session_tokens,
+    ) == (
+        ContextStrategy.SLIDING_WINDOW,
+        100,
+        AnswerFormat.JSON,
+        7,
+        config.TEMPERATURE,
+        config.DEFAULT_COMPRESS_AFTER,
+        config.DEFAULT_MAX_SESSION_TOKENS,
+    )
+
+
+def test_rejected_context_strategy_leaves_original_untouched():
+    settings = AnswerSettings().with_context_strategy(ContextStrategy.BRANCHING)
+    with pytest.raises(AnswerSettingsError):
+        settings.with_context_strategy("окно")
+    assert settings.context_strategy == ContextStrategy.BRANCHING
 
 
 @pytest.mark.parametrize(
