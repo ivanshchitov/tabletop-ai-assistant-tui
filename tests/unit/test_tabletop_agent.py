@@ -1089,3 +1089,86 @@ def test_empty_facts_extractor_answer_is_a_failure_not_an_empty_block():
     agent.ask("Второй вопрос")
     assert "Первый вопрос" in client.facts_prompts[1]  # необработанное сообщение не потеряно
     assert agent.last_facts.updated is True
+
+
+def test_switching_to_facts_mid_dialog_feeds_the_earlier_messages():
+    """Извлекатель видит сообщения, отправленные при других стратегиях.
+
+    Иначе переключение на факты посреди диалога даёт «слепой» блок: агент не знает ничего из
+    уже сказанного, хотя спека требует обновлять факты после каждого сообщения пользователя.
+    """
+    agent, client = strategy_agent(
+        answers=["Ответ 1", "Ответ 2", "Ответ 3"],
+        facts_answers=['{"бюджет": "до 2500 рублей"}'],
+    )
+    with_strategy(agent, ContextStrategy.SLIDING_WINDOW)
+    agent.ask("Собираем ТЗ на вечериночную игру.")
+    agent.ask("Ограничение по бюджету: до 2500 рублей в рознице.")
+
+    with_strategy(agent, ContextStrategy.STICKY_FACTS)
+    agent.ask("Ещё решение: правила — 6 страниц A5.")
+
+    extractor_prompt = client.facts_prompts[0]
+    assert "Собираем ТЗ" in extractor_prompt
+    assert "до 2500 рублей" in extractor_prompt  # факт из обмена, сделанного на другой стратегии
+    assert "6 страниц A5" in extractor_prompt
+    block = client.question_messages[-1][1]["content"]
+    assert "бюджет: до 2500 рублей" in block
+
+
+def test_processed_messages_are_not_fed_to_the_extractor_twice():
+    """После успешного обновления те же сообщения повторно не отправляются."""
+    agent, client = strategy_agent(
+        answers=["Ответ 1", "Ответ 2"],
+        facts_answers=['{"цель": "ТЗ"}', "{}"],
+    )
+    with_strategy(agent, ContextStrategy.STICKY_FACTS)
+
+    agent.ask("Первый вопрос")
+    agent.ask("Второй вопрос")
+
+    second_prompt = client.facts_prompts[1]
+    assert "Первый вопрос" not in second_prompt
+    assert "Второй вопрос" in second_prompt
+
+
+def test_messages_sent_while_another_strategy_ran_stay_pending_for_the_next_facts_update():
+    """Новые сообщения при чужой стратегии ждут следующего захода на факты, но не теряются."""
+    agent, client = strategy_agent(
+        answers=["Ответ 1", "Ответ 2", "Ответ 3"],
+        facts_answers=['{"цель": "ТЗ"}', '{"ограничение": "до 30 минут"}'],
+    )
+    with_strategy(agent, ContextStrategy.STICKY_FACTS)
+    agent.ask("Первый вопрос")
+
+    with_strategy(agent, ContextStrategy.SLIDING_WINDOW)
+    agent.ask("Ограничение: партия до 30 минут.")
+
+    with_strategy(agent, ContextStrategy.STICKY_FACTS)
+    agent.ask("Второй вопрос на фактах")
+
+    assert "Ограничение: партия до 30 минут" in client.facts_prompts[1]
+    assert "Первый вопрос" not in client.facts_prompts[1]  # уже переработан ранее
+
+
+def test_restored_messages_are_not_fed_to_the_extractor(history_path):
+    """Рестарт восстанавливает блок из файла и не переспрашивает модель о прошлых сообщениях."""
+    agent, client = strategy_agent(
+        answers=["Ответ 1"],
+        facts_answers=['{"цель": "ТЗ"}'],
+    )
+    with_strategy(agent, ContextStrategy.STICKY_FACTS)
+    agent.ask("Вопрос до перезапуска")
+
+    restored, restored_client = make_agent(history=agent.history, answers=["Ответ 2"])
+    restored.settings = restored.settings.with_context_strategy(ContextStrategy.STICKY_FACTS)
+    restored.ask("Вопрос после перезапуска")
+
+    extractor, question = restored_client.calls[0], restored_client.calls[1]
+    assert extractor["messages"][0]["content"] == context_strategies.facts_instruction()
+    # извлекатель получает только новый вопрос: прошлые сообщения считаются переработанными
+    assert "Вопрос до перезапуска" not in extractor["messages"][1]["content"]
+    assert "Вопрос после перезапуска" in extractor["messages"][1]["content"]
+    assert "цель: ТЗ" in question["messages"][1]["content"]  # блок из файла
+    # последние сообщения лога (в т.ч. восстановленные) в запросе законно остаются: это окно
+    assert "Вопрос до перезапуска" in "".join(m["content"] for m in question["messages"])

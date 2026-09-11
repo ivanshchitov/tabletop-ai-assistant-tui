@@ -134,10 +134,27 @@ def build_facts_messages(
 def estimate_facts_call_tokens(
     facts: Dict[str, str], pending_messages: Sequence[str]
 ) -> int:
-    """Приближённая оценка промпта извлекателя (для отчёта о контексте)."""
+    """Приближённая оценка промпта извлекателя (для бюджета пакета и отчёта)."""
     return estimate_tokens(facts_instruction()) + estimate_tokens(
         facts_user_text(facts, pending_messages)
     )
+
+
+def facts_batch(
+    facts: Dict[str, str], pending_messages: Sequence[str], budget_tokens: int
+) -> List[str]:
+    """Первые сообщения очереди, чья оценка запроса извлекателя не превышает бюджет.
+
+    Извлекатель видит весь накопленный диалог, поэтому первую активацию стратегии на длинном
+    диалоге обрабатывают пакетами: сообщения берутся с начала очереди, пока запрос помещается
+    в бюджет. Первое сообщение принимается всегда — иначе очередь не сдвинулась бы с места.
+    """
+    selected: List[str] = []
+    for message in pending_messages:
+        if selected and estimate_facts_call_tokens(facts, selected + [message]) > budget_tokens:
+            break
+        selected.append(message)
+    return selected
 
 
 def facts_message(facts: Dict[str, str]) -> str:

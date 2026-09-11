@@ -178,7 +178,12 @@ sees; the strategy is a *view* on the session log, never its mutator. Deliberate
 - `sliding_window`: the request carries system + the last N messages (`context_strategies.window_messages`,
   whole exchanges, last exchange always) and makes no extra API call at all.
 - `sticky_facts`: an extractor call precedes every question — it receives the current block plus the
-  user messages not yet folded and must answer with a JSON object of key–value pairs
+  user messages not yet folded and must answer with a JSON object of key–value pairs.
+  The pending queue is seeded from the session log (`_facts_covered` counts log exchanges already
+  handed to the extractor), so switching to facts mid-dialog picks up what was said under other
+  strategies instead of starting blind; messages restored from `history.json` count as already
+  processed, since the restored block came from them. A queue that does not fit one request is sent
+  in budget-sized batches, advancing only on success
   (`assets/facts_prompt.md`, parsed client-side by `context_strategies.parse_facts_response`; no
   `response_format`, for the same reasoning-model reliability reasons as the summarizer).
   `merge_facts` replaces a known key's value and evicts the earliest keys past `MAX_FACTS_KEYS`.

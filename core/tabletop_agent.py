@@ -120,10 +120,13 @@ class TabletopAgent:
         self._summary: Optional[str] = None
         self._summary_covers: int = 0
         self._log_covered: int = 0
-        # Память стратегии фактов: блок «ключ — значение» и сообщения пользователя,
-        # ещё не переработанные извлекателем (сбой не должен терять их).
+        # Память стратегии фактов: блок «ключ — значение», очередь ещё не переработанных
+        # извлекателем сообщений пользователя (сбой не должен терять их) и число обменов лога,
+        # уже отданных извлекателю — по нему очередь пополняется из лога, когда стратегия
+        # включается посреди диалога.
         self._facts: Dict[str, str] = {}
         self._facts_pending: List[str] = []
+        self._facts_covered: int = 0
         # Память стратегии веток: ветки как индексы в общем логе.
         self._branches = context_strategies.BranchTree(self._turns)
         self._last_compression: Optional[CompressionReport] = None
@@ -251,6 +254,7 @@ class TabletopAgent:
         self._log_covered = 0
         self._facts = {}
         self._facts_pending = []
+        self._facts_covered = 0
         self._branches.reset()
         self._last_compression = None
         self._last_facts = None
@@ -269,6 +273,7 @@ class TabletopAgent:
         self._summary_covers = self.history.summary_covers
         self._log_covered = 0
         self._facts = dict(self.history.facts)
+        self._facts_pending = []
         dialogues = self.history.dialogues
         tail_records = max(0, len(dialogues) - self._summary_covers)
         for item in dialogues[-tail_records:] if tail_records else []:
@@ -276,6 +281,8 @@ class TabletopAgent:
                 prompts.build_user_prompt(item["question"], self.config.settings),
                 item["answer"],
             )
+        # Восстановленные сообщения уже отражены в блоке из файла: извлекатель их не переспрашивает.
+        self._facts_covered = len(self._turns) // 2
 
     # --- внутреннее -----------------------------------------------------------------------
 
@@ -384,39 +391,63 @@ class TabletopAgent:
         question: str,
         on_phase: Optional[Callable[[RequestPhase], None]],
     ) -> None:
-        """Обновляет блок фактов перед вопросом.
+        """Обновляет блок фактов по сообщениям пользователя, ещё не отданным извлекателю.
 
-        Извлекатель получает текущий блок и накопленные сообщения пользователя. Успешный
-        ответ (в том числе пустой объект — «новых фактов нет») очищает очередь и обновляет
-        блок; сбой оставляет блок и очередь как были, чтобы ничего не потерять: сообщение
-        уйдёт в следующее обновление. Ответ на вопрос от этого не зависит.
+        Очередь пополняется из лога: сообщения, отправленные при других стратегиях, тоже
+        перерабатываются — иначе переключение на факты посреди диалога дало бы «слепой» блок.
+        Извлекатель получает текущий блок и пакет сообщений (пакетами, если очередь не
+        помещается в бюджет). Успешный ответ (в том числе пустой объект — «новых фактов нет»)
+        снимает обработанные сообщения с очереди; сбой оставляет блок и очередь как были,
+        чтобы ничего не потерять: они уйдут в следующее обновление. Ответ на вопрос от
+        этого не зависит. Восстановленные из файла сообщения считаются переработанными.
         """
+        if not self._facts_pending:
+            self._facts_pending = self._logged_user_messages()
         self._facts_pending.append(question)
-        self._signal(on_phase, RequestPhase.FACTS_UPDATE)
-        try:
-            meta = self.client.ask_with_usage_messages(
-                context_strategies.build_facts_messages(self._facts, self._facts_pending),
-                max_tokens=config.max_tokens_for_words(config.FACTS_MAX_WORDS),
-                temperature=None,
-                model=self.config.model,
+        answered_exchanges = len(self._turns) // 2
+        while self._facts_pending:
+            batch = context_strategies.facts_batch(
+                self._facts, self._facts_pending, self.config.settings.max_session_tokens
             )
-        except APIError as exc:
-            self._last_facts = FactsReport(updated=False, keys=len(self._facts), error=str(exc))
-            return
-        self._last_result = meta
-        self._ledger.record(meta)
-        parsed = context_strategies.parse_facts_response(meta.content)
-        if parsed is None:
-            self._last_facts = FactsReport(
-                updated=False,
-                keys=len(self._facts),
-                error="Извлекатель фактов вернул не JSON.",
-            )
-            return
-        self._facts = context_strategies.merge_facts(self._facts, parsed)
-        self._facts_pending.clear()
-        self.history.set_facts(self._facts)
-        self._last_facts = FactsReport(updated=True, keys=len(self._facts))
+            self._signal(on_phase, RequestPhase.FACTS_UPDATE)
+            try:
+                meta = self.client.ask_with_usage_messages(
+                    context_strategies.build_facts_messages(self._facts, batch),
+                    max_tokens=config.max_tokens_for_words(config.FACTS_MAX_WORDS),
+                    temperature=None,
+                    model=self.config.model,
+                )
+            except APIError as exc:
+                self._last_facts = FactsReport(
+                    updated=False, keys=len(self._facts), error=str(exc)
+                )
+                return
+            self._last_result = meta
+            self._ledger.record(meta)
+            parsed = context_strategies.parse_facts_response(meta.content)
+            if parsed is None or not meta.content.strip():
+                self._last_facts = FactsReport(
+                    updated=False,
+                    keys=len(self._facts),
+                    error="Извлекатель фактов вернул пустой ответ или не JSON.",
+                )
+                return
+            self._facts = context_strategies.merge_facts(self._facts, parsed)
+            del self._facts_pending[: len(batch)]
+            self.history.set_facts(self._facts)
+            self._last_facts = FactsReport(updated=True, keys=len(self._facts))
+        # Очередь разошлась целиком: всё, что в логе, переработано, плюс текущий вопрос —
+        # он станет последним обменом после ответа. Сбой ответа ничего не пропустит:
+        # провалившийся вопрос в диалог не попадает.
+        self._facts_covered = answered_exchanges + 1
+
+    def _logged_user_messages(self) -> List[str]:
+        """Сообщения пользователя из лога, ещё не отданные извлекателю фактов."""
+        answered = len(self._turns) // 2
+        return [
+            self._turns[index * 2]["content"]
+            for index in range(self._facts_covered, answered)
+        ]
 
     def _digest_before_request(
         self,

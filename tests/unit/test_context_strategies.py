@@ -224,3 +224,42 @@ def test_reset_returns_to_a_single_empty_branch():
     assert tree.branches() == ((strategies.DEFAULT_BRANCH_NAME, 0),)
     assert tree.active_messages() == []
     assert tree.switch("ветка 2") is False
+
+
+# --- пакет сообщений для извлекателя ------------------------------------------------------
+
+
+def test_facts_batch_takes_everything_within_budget():
+    pending = ["Первое сообщение", "Второе сообщение"]
+
+    assert strategies.facts_batch({}, pending, config.MAX_MAX_SESSION_TOKENS) == pending
+
+
+def test_facts_batch_always_takes_at_least_one_message():
+    """Иначе очередь не сдвинется: первое сообщение принимается даже при крошечном бюджете."""
+    pending = ["Очень длинное сообщение " * 500, "Второе"]
+
+    assert strategies.facts_batch({}, pending, 1) == pending[:1]
+
+
+def test_facts_batch_stops_before_the_message_that_breaks_the_budget():
+    pending = [f"Сообщение {index} " + "х" * 400 for index in range(5)]
+
+    batch = strategies.facts_batch({}, pending, 300)
+
+    assert 0 < len(batch) < len(pending)
+    assert batch == pending[: len(batch)]
+
+
+def test_facts_batch_accounts_for_the_current_block():
+    """Текущий блок входит в запрос, поэтому сокращает место для новых сообщений."""
+    pending = ["Сообщение " + "х" * 300 for _ in range(4)]
+    facts = {f"ключ {index}": "значение " + "у" * 200 for index in range(10)}
+
+    with_block = strategies.facts_batch(facts, pending, 400)
+
+    assert len(with_block) < len(pending)
+
+
+def test_facts_batch_of_empty_queue_is_empty():
+    assert strategies.facts_batch({}, [], 1000) == []
