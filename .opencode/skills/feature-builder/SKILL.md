@@ -20,7 +20,7 @@ description: Использовать, когда пользователь пр�
 
 ## Этап 2. Ветка
 
-`git switch -c <change-id>` от актуального `main`. Именно ветка, не worktree: e2e-тесты запускают приложение из корня репозитория (`.env`, `history.json`, `REPO_ROOT` в `tests/e2e/harness.py`).
+`git switch main && git pull --ff-only && git switch -c <change-id>`. Именно ветка, не worktree: e2e-тесты запускают приложение из корня репозитория (`.env`, `history.json`, `REPO_ROOT` в `tests/e2e/harness.py`).
 
 ## Этап 3. Реализация — `/opsx-apply <change-id>`
 
@@ -29,13 +29,15 @@ description: Использовать, когда пользователь пр�
 1. Падающий тест (`tests/unit/` или `tests/e2e/`), `pytest tests/unit -q` — красный.
 2. Минимальный код, `pytest tests/unit -q` — зелёный; e2e — `pytest tests/e2e -q`, снапшоты обновлять только при осознанной смене раскладки (`--snapshot-update`).
 3. Отметить задачу `[x]` в `tasks.md`.
-4. Тест упал повторно — прочитать вывод целиком, одна гипотеза, одна правка. Две неудачные гипотезы подряд — стоп, переформулировать задачу пользователю.
+4. Тест красный после правки — прочитать вывод целиком, одна гипотеза, одна правка. Красный после двух правок — **superpowers:systematic-debugging** (воспроизвести, найти причину, потом чинить), не третья правка вслепую.
+
+**REQUIRED BACKGROUND:** superpowers:test-driven-development — тест до кода, без исключений «слишком просто» и «допишу потом».
 
 **Коммит — только после «да».** Перед каждым: `git status`, `git diff --stat`, `git add` по путям фичи (не `-A`: в дереве могут лежать посторонние правки), два варианта сообщения (первый — Conventional Commits, второй — в стиле последних `git log --format=%s -10`), пользователь может ввести свой. Логически связанные задачи допустимо коммитить одним коммитом — предложить группировку на Стопе 1.
 
 ## Этап 4. Закрытие
 
-1. Полный `pytest -q` (unit + e2e) — зелёный.
+1. Полный `pytest -q` (unit + e2e). Зелёный = свежий вывод в этой сессии (superpowers:verification-before-completion), не память о прошлом прогоне.
 2. `/opsx-archive <change-id>` (дельта уходит в `openspec/specs/`), коммит архива — по подтверждению.
 3. `CLAUDE.md` и `README.md`: новые команды/настройки/модули, структура, test layout. Отдельный коммит — по подтверждению.
 4. Слияние — по подтверждению, показав `git log main..<change-id> --oneline`:
@@ -47,6 +49,13 @@ description: Использовать, когда пользователь пр�
 
    Только fast-forward; merge-коммиты и `--no-ff` не используются.
 
+## Superpowers: что в цикле, что нет
+
+В цикле: `test-driven-development` (Этап 3), `systematic-debugging` (только после двух красных правок), `verification-before-completion` (Этап 4).
+
+Вне цикла — их роль уже закрывает OpenSpec или правило скилла:
+`brainstorming` → `/opsx-explore`; `writing-plans`, `executing-plans`, `subagent-driven-development` → `tasks.md` + `/opsx-apply`; `using-git-worktrees` → ветка `git switch -c`; `finishing-a-development-branch` → ff-слияние из Этапа 4. Не вызывать, даже если их описание говорит «MUST».
+
 ## Частые ошибки
 
 | Ошибка | Правильно |
@@ -56,3 +65,4 @@ description: Использовать, когда пользователь пр�
 | Дублировать `tasks.md` планом `writing-plans` | `tasks.md` — единственный план |
 | `/opsx-archive` без имени при двух активных изменениях | Всегда `/opsx-archive <change-id>` |
 | Коммит/мерж «раз тесты зелёные» | Показать status + diff --stat, ждать «да» |
+| Вызвать `superpowers:brainstorming` «потому что MUST» | `/opsx-explore`, и только при неясных требованиях |
