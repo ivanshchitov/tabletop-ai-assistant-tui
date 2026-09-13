@@ -26,6 +26,21 @@ require_state() {
     IFS='|' read -r PID WDPID OUTFILE < "$STATE_FILE" || die "повреждённый state-файл: $STATE_FILE"
 }
 
+# 2-секундная проба захвата в $STATE_DIR: без разрешения «Запись экрана» macOS
+# отдаёт чёрный кадр, а ffmpeg при этом завершается успешно — ловим по размеру PNG.
+macos_probe() {
+    mkdir -p "$STATE_DIR"
+    probe="$STATE_DIR/probe.mp4"; frame="$STATE_DIR/probe.png"
+    rm -f "$probe" "$frame"
+    ffmpeg -hide_banner -loglevel error -f avfoundation -framerate 30 -pixel_format uyvy422 \
+        -i "$1:none" -t 2 -vcodec libx264 -preset ultrafast -pix_fmt yuv420p -y "$probe" \
+        2>/dev/null || return 1
+    ffmpeg -y -v error -ss 1 -i "$probe" -frames:v 1 "$frame" 2>/dev/null || return 1
+    size="$(stat -f %z "$frame" 2>/dev/null || stat -c %s "$frame" 2>/dev/null || echo 0)"
+    rm -f "$probe" "$frame"
+    [ "$size" -gt 10000 ]
+}
+
 cmd_doctor() {
     os="$(uname -s)"
     log "ОС: $os"
@@ -37,7 +52,13 @@ cmd_doctor() {
                 | sed -n 's/.*\[\([0-9]*\)\] Capture screen.*/\1/p' | head -1 || true)"
             if [ -n "${idx:-}" ]; then
                 log "avfoundation: экран найден (устройство $idx)"
-                log "ВЕРДИКТ: ГОТОВ (ffmpeg avfoundation)"
+                if macos_probe "$idx"; then
+                    log "проба 2 сек: кадр не чёрный"
+                    log "ВЕРДИКТ: ГОТОВ (ffmpeg avfoundation)"
+                else
+                    log "ВЕРДИКТ: НЕ ГОТОВ — проба дала чёрный/пустой кадр: у терминала нет разрешения"
+                    log "«Запись экрана» (Системные настройки → Конфиденциальность и безопасность → Запись экрана)"
+                fi
             else
                 log "avfoundation: экран не найден, будет fallback screencapture"
                 command -v screencapture >/dev/null 2>&1 \
@@ -125,7 +146,7 @@ cmd_start() {
                 | sed -n 's/.*\[\([0-9]*\)\] Capture screen.*/\1/p' | head -1 || true)"
             if [ -n "${idx:-}" ]; then
                 ext="mp4"
-                runner="ffmpeg -hide_banner -loglevel error -f avfoundation -framerate 30 -i ${idx}:none -vcodec libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -movflags +frag_keyframe+empty_moov"
+                runner="ffmpeg -hide_banner -loglevel error -f avfoundation -framerate 30 -pixel_format uyvy422 -i ${idx}:none -vcodec libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -movflags +frag_keyframe+empty_moov"
             else
                 die "ffmpeg есть, но экран avfoundation не найден; запусти doctor"
             fi
