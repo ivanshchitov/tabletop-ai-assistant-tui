@@ -79,10 +79,10 @@ OpenCode the same six commands are spelled with a dash (`/opsx-propose`, `/opsx-
 - The delta spec is a *diff* against the main spec, not a copy of it. The main specs under
   `openspec/specs/` are only ever written by archive/sync, never edited by hand during a change.
 - `openspec/specs/` holds the master spec (archived from `add-master-spec`, reverse-engineered
-  from the existing code/tests) as ten capabilities, each the target for future `MODIFIED` deltas:
-  `question-answering`, `answer-settings`, `api-integration`, `history-persistence`,
-  `terminal-ui`, `settings-screen`, `configuration`, `test-infrastructure`, `prompt-strategies`,
-  `model-selection`.
+  from the existing code/tests) as a set of capabilities, each the target for future `MODIFIED`
+  deltas: `agent`, `question-answering`, `answer-settings`, `api-integration`,
+  `history-persistence`, `terminal-ui`, `settings-screen`, `configuration`, `context-strategies`,
+  `memory-model`, `test-infrastructure`, `model-selection`.
   It records deliberate decisions worth knowing before touching related code: the JSON format's
   refusal reply is a machine-readable `{"error": ...}` object rather than the verbatim refusal
   phrase used by free/compact (not a bug to fix), and `AnswerSettings` is session-only by design —
@@ -118,8 +118,8 @@ OpenCode the same six commands are spelled with a dash (`/opsx-propose`, `/opsx-
 
 ## Architecture
 
-Two packages: `core/` (agent, settings, prompts, API client, history, context strategies and the
-compression logic — no `rich`/terminal dependency) and `ui/` (`tui_app.py`, `keyboard.py`,
+Two packages: `core/` (agent, settings, prompts, API client, memory layers and stores, context
+strategies and the compression logic — no `rich`/terminal dependency) and `ui/` (`tui_app.py`, `keyboard.py`,
 `commands_screen.py`, `settings_screen.py`, `branches_screen.py`, `models_screen.py` — everything
 that touches the terminal). Modules inside `core/`
 import each other with relative imports (`from . import config`, `from .answer_settings import
@@ -129,17 +129,17 @@ import (`from . import keyboard`). The entry point is `tabletop-ai-assistant.py`
 (hyphenated, so it's not importable as a module — it's only ever run directly:
 `from ui.tui_app import TabletopAITUI`), which is why `core/config.py`'s `BASE_DIR` resolves two
 parents up (`Path(__file__).resolve().parent.parent`) rather than one — it has to reach back past
-`core/` to the repo root where `.env`, `assets/`, and `history.json` actually live.
+`core/` to the repo root where `.env`, `assets/`, `history.json` and `memory.json` actually live.
 
 **Environment switches (`core/config.py`):** `OPENCODE_API_URL`, `TABLETOP_HISTORY_FILE`,
-`TABLETOP_REQUEST_TIMEOUT`, `TABLETOP_TYPING_DELAY` (the last one read in `ui/tui_app.py`),
-`TABLETOP_COMPRESS_AFTER` (the session setting's default, messages, default 10) and
-`TABLETOP_MAX_SESSION_TOKENS` (the session setting's default, tokens, default 20000) override
+`TABLETOP_MEMORY_FILE`, `TABLETOP_REQUEST_TIMEOUT`, `TABLETOP_TYPING_DELAY` (the last one read in
+`ui/tui_app.py`), `TABLETOP_COMPRESS_AFTER` (the session setting's default, messages, default 10)
+and `TABLETOP_MAX_SESSION_TOKENS` (the session setting's default, tokens, default 20000) override
 the corresponding defaults. They exist so the e2e layer can point the app at a local stub
-server, keep history in a temp file, collapse the typing animation — or exercise compression
-and the token ceiling in seconds. `HISTORY_FILE` especially: its path derives from `__file__`,
-not the working directory, so without the override *any* run — a test run included — would
-write to the single real `history.json` in the repo root.
+server, keep history and long-term memory in temp files, collapse the typing animation — or
+exercise compression and the token ceiling in seconds. `HISTORY_FILE`/`MEMORY_FILE` especially:
+their paths derive from `__file__`, not the working directory, so without the override *any* run —
+a test run included — would write to the single real `history.json`/`memory.json` in the repo root.
 
 **Settings flow:** `core/answer_settings.AnswerSettings` (`format: AnswerFormat`,
 `context_strategy: ContextStrategy`, `max_words: int`, `list_limit: int`, `temperature: float`,
@@ -225,6 +225,56 @@ sees; the strategy is a *view* on the session log, never its mutator. Deliberate
 - The `/branches` panel (`ui/branches_screen.py`) is the same reducer pattern, with two extra
   outcome keys: `c` (checkpoint) and `n` (branch from checkpoint) — they are actions on the dialog,
   not list rows, so they are not expressed as entries in the list.
+
+**Memory model (`core/memory_layers.py`, `core/long_term_memory.py`, `/memory`):** the agent's
+memory is three explicit layers with different content, lifetime and storage — short-term (the
+dialogue's own turns), working (the current task's data), long-term (what is known about the user
+between sessions). Deliberate decisions baked in:
+- Long-term memory is **one** type of record, not several sub-layers: one entry = key + value +
+  category label (`профиль`/`решения`/`знания`/`заметка`), one file, one lifetime, one removal
+  path. Only the short-term layer has a layer-level identity distinct from the record's category.
+- Storage split is the point: short-term turns live in the session log and in the history
+  envelope's `dialogues`; working memory is the envelope's `working` block (`{key: value}`, keys
+  are the categories `цель`/`ограничения`); long-term memory is its own `memory.json`
+  (`TABLETOP_MEMORY_FILE`, gitignored) holding `{"entries": {key: {"value", "category"}}}`. An
+  entry without a stored category reads as a note — a hand-edited file must not lose data.
+- **Routing is a deterministic rule table, never a model call.** `memory_layers.RULES` maps
+  regex patterns over the user's message to (layer, category, key); the value is the sentence
+  containing the match, clipped to `config.MEMORY_VALUE_MAX_CHARS`. Repeat matches replace the
+  value of the same key. Regex is case-insensitive, so Cyrillic works in any case. Deliberate:
+  a second LLM extractor per message would cost a request per turn, be non-deterministic and
+  untestable; the rules are printed by `/memory` so the user can see why something was stored.
+  Keep patterns **narrow** (the `без …` pattern lists game topics on purpose — a bare
+  `без \w+` swallowed ordinary questions like "вопрос без ответа") and add a unit test per rule.
+- The **model's answer is never a source of memory records** — only the user's messages are.
+  Routing runs before the request is assembled, so a record made by the current message is
+  visible to the model in that same request. It also runs when the request then fails: the words
+  were the user's; the answer's absence changes nothing (`test_failed_exchange_is_not_saved`
+  in e2e asserts on `dialogues`, not on the whole envelope for exactly this reason).
+- Layers reach the model as **one extra system message** (`memory_layers.memory_message`) placed
+  above the dialogue turns and above the strategy's memory (facts/summary): long-term before
+  working, the fresh user turn always last. `assets/memory_prompt.md` carries the instruction
+  (fresh message overrides memory, don't invent memory, don't recite the layers) and is appended
+  only when a layer is non-empty — same reasoning as the format instructions living in the system
+  message, but conditional, since an empty agent shouldn't pay for it. Empty layers add nothing,
+  so an empty-memory request keeps its old shape (several e2e tests depend on that).
+- `_shrink_to_ceiling` trims dialogue turns only: memory messages are never cut by the token
+  ceiling or the estimate, like the facts block.
+- **`/clear` empties the short-term and working layers and never the long-term one** — a
+  deliberate asymmetry (`reset()` says so in its docstring, the confirmation says so on screen):
+  `/clear` answers "start the dialogue over", while what the agent knows about the person is not
+  the dialogue. `/memory forget all` is the only way to drop it. The working layer also survives a
+  restart (it is in the envelope) while the short-term one keeps only the uncovered tail.
+- `TabletopAgent.memory_report()` returns a `MemoryReport` snapshot (exchange count, both layers'
+  records, store paths, rule descriptions) — the terminal renders it and never reads `_working`
+  or the stores directly. Same isolation boundary as `context_report()`.
+- `/memory` is a plain command with **meaningful arguments** (`goal`/`remember`/`forget`), unlike
+  every other command whose arguments are ignored. It was deliberately not built as another panel
+  reducer: the operations take free text, which would have meant yet another input mode in
+  `keyboard.py`. `remember` uses the rule's category and key when a pattern matches and otherwise
+  files the text as a note under its own sequential key, so notes don't evict each other.
+- Journal lines (routing decision after an answer, operation results after `/memory`) are
+  screen-only, never written to `history.json` — the same rule as the compression and facts lines.
 
 **`/commands` (`ui/commands_screen.py`):** an interactive panel listing every command with a short
 description (↑/↓ move, Enter runs the selected command, Esc cancels with zero API calls).
@@ -419,30 +469,38 @@ empty content → "модель исчерпала бюджет max_tokens" (the
 mode), non-empty → "ответ мог быть обрезан". Question path only — the strategy's auxiliary
 requests keep their pinned `max_tokens`.
 
-**`core/history_manager.py`** — `history.json` (gitignored) is the agent's long-term memory:
+**`core/history_manager.py`** — `history.json` (gitignored) holds the short-term layer (the
+dialogue, verbatim) and the working layer (the current task's data):
 `TabletopAgent` owns the manager (passed at construction, `TabletopAgent(client, history=...)`),
-seeds its context (summary, facts, uncovered tail) from it automatically at creation, appends every
-successful exchange to it immediately inside `ask()`, and empties all memories in `reset()`.
-The TUI only displays its contents (startup replay) — it never writes or clears history itself.
-The file is an envelope `{"summary", "summary_covers", "facts", "dialogues"}`; a bare list (the old
-format) loads as an envelope with an empty summary and no facts, a missing `facts` key reads as an
-empty block, and a missing or corrupt file reads as empty history. There is NO eviction cap — every
-exchange stays verbatim forever, so the «всего диалога» total in `/usage` is the true all-time
-spend of the file. Each record may carry a `usage` block (`{"question", "answer", "usage":
-{prompt_tokens, completion_tokens, total_tokens, cost_usd}}`) written by `ask()`; records in the
-old shape load unchanged and are just skipped by totals. `summary`/`summary_covers` are updated by
-the agent's compression (a digest of the leading exchanges the model folded; `summary_covers`
-counts *file* records), `facts` by the extractor, and both are restored on construction — a lost or
-stale summary is not data loss, it is recomputed from the verbatim records. Branches are NOT saved:
-`dialogues` stays a flat list across branches.
+seeds its context (summary, facts, working memory, uncovered tail) from it automatically at
+creation, appends every successful exchange to it immediately inside `ask()`, and empties the
+short-term and working layers in `reset()`. Long-term memory is a *different* store
+(`core/long_term_memory.py`, `memory.json`), so `/clear` cannot reach it. The TUI only displays the
+file's contents (startup replay) and the memory snapshot — it never writes or clears a store itself
+except through the agent's memory methods. The file is an envelope
+`{"summary", "summary_covers", "facts", "working", "dialogues"}`; a bare list (the old format)
+loads as an envelope with an empty summary, no facts and an empty working block, a missing `facts`
+or `working` key reads as an empty block, and a missing or corrupt file reads as empty history.
+There is NO eviction cap — every exchange stays verbatim forever, so the «всего диалога» total in
+`/usage` is the true all-time spend of the file. Each record may carry a `usage` block
+(`{"question", "answer", "usage": {prompt_tokens, completion_tokens, total_tokens, cost_usd}}`)
+written by `ask()`; records in the old shape load unchanged and are just skipped by totals.
+`summary`/`summary_covers` are updated by the agent's compression (a digest of the leading
+exchanges the model folded; `summary_covers` counts *file* records), `facts` by the extractor, and
+both are restored on construction — a lost or stale summary is not data loss, it is recomputed from
+the verbatim records. `working` is written by memory routing and by `/memory goal`. Branches are NOT
+saved: `dialogues` stays a flat list across branches.
 
 ## Test layout
 
-- `tests/unit/` — no subprocesses, ~1s for the whole layer. `core/` logic, the `/commands`,
-  `/settings`, `/branches` and `/models` reducers, and `TabletopAITUI` driven through injected dependencies:
+- `tests/unit/` — no subprocesses, ~1s for the whole layer. `core/` logic (including the memory
+  routing table and the long-term store), the `/commands`, `/settings`, `/branches` and `/models`
+  reducers, and `TabletopAITUI` driven through injected dependencies:
   `TabletopAITUI(console=, history=, client=)` takes a `rich` console writing to a buffer, a
   `HistoryManager` on `tmp_path`, and a fake client that records what was asked. Passing a client
-  also skips the API-key prompt at startup.
+  also skips the API-key prompt at startup. Agent tests patch the *default* stores
+  (`tabletop_agent.HistoryManager`/`LongTermMemory`) so no test ever touches the real
+  `history.json`/`memory.json`.
 - `tests/unit/test_keyboard.py` — the only unit file that needs a pty (see above).
 - `tests/e2e/` — the real `tabletop-ai-assistant.py` running in `pty.fork()`, with output fed
   through `pyte` so assertions read the *rendered* screen rather than a stream of cursor codes.
