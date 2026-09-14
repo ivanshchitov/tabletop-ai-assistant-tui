@@ -113,8 +113,28 @@ OpenCode the same six commands are spelled with a dash (`/opsx-propose`, `/opsx-
 - `.claude/skills/solve-challenge-task/` (mirrored the same way) wraps `feature-builder` for an
   AI Advent Challenge day: task parsing + demo scenario + tag, then the feature via
   `feature-builder`, then a screen recording via `scripts/record_screen.sh` (`doctor` on macOS
-  records a 2-second probe to catch a missing Screen Recording permission) and a README draft
-  under `videos/` (gitignored). The challenge repository is read-only for the agent.
+  records a 2-second probe to catch a missing Screen Recording permission) and the submission
+  drafts under `videos/` (gitignored) — the challenge README fragment and the GitHub release body.
+  The challenge repository is read-only for the agent.
+
+**Agent-loop gotchas** (found on day 11; both hand-written skills above rely on this list rather
+than repeating it):
+- `openspec archive <change-id>` blocks on a confirmation prompt and fails without a TTY — always
+  pass `--yes`. Run `openspec validate <change-id> --strict` *before* showing the plan and before
+  archiving: a `MODIFIED` block that drops a requirement's existing scenarios, and a `## Purpose`
+  inside a delta for an existing capability, are both rejected there — cheaper than a second round.
+- Archiving rewrites `openspec/specs/` only, so the full `pytest` run belongs *before* it; after it
+  `openspec validate --all --strict` is the whole check.
+- A new on-disk state file means a new `TABLETOP_*` environment switch **and** a pass-through in
+  `tests/e2e/harness.AppSession`: without both, any run — a test run included — reads and writes the
+  real file in the repo root (`history.json`, `memory.json`).
+- Screen recording captures the user's whole screen, so the demo terminal window must be one the
+  script creates itself and addresses by window id — never by index; other windows must not be
+  closed, focused or moved.
+- While iterating, run the test file of the layer being touched; the full suite is a single run at
+  the end of the loop.
+- Commit-message style is the repo's own (`git log --format=%s -10`), not Conventional Commits:
+  the skills offer the repo-style wording first.
 
 ## Architecture
 
