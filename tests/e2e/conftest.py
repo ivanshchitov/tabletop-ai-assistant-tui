@@ -73,14 +73,20 @@ def history_file(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def app(stub, history_file, tui_display, request):
+def memory_file(tmp_path: Path) -> Path:
+    """Файл долговременной памяти: прогон не должен трогать memory.json репозитория."""
+    return tmp_path / "memory.json"
+
+
+@pytest.fixture
+def app(stub, history_file, memory_file, tui_display, request):
     """Фабрика сессий: одна и та же история переживает несколько запусков подряд."""
     mode, mirror = tui_display
     sessions = []
 
     def factory(**kwargs) -> AppSession:
         kwargs.setdefault("mirror", mirror)
-        session = AppSession(api_url=stub.url, history_file=history_file, **kwargs)
+        session = AppSession(api_url=stub.url, history_file=history_file, memory_file=memory_file, **kwargs)
         sessions.append(session)
         return session
 
@@ -93,7 +99,7 @@ def app(stub, history_file, tui_display, request):
 
 
 @pytest.fixture
-def live_app(history_file, tui_display, request):
+def live_app(history_file, memory_file, tui_display, request):
     """Сессия против настоящего OpenCode Zen — без stub-сервера и с реальным ключом.
 
     Пропускает тест, если ключа нет: репозиторий должен оставаться проверяемым без него.
@@ -110,7 +116,7 @@ def live_app(history_file, tui_display, request):
     def factory(**kwargs):
         kwargs.setdefault("api_key", None)  # ключ берётся приложением из .env
         kwargs.setdefault("mirror", mirror)
-        session = AppSession(history_file=history_file, api_url=None, **kwargs)
+        session = AppSession(history_file=history_file, memory_file=memory_file, api_url=None, **kwargs)
         sessions.append(session)
         return session
 

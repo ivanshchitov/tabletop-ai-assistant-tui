@@ -55,6 +55,7 @@ class AppSession:
     def __init__(
         self,
         history_file: Path,
+        memory_file: Optional[Path] = None,
         api_url: Optional[str] = None,
         cols: int = 100,
         rows: int = 40,
@@ -97,6 +98,10 @@ class AppSession:
         }
         if api_key is not None:
             env["OPENCODE_API_KEY"] = api_key
+        if memory_file is not None:
+            # Долговременная память живёт в своём файле: без переопределения прогон писал бы
+            # в реальный memory.json репозитория и читал бы записи прошлых сессий.
+            env["TABLETOP_MEMORY_FILE"] = str(memory_file)
         if api_url is not None:
             env["OPENCODE_API_URL"] = api_url
             env["TABLETOP_REQUEST_TIMEOUT"] = "1"

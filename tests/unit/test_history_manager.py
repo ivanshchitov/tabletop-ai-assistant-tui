@@ -34,6 +34,7 @@ def test_add_appends_and_persists_immediately(history_path):
         "summary": None,
         "summary_covers": 0,
         "facts": {},
+        "working": {},
         "dialogues": [{"question": "Правила Splendor?", "answer": "Собирайте фишки."}],
     }
 
@@ -99,6 +100,7 @@ def test_clear_writes_empty_envelope(history_path):
         "summary": None,
         "summary_covers": 0,
         "facts": {},
+        "working": {},
         "dialogues": [],
     }
 
@@ -226,5 +228,71 @@ def test_clear_wipes_facts_too(history_path):
         "summary": None,
         "summary_covers": 0,
         "facts": {},
+        "working": {},
         "dialogues": [],
     }
+
+
+# --- день 11: рабочая память в конверте --------------------------------------------------
+
+
+def test_working_memory_is_saved_and_reloaded(history_path):
+    manager = HistoryManager(path=history_path)
+    manager.set_working({"цель": "собрать партию на вечер", "ограничения": "без таймера"})
+
+    reloaded = HistoryManager(path=history_path)
+
+    assert reloaded.working == {
+        "цель": "собрать партию на вечер",
+        "ограничения": "без таймера",
+    }
+
+
+def test_missing_working_key_reads_as_empty(history_path):
+    """Файл дня 10 рабочей памяти не знает — она читается пустой, ошибок нет."""
+    history_path.write_text(
+        json.dumps(
+            {
+                "summary": None,
+                "summary_covers": 0,
+                "facts": {},
+                "dialogues": [{"question": "q", "answer": "a"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    manager = HistoryManager(path=history_path)
+
+    assert manager.working == {}
+    assert manager.dialogues == [{"question": "q", "answer": "a"}]
+
+
+def test_clear_wipes_working_memory_too(history_path):
+    manager = HistoryManager(path=history_path)
+    manager.add("q", "a")
+    manager.set_working({"цель": "собрать партию"})
+    manager.clear()
+
+    assert manager.working == {}
+    assert json.loads(history_path.read_text(encoding="utf-8")) == {
+        "summary": None,
+        "summary_covers": 0,
+        "facts": {},
+        "working": {},
+        "dialogues": [],
+    }
+
+
+def test_envelope_carries_working_beside_facts(history_path):
+    """Слои хранятся раздельно: рабочая память — свой блок конверта, долговременная — свой файл."""
+    manager = HistoryManager(path=history_path)
+    manager.add("q", "a")
+    manager.set_facts({"жанр": "евро"})
+    manager.set_working({"цель": "собрать партию"})
+
+    saved = json.loads(history_path.read_text(encoding="utf-8"))
+
+    assert saved["working"] == {"цель": "собрать партию"}
+    assert saved["facts"] == {"жанр": "евро"}
+    assert "опыт" not in json.dumps(saved)

@@ -195,6 +195,7 @@ def test_clear_wipes_history_for_the_next_launch(app, stub, history_file):
         "summary": None,
         "summary_covers": 0,
         "facts": {},
+        "working": {},
         "dialogues": [],
     }
 
@@ -244,7 +245,10 @@ def test_failed_exchange_is_not_saved(app, stub, history_file):
         session.send_line("/exit")
         session.wait_exit()
 
-    assert not history_file.exists() or json.loads(history_file.read_text(encoding="utf-8")) == []
+    # Обмена в истории нет. Слои памяти конверта при этом могут быть непусты: маршрут считается
+    # по реплике пользователя и запроса к модели не требует — в память попадают его слова, не ответ.
+    saved = json.loads(history_file.read_text(encoding="utf-8")) if history_file.exists() else []
+    assert saved["dialogues"] == [] if isinstance(saved, dict) else saved == []
 
 
 # --- выход ------------------------------------------------------------------------------------

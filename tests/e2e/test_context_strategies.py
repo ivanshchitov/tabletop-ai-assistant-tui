@@ -122,8 +122,11 @@ def test_facts_strategy_updates_the_block_before_answering(app, stub, history_fi
     extractor, question = stub.payload_at(0), stub.payload_at(1)
     assert extractor["messages"][0]["content"] == context_strategies.facts_instruction()
     assert "Помоги собрать ТЗ по Каркассону" in extractor["messages"][1]["content"]
-    assert _roles(question) == ["system", "system", "user"]
-    assert "цель: собрать ТЗ по Каркассону" in question["messages"][1]["content"]
+    # Запрос: system настроек, сообщение слоёв памяти (цель задачи из реплики), блок фактов,
+    # новый user-ход. Слои памяти выше памяти стратегии.
+    assert _roles(question) == ["system", "system", "system", "user"]
+    assert "Рабочая память" in question["messages"][1]["content"]
+    assert "цель: собрать ТЗ по Каркассону" in question["messages"][2]["content"]
 
     saved = json.loads(history_file.read_text(encoding="utf-8"))
     assert saved["facts"] == {"цель": "собрать ТЗ по Каркассону"}

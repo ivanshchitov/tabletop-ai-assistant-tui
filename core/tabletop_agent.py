@@ -12,11 +12,12 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from . import config, context_compressor, context_strategies, prompts
+from . import config, context_compressor, context_strategies, memory_layers, prompts
 from .usage import SessionLedger, SessionUsage, estimate_tokens
 from .answer_settings import AnswerFormat, AnswerSettings, ContextStrategy
 from .api_client import APIClient, AnswerMeta, APIError
 from .history_manager import HistoryManager
+from .long_term_memory import LongTermMemory
 
 
 class RequestPhase(Enum):
@@ -67,6 +68,23 @@ class ContextReport:
 
 
 @dataclass
+class MemoryReport:
+    """Снимок слоёв памяти для отчётов интерфейса (без обращения к модели).
+
+    Хранилища отдаются путями — интерфейс показывает, какой файл держит слой, и не знает,
+    как слой устроен внутри. Правила маршрутизации идут текстом: их печатает отчёт, а не
+    повторяет у себя таблицу правил.
+    """
+
+    short_term_exchanges: int
+    working: Tuple[memory_layers.MemoryRecord, ...]
+    long_term: Tuple[memory_layers.MemoryRecord, ...]
+    history_store: str
+    long_term_store: str
+    rules: Tuple[str, ...]
+
+
+@dataclass
 class AgentConfig:
     """Единый конфиг агента: настройки ответа сессии и модель."""
 
@@ -104,6 +122,7 @@ class TabletopAgent:
         settings: Optional[AnswerSettings] = None,
         model: Optional[str] = None,
         history: Optional[HistoryManager] = None,
+        long_term: Optional[LongTermMemory] = None,
     ) -> None:
         self.client = client
         self.config = AgentConfig(
@@ -111,6 +130,14 @@ class TabletopAgent:
             model=model if model is not None else config.DEFAULT_MODEL,
         )
         self.history = history if history is not None else HistoryManager()
+        # Долговременный слой памяти — свой файл: сведения о пользователе переживают и /clear,
+        # и перезапуск, поэтому конверт истории его не держит.
+        self.long_term = long_term if long_term is not None else LongTermMemory()
+        # Рабочий слой — данные текущей задачи (цель и ограничения): его место в конверте
+        # истории, потому что жизнь слоя равна жизни диалога.
+        self._working: Dict[str, str] = {}
+        # Решение маршрута последней реплики — для журнальной строки интерфейса.
+        self._last_routing: Tuple[memory_layers.MemoryRecord, ...] = ()
         # Лог ходов сессии: пары user/assistant успешных обменов, append-only. system в логе
         # не хранится, ходы не удаляются — стратегия лишь выбирает, что из лога отправить.
         self._turns: List[Dict[str, str]] = []
@@ -171,6 +198,21 @@ class TabletopAgent:
         return self._last_facts
 
     @property
+    def last_routing(self) -> Tuple[memory_layers.MemoryRecord, ...]:
+        """Записи, сделанные в слои памяти последней репликой пользователя (только чтение)."""
+        return self._last_routing
+
+    @property
+    def working_memory(self) -> Dict[str, str]:
+        """Рабочая память задачи: цель и ограничения текущего диалога (только чтение)."""
+        return dict(self._working)
+
+    @property
+    def long_term_memory(self) -> LongTermMemory:
+        """Хранилище долговременной памяти — для снимка и операций интерфейса."""
+        return self.long_term
+
+    @property
     def session_usage(self) -> SessionUsage:
         """Итоги сессии: накопленные токены и стоимость всех успешных запросов."""
         return self._ledger.usage
@@ -197,6 +239,9 @@ class TabletopAgent:
         запроса стратегии фактов вопрос не отменяет — он уходит с прежним блоком.
         """
         user_prompt = prompts.build_user_prompt(question, self.config.settings)
+        # Маршрут слоёв считается до сборки запроса: запись, сделанная текущей репликой, должна
+        # быть видна модели уже в этом запросе. Запросов к модели маршрут не делает.
+        self._route_memory(question)
         skip = self._prepare_context(question, user_prompt, on_phase)
         self._signal(on_phase, RequestPhase.REQUEST)
         meta = self.client.ask_with_usage_messages(
@@ -211,6 +256,64 @@ class TabletopAgent:
         # Долговременная память: пара «вопрос–ответ» с метриками — на диск сразу после ответа.
         self.history.add(question, meta.content, usage=self._usage_block(meta))
         return meta
+
+    def memory_report(self) -> MemoryReport:
+        """Снимок слоёв памяти для отчётов интерфейса.
+
+        Отдаёт краткосрочный слой (число обменов диалога), рабочую и долговременную память с
+        категориями записей, хранилища обоих слоёв и перечень правил маршрутизации. Ни одного
+        обращения к модели не делает.
+        """
+        return MemoryReport(
+            short_term_exchanges=len(self._turns) // 2,
+            working=memory_layers.records_from_block(memory_layers.WORKING, self._working),
+            long_term=self.long_term.records(),
+            history_store=str(self.history.path),
+            long_term_store=str(self.long_term.path),
+            rules=memory_layers.describe_rules(),
+        )
+
+    def remember_goal(self, goal: str) -> None:
+        """Записывает цель текущей задачи в рабочую память, заменяя прежнюю цель."""
+        self._store_working(memory_layers.CATEGORY_GOAL, goal)
+
+    def remember(self, text: str) -> memory_layers.MemoryRecord:
+        """Явно записывает реплику в долговременную память и возвращает запись.
+
+        Ключ и категорию даёт правило маршрутизации, если оборот распознан; иначе запись получает
+        категорию заметки и собственный порядковый ключ — так заметки не вытесняют друг друга.
+        """
+        recognized = [
+            record for record in memory_layers.route(text) if record.layer == memory_layers.LONG_TERM
+        ]
+        if not recognized:
+            record = memory_layers.MemoryRecord(
+                layer=memory_layers.LONG_TERM,
+                category=memory_layers.CATEGORY_NOTE,
+                key=self._next_note_key(),
+                value=memory_layers.clip_value(text),
+            )
+            self.long_term.remember(record.key, record.value, record.category)
+            return record
+        for record in recognized:
+            self.long_term.remember(record.key, record.value, record.category)
+        return recognized[0]
+
+    def forget(self, key: str) -> Optional[str]:
+        """Удаляет запись по ключу из того слоя, где она лежит; None — такой записи нет."""
+        if key in self._working:
+            del self._working[key]
+            self.history.set_working(self._working)
+            return memory_layers.WORKING
+        if self.long_term.forget(key):
+            return memory_layers.LONG_TERM
+        return None
+
+    def forget_all(self) -> None:
+        """Опустошает рабочую и долговременную память, не трогая ходы текущего диалога."""
+        self._working = {}
+        self.history.set_working(self._working)
+        self.long_term.clear()
 
     def checkpoint(self) -> None:
         """Отмечает текущую позицию активной ветки — от неё создаётся следующая ветка."""
@@ -247,7 +350,13 @@ class TabletopAgent:
         )
 
     def reset(self) -> None:
-        """Опустошает лог, память стратегии, файл истории и накопитель сессии (команда /clear)."""
+        """Опустошает краткосрочную и рабочую память, но не долговременную (команда /clear).
+
+        Краткосрочная память — лог ходов, рабочая — цель и ограничения задачи и память стратегии:
+        всё это принадлежит текущему диалогу. Долговременная память — сведения о пользователе
+        между сессиями: она остаётся и в памяти, и в своём файле, снять её можно только явно
+        командой `/memory forget all`.
+        """
         self._turns.clear()
         self._summary = None
         self._summary_covers = 0
@@ -256,6 +365,8 @@ class TabletopAgent:
         self._facts_pending = []
         self._facts_covered = 0
         self._branches.reset()
+        self._working = {}
+        self._last_routing = ()
         self._last_compression = None
         self._last_facts = None
         self.history.clear()
@@ -274,6 +385,9 @@ class TabletopAgent:
         self._log_covered = 0
         self._facts = dict(self.history.facts)
         self._facts_pending = []
+        # Рабочая память живёт в конверте истории: цель и ограничения задачи переживают
+        # перезапуск, но не /clear. Долговременную память хранилище читает само.
+        self._working = dict(self.history.working)
         dialogues = self.history.dialogues
         tail_records = max(0, len(dialogues) - self._summary_covers)
         for item in dialogues[-tail_records:] if tail_records else []:
@@ -285,6 +399,38 @@ class TabletopAgent:
         self._facts_covered = len(self._turns) // 2
 
     # --- внутреннее -----------------------------------------------------------------------
+
+    def _route_memory(self, message: str) -> None:
+        """Раскладывает реплику пользователя по слоям памяти правилами маршрутизации.
+
+        Правило работает по оборотам реплики и не обращается к модели: маршрут детерминирован,
+        не тратит токены и не зависит от ответа. Ответ модели источником записей не бывает —
+        иначе в память попадали бы догадки модели, а не слова пользователя. Реплика без
+        распознанных оборотов остаётся только в краткосрочном слое как ход диалога.
+        """
+        records = memory_layers.route(message)
+        self._last_routing = records
+        working_changed = False
+        for record in records:
+            if record.layer == memory_layers.WORKING:
+                self._working[record.key] = record.value
+                working_changed = True
+            else:
+                self.long_term.remember(record.key, record.value, record.category)
+        if working_changed:
+            self.history.set_working(self._working)
+
+    def _store_working(self, key: str, value: str) -> None:
+        self._working[key] = memory_layers.clip_value(value)
+        self.history.set_working(self._working)
+
+    def _next_note_key(self) -> str:
+        """Свободный ключ для заметки: заметки не вытесняют друг друга, как ключи правил."""
+        existing = {record.key for record in self.long_term.records()}
+        index = 1
+        while f"{memory_layers.CATEGORY_NOTE} {index}" in existing:
+            index += 1
+        return f"{memory_layers.CATEGORY_NOTE} {index}"
 
     def _signal(
         self,
@@ -315,18 +461,35 @@ class TabletopAgent:
         return self._shrink_to_ceiling(user_prompt)
 
     def _build_messages(self, user_prompt: str, skip: int = 0) -> List[Dict[str, str]]:
-        """Сборка запроса: system настроек, память стратегии, выбранные ходы, новый user-ход."""
+        """Сборка запроса: system настроек, память слоёв, память стратегии, ходы, новый user-ход."""
         messages: List[Dict[str, str]] = [
             {"role": "system", "content": prompts.build_system_message(self.config.format)}
         ]
         memory = self._memory_message()
         if memory is not None:
             messages.append(memory)
+        strategy_memory = self._strategy_memory_message()
+        if strategy_memory is not None:
+            messages.append(strategy_memory)
         messages.extend(self._view_turns(skip))
         messages.append({"role": "user", "content": user_prompt})
         return messages
 
     def _memory_message(self) -> Optional[Dict[str, str]]:
+        """Системное сообщение слоёв памяти: долговременная выше рабочей; пустые слои — None.
+
+        Слои идут выше ходов диалога и выше памяти стратегии: свежая реплика пользователя
+        остаётся последним сообщением, а инструкция ассета ставит её выше записей памяти.
+        """
+        records = memory_layers.records_from_block(
+            memory_layers.WORKING, self._working
+        ) + self.long_term.records()
+        content = memory_layers.memory_message(records)
+        if content is None:
+            return None
+        return {"role": "system", "content": content}
+
+    def _strategy_memory_message(self) -> Optional[Dict[str, str]]:
         """Сообщение памяти активной стратегии: блок фактов или резюме (у веток и окна нет)."""
         strategy = self.config.strategy
         if strategy is ContextStrategy.STICKY_FACTS:

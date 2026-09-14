@@ -10,7 +10,9 @@ import pytest
 from core import config, context_compressor, context_strategies
 from core.answer_settings import AnswerFormat, AnswerSettings, ContextStrategy
 from core.api_client import AnswerMeta, APIError
+from core import tabletop_agent
 from core.history_manager import HistoryManager
+from core.long_term_memory import LongTermMemory
 from ui import branches_screen, keyboard, settings_screen, tui_app
 from ui.tui_app import TabletopAITUI
 
@@ -98,6 +100,14 @@ class FakeClient:
 def _noop_context():
     """Замена keyboard.raw_mode() там, где настоящего терминала нет."""
     yield
+
+
+@pytest.fixture(autouse=True)
+def isolated_long_term_memory(tmp_path, monkeypatch):
+    """Долговременная память приложения всегда указывает на временный файл."""
+    monkeypatch.setattr(
+        tabletop_agent, "LongTermMemory", lambda: LongTermMemory(tmp_path / "memory.json")
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -354,6 +364,7 @@ def test_clear_empties_history_and_file(make_app, recording_console, history, hi
         "summary": None,
         "summary_covers": 0,
         "facts": {},
+        "working": {},
         "dialogues": [],
     }
     assert recording_console.contains("История диалога очищена.")
@@ -574,6 +585,7 @@ def test_commands_panel_enter_runs_selected_clear(
         "summary": None,
         "summary_covers": 0,
         "facts": {},
+        "working": {},
         "dialogues": [],
     }
     assert client.calls == []  # панель не делает запросов к модели
@@ -1056,3 +1068,152 @@ def test_switching_strategy_shows_in_the_status_bar(make_app, recording_console)
     app.settings = app.settings.with_context_strategy(ContextStrategy.BRANCHING)
     app.run()
     assert recording_console.contains("Стратегия: ветки")
+
+
+# --- день 11: /memory и журнальные строки слоёв ----------------------------------------
+
+
+def test_memory_command_reports_three_layers_without_requests(make_app, recording_console):
+    """Отчёт строится из снимка агента: слои, хранилища и правила маршрута — без запросов."""
+    client = FakeClient(["Ответ"])
+    make_app(["/memory", "/exit"], client).run()
+
+    assert client.calls == []
+    assert recording_console.contains("Память агента")
+    assert recording_console.contains("Краткосрочная")
+    assert recording_console.contains("Рабочая")
+    assert recording_console.contains("Долговременная")
+    assert recording_console.contains("history.json")
+    assert recording_console.contains("memory.json")
+    assert recording_console.contains("Правила маршрутизации")
+
+
+def test_memory_command_shows_records_of_each_layer(make_app, recording_console):
+    app = make_app(
+        ["Я опытный игрок, у меня больше 300 партий. Собери партию на вечер.", "/memory", "/exit"],
+        FakeClient(),
+    )
+    app.run()
+
+    assert recording_console.contains("профиль · опыт")
+    assert recording_console.contains("цель · цель")
+
+
+def test_memory_command_after_clear_keeps_the_long_term_layer(make_app, recording_console):
+    app = make_app(
+        ["Я опытный игрок, у меня больше 300 партий.", "/clear", "/memory", "/exit"],
+        FakeClient(),
+    )
+    app.run()
+
+    assert recording_console.contains("профиль · опыт")
+    assert recording_console.contains("Краткосрочная: 0 обменов диалога")
+
+
+def test_memory_goal_subcommand_writes_the_working_layer(make_app, recording_console):
+    app = make_app(["/memory goal Подобрать игру на вечер", "/exit"], FakeClient())
+    app.run()
+
+    assert recording_console.contains("Рабочая память: цель")
+    assert app.agent.working_memory["цель"] == "Подобрать игру на вечер"
+
+
+def test_memory_remember_subcommand_writes_the_long_term_layer(make_app, recording_console):
+    app = make_app(["/memory remember Я не люблю игры с таймером", "/exit"], FakeClient())
+    app.run()
+
+    assert recording_console.contains("Долговременная память: профиль · предпочтения")
+    assert app.agent.long_term_memory.get("предпочтения") is not None
+
+
+def test_memory_forget_subcommand_removes_one_record(make_app, recording_console):
+    app = make_app(
+        ["Я опытный игрок, у меня больше 300 партий.", "/memory forget опыт", "/exit"],
+        FakeClient(),
+    )
+    app.run()
+
+    assert recording_console.contains("Удалено из долговременной памяти: опыт")
+    assert app.agent.long_term_memory.records() == ()
+
+
+def test_memory_forget_unknown_key_is_reported(make_app, recording_console):
+    make_app(["/memory forget нет такого", "/exit"], FakeClient()).run()
+
+    assert recording_console.contains("Записи «нет такого» нет ни в одном слое")
+
+
+def test_memory_forget_all_keeps_the_dialogue_but_wipes_the_layers(make_app, recording_console):
+    app = make_app(
+        ["Я опытный игрок, у меня больше 300 партий. Собери партию на вечер.",
+         "/memory forget all", "/exit"],
+        FakeClient(),
+    )
+    app.run()
+
+    assert recording_console.contains("Краткосрочная память")
+    assert app.agent.long_term_memory.records() == ()
+    assert app.agent.working_memory == {}
+    assert app.agent.memory_report().short_term_exchanges == 1
+
+
+def test_unknown_memory_subcommand_shows_the_hint(make_app, recording_console):
+    make_app(["/memory что-то", "/exit"], FakeClient()).run()
+
+    assert recording_console.contains("/memory goal")
+
+
+def test_routing_line_names_the_layers_that_got_records(make_app, recording_console):
+    make_app(["Я опытный игрок, у меня больше 300 партий. Собери партию на вечер.", "/exit"], FakeClient()).run()
+
+    assert recording_console.contains("долговременная (профиль: опыт)")
+    assert recording_console.contains("рабочая (цель)")
+
+
+def test_routing_line_is_absent_without_matched_turns(make_app, recording_console):
+    make_app(["Какие правила у Каркассона?", "/exit"], FakeClient()).run()
+
+    assert not recording_console.contains("Память:")
+
+
+def test_clear_says_the_long_term_layer_survived(make_app, recording_console):
+    make_app(["/clear", "/exit"], FakeClient()).run()
+
+    assert recording_console.contains("долговременная память сохранена")
+
+
+def test_memory_is_a_known_command_and_autocomplete_sees_it(make_app, recording_console):
+    make_app(["/exit"], FakeClient()).run()  # список команд — источник и панели, и Tab
+
+    assert "/memory" in tui_app.COMMANDS
+
+
+def test_plural_ru_picks_the_right_form():
+    """Отчёт печатает числа словами: «1 обмен», «2 обмена», «5 обменов» — без «1 обменов»."""
+    assert tui_app.plural_ru(0, "обмен", "обмена", "обменов") == "0 обменов"
+    assert tui_app.plural_ru(1, "обмен", "обмена", "обменов") == "1 обмен"
+    assert tui_app.plural_ru(2, "обмен", "обмена", "обменов") == "2 обмена"
+    assert tui_app.plural_ru(4, "обмен", "обмена", "обменов") == "4 обмена"
+    assert tui_app.plural_ru(5, "обмен", "обмена", "обменов") == "5 обменов"
+    assert tui_app.plural_ru(11, "обмен", "обмена", "обменов") == "11 обменов"
+    assert tui_app.plural_ru(21, "обмен", "обмена", "обменов") == "21 обмен"
+    assert tui_app.plural_ru(22, "запись", "записи", "записей") == "22 записи"
+    assert tui_app.plural_ru(112, "запись", "записи", "записей") == "112 записей"
+
+
+def test_memory_report_uses_correct_plural_forms(make_app, recording_console):
+    app = make_app(
+        [
+            "Я опытный игрок, у меня больше 300 партий. Собери партию на вечер без таймера.",
+            "/memory",
+            "/exit",
+        ],
+        FakeClient(),
+    )
+    app.run()
+
+    assert recording_console.contains("Краткосрочная: 1 обмен диалога")
+    assert recording_console.contains("Долговременная: 1 запись")
+    assert recording_console.contains("Рабочая: 2 записи")
+    assert not recording_console.contains("1 обменов")
+    assert not recording_console.contains("1 записей")

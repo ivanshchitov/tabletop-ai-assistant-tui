@@ -1,9 +1,11 @@
-"""Сохранение и загрузка истории диалогов (с метриками, сжатым резюме и блоком фактов).
+"""Сохранение и загрузка истории диалогов (с метриками, памятью стратегии и рабочей памятью).
 
-Файл — конверт: {"summary", "summary_covers", "facts", "dialogues"}. Резюме и факты — производная
-память агента (дайджест ведущих обменов и словарь важных сведений диалога); исходные записи
-хранятся полностью, вытеснения нет. Файл прежнего вида (голый список записей) читается как
-конверт без резюме и фактов.
+Файл — конверт: {"summary", "summary_covers", "facts", "working", "dialogues"}. Он держит
+краткосрочный слой памяти агента (обмены дословно) и рабочую память задачи (блок working: цель и
+ограничения); резюме и факты — производная память активной стратегии. Долговременная память
+пользователя живёт в отдельном файле (см. core/long_term_memory.py) и конверта не касается.
+Исходные записи хранятся полностью, вытеснения нет. Файл прежнего вида (голый список записей)
+читается как конверт без резюме, фактов и рабочей памяти.
 """
 
 import json
@@ -14,8 +16,8 @@ from . import config
 from .usage import SessionUsage, sum_usage
 
 
-def _read_facts(raw: Any) -> Dict[str, str]:
-    """Разбор блока фактов из конверта: только плоские пары «строка — строка»."""
+def _read_block(raw: Any) -> Dict[str, str]:
+    """Разбор плоского блока конверта (факты, рабочая память): пары «строка — строка»."""
     if not isinstance(raw, dict):
         return {}
     return {
@@ -31,6 +33,7 @@ class HistoryManager:
         self.summary: Optional[str] = None
         self.summary_covers: int = 0
         self.facts: Dict[str, str] = {}
+        self.working: Dict[str, str] = {}
         self.dialogues: List[Dict[str, Any]] = self._load()
 
     def _load(self) -> List[Dict[str, Any]]:
@@ -51,7 +54,8 @@ class HistoryManager:
                 self.summary_covers = int(data.get("summary_covers", 0))
             except (TypeError, ValueError):
                 self.summary_covers = 0
-            self.facts = _read_facts(data.get("facts"))
+            self.facts = _read_block(data.get("facts"))
+            self.working = _read_block(data.get("working"))
             records = data.get("dialogues", [])
             return records if isinstance(records, list) else []
         return []
@@ -80,10 +84,16 @@ class HistoryManager:
         self.facts = dict(facts)
         self.save()
 
+    def set_working(self, working: Dict[str, str]) -> None:
+        """Обновляет блок рабочей памяти задачи (цель и ограничения); файл сразу переписывается."""
+        self.working = dict(working)
+        self.save()
+
     def clear(self) -> None:
         self.summary = None
         self.summary_covers = 0
         self.facts = {}
+        self.working = {}
         self.dialogues = []
         self.save()
 
@@ -95,6 +105,7 @@ class HistoryManager:
                         "summary": self.summary,
                         "summary_covers": self.summary_covers,
                         "facts": self.facts,
+                        "working": self.working,
                         "dialogues": self.dialogues,
                     },
                     f,

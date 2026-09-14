@@ -9,7 +9,9 @@ from core import context_strategies as strategies
 from core.usage import estimate_tokens
 from core.answer_settings import AnswerFormat, AnswerSettings, ContextStrategy
 from core.api_client import AnswerMeta, APIError
+from core import memory_layers
 from core.history_manager import HistoryManager
+from core.long_term_memory import LongTermMemory
 from core.tabletop_agent import TabletopAgent
 
 
@@ -61,13 +63,16 @@ class FakeAgentClient:
         )
 @pytest.fixture(autouse=True)
 def isolated_history(tmp_path, monkeypatch):
-    """Дефолтный HistoryManager агента всегда указывает на временный файл.
+    """Хранилища слоёв памяти агента по умолчанию указывают на временные файлы.
 
     Агент владеет памятью и восстанавливает её сам при создании: без патча каждый
-    тест читал бы реальный history.json пользователя.
+    тест читал бы реальные history.json и memory.json пользователя.
     """
     monkeypatch.setattr(
         tabletop_agent, "HistoryManager", lambda: HistoryManager(tmp_path / "history.json")
+    )
+    monkeypatch.setattr(
+        tabletop_agent, "LongTermMemory", lambda: LongTermMemory(tmp_path / "memory.json")
     )
 
 
@@ -264,6 +269,7 @@ def test_reset_clears_stack_and_file():
         "summary": None,
         "summary_covers": 0,
         "facts": {},
+        "working": {},
         "dialogues": [],
     }
     assert agent.history.dialogues == []
@@ -810,9 +816,10 @@ def test_facts_strategy_updates_the_block_before_the_question():
     assert len(client.facts_prompts) == 1
     assert "Помоги собрать ТЗ по Каркассону" in client.facts_prompts[0]
     messages = client.question_messages[0]
-    assert roles(messages) == ["system", "system", "user"]
-    assert "цель: собрать ТЗ по Каркассону" in messages[1]["content"]
-    assert "Помоги собрать ТЗ по Каркассону" in messages[2]["content"]
+    assert roles(messages) == ["system", "system", "system", "user"]
+    assert "Рабочая память" in messages[1]["content"]  # слои памяти выше блока фактов
+    assert "цель: собрать ТЗ по Каркассону" in messages[2]["content"]
+    assert "Помоги собрать ТЗ по Каркассону" in messages[3]["content"]
 
 
 def test_facts_block_replaces_the_value_of_a_known_key():
@@ -1112,7 +1119,11 @@ def test_switching_to_facts_mid_dialog_feeds_the_earlier_messages():
     assert "Собираем ТЗ" in extractor_prompt
     assert "до 2500 рублей" in extractor_prompt  # факт из обмена, сделанного на другой стратегии
     assert "6 страниц A5" in extractor_prompt
-    block = client.question_messages[-1][1]["content"]
+    block = next(
+        message["content"]
+        for message in client.question_messages[-1]
+        if message["role"] == "system" and "Известные факты" in message["content"]
+    )
     assert "бюджет: до 2500 рублей" in block
 
 
@@ -1172,3 +1183,190 @@ def test_restored_messages_are_not_fed_to_the_extractor(history_path):
     assert "цель: ТЗ" in question["messages"][1]["content"]  # блок из файла
     # последние сообщения лога (в т.ч. восстановленные) в запросе законно остаются: это окно
     assert "Вопрос до перезапуска" in "".join(m["content"] for m in question["messages"])
+
+
+# --- день 11: слои памяти ---------------------------------------------------------------
+
+
+def memory_messages(client, call_index=0) -> List[str]:
+    return [
+        message["content"]
+        for message in client.calls[call_index]["messages"]
+        if message["role"] == "system"
+    ]
+
+
+def test_experience_goes_to_the_long_term_file_not_the_dialogue():
+    agent, client = make_agent()
+    agent.ask("Я опытный игрок, у меня больше 300 партий в Каркассон.")
+
+    assert agent.long_term.get("опыт") is not None
+    assert "опыт" not in agent.history.working
+    assert agent.history.facts == {}
+
+
+def test_goal_goes_to_the_working_block_of_the_history_envelope():
+    agent, client = make_agent()
+    agent.ask("Собери партию на вечер, не предлагай филлеры.")
+
+    assert set(agent.history.working) == {"цель", "ограничения"}
+    assert agent.long_term.records() == ()
+
+
+def test_routing_makes_no_api_calls():
+    agent, client = make_agent()
+    agent.ask("Собери партию на вечер.")
+
+    assert len(client.calls) == 1  # только сам вопрос, никаких запросов извлечения памяти
+
+
+def test_clue_less_question_writes_nothing_to_the_layers():
+    agent, client = make_agent()
+    agent.ask("Какие правила у Каркассона?")
+
+    assert agent.history.working == {}
+    assert agent.long_term.records() == ()
+    assert agent.last_routing == ()
+
+
+def test_layers_go_into_the_request_above_the_dialogue_turns():
+    agent, client = make_agent(answers=["Ответ 1", "Ответ 2"])
+    agent.ask("Я опытный игрок, у меня больше 300 партий.")
+    agent.ask("Собери партию на вечер.")
+
+    messages = client.calls[1]["messages"]
+    memory = [message["content"] for message in messages if message["role"] == "system"][1]
+    assert memory.index("опыт") < memory.index("цель")
+    assert messages[-1]["role"] == "user"
+    assert messages.index({"role": "system", "content": memory}) < len(messages) - 1
+
+
+def test_record_of_the_current_message_is_visible_in_the_same_request():
+    agent, client = make_agent()
+    agent.ask("Собери партию на вечер.")
+
+    assert "цель" in "".join(memory_messages(client))
+
+
+def test_no_memory_message_while_the_layers_are_empty():
+    agent, client = make_agent()
+    agent.ask("Какие правила у Каркассона?")
+
+    roles = [message["role"] for message in client.calls[0]["messages"]]
+    assert roles == ["system", "user"]
+
+
+def test_layers_are_not_trimmed_by_the_token_ceiling():
+    settings = AnswerSettings().with_max_session_tokens(5000)
+    agent, client = make_agent(
+        settings=settings,
+        answers=["Ответ по умолчанию"],
+    )
+    agent.settings = settings.with_max_words(1000)
+    agent.ask("Собери партию на вечер, не предлагай филлеры.")
+
+    memory = memory_messages(client)[1]
+    assert "цель" in memory and "ограничения" in memory
+
+
+def test_reset_keeps_the_long_term_layer_and_wipes_the_working_one():
+    agent, client = make_agent()
+    agent.ask("Я опытный игрок, у меня больше 300 партий. Собери партию на вечер.")
+
+    agent.reset()
+
+    assert agent.history.working == {}
+    assert agent.long_term.get("опыт") is not None
+    assert agent.memory_report().short_term_exchanges == 0
+    assert agent.memory_report().working == ()
+
+
+def test_restore_puts_each_layer_back_from_its_own_store():
+    agent, client = make_agent(answers=["Ответ 1", "Ответ 2"])
+    agent.ask("Я опытный игрок, у меня больше 300 партий. Собери партию на вечер.")
+
+    restored, restored_client = make_agent(history=agent.history, long_term=agent.long_term)
+    assert restored.memory_report().short_term_exchanges == 1  # хвост диалога из конверта
+    restored.ask("Что посоветуешь?")
+
+    memory = [message["content"] for message in restored_client.calls[0]["messages"] if message["role"] == "system"][1]
+    assert "опыт" in memory  # долговременный слой восстановлен из своего файла
+    assert "цель" in memory  # рабочая память восстановлена из конверта истории
+
+
+def test_memory_report_describes_every_layer_without_api_calls():
+    agent, client = make_agent()
+    agent.ask("Я опытный игрок, у меня больше 300 партий. Собери партию на вечер.")
+    calls_before = len(client.calls)
+
+    report = agent.memory_report()
+
+    assert len(client.calls) == calls_before
+    assert report.short_term_exchanges == 1
+    assert {record.key for record in report.working} == {"цель"}
+    assert {record.key for record in report.long_term} == {"опыт"}
+    assert report.history_store.endswith("history.json")
+    assert report.long_term_store.endswith("memory.json")
+    assert report.rules == memory_layers.describe_rules()
+
+
+def test_remember_goal_puts_the_task_into_the_working_layer():
+    agent, client = make_agent()
+    agent.remember_goal("Подобрать игру на вечер для четырёх")
+
+    assert agent.history.working["цель"] == "Подобрать игру на вечер для четырёх"
+    assert agent.memory_report().working[0].value == "Подобрать игру на вечер для четырёх"
+
+
+def test_remember_goal_replaces_the_previous_goal():
+    agent, client = make_agent()
+    agent.remember_goal("Первая цель")
+    agent.remember_goal("Вторая цель")
+
+    assert agent.history.working == {"цель": "Вторая цель"}
+
+
+def test_remember_uses_the_rule_key_and_category_when_recognized():
+    agent, client = make_agent()
+    agent.remember("Я не люблю игры с таймером.")
+
+    records = agent.memory_report().long_term
+    assert [(record.key, record.category) for record in records] == [
+        ("предпочтения", memory_layers.CATEGORY_PROFILE)
+    ]
+
+
+def test_remember_falls_back_to_a_note_with_its_own_key():
+    agent, client = make_agent()
+    agent.remember("Обсудили вчера филлер про пингвинов.")
+    agent.remember("Ещё одна заметка без оборотов.")
+
+    records = agent.memory_report().long_term
+    assert [record.category for record in records] == [
+        memory_layers.CATEGORY_NOTE,
+        memory_layers.CATEGORY_NOTE,
+    ]
+    assert len({record.key for record in records}) == 2
+
+
+def test_forget_reports_the_layer_that_held_the_record():
+    agent, client = make_agent()
+    agent.ask("Я опытный игрок, у меня больше 300 партий. Собери партию на вечер.")
+
+    assert agent.forget("опыт") == memory_layers.LONG_TERM
+    assert agent.forget("цель") == memory_layers.WORKING
+    assert agent.forget("нет такого") is None
+    assert agent.long_term.records() == ()
+    assert agent.history.working == {}
+
+
+def test_forget_all_wipes_both_layers_but_keeps_the_dialogue():
+    agent, client = make_agent()
+    agent.ask("Я опытный игрок, у меня больше 300 партий. Собери партию на вечер.")
+
+    agent.forget_all()
+
+    report = agent.memory_report()
+    assert report.working == ()
+    assert report.long_term == ()
+    assert report.short_term_exchanges == 1

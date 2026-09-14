@@ -15,7 +15,7 @@ from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
 
-from core import config
+from core import config, memory_layers
 from core.answer_settings import AnswerFormat, AnswerSettings, ContextStrategy
 from core.api_client import (
     API_KEY_CHARSET_ERROR,
@@ -60,6 +60,29 @@ STRATEGY_LABELS = {
     ContextStrategy.STICKY_FACTS: "факты",
     ContextStrategy.BRANCHING: "ветки",
 }
+
+# Названия слоёв в родительном падеже — для сообщений об удалении записи.
+MEMORY_LAYER_GENITIVE = {
+    memory_layers.SHORT_TERM: "краткосрочной",
+    memory_layers.WORKING: "рабочей",
+    memory_layers.LONG_TERM: "долговременной",
+}
+
+
+def plural_ru(count: int, one: str, few: str, many: str) -> str:
+    """«1 обмен», «2 обмена», «5 обменов»: число отчёта вместе с верной формой слова.
+
+    Русское согласование: единственное число — только при остатке 1, кроме 11; форма «двух-четырёх»
+    — при остатке 2..4, кроме 12..14; остальное — множественная. Числа в отчётах маленькие, но
+    «1 записей» в кадре демо выглядит неряшливо.
+    """
+    if count % 10 == 1 and count % 100 != 11:
+        word = one
+    elif count % 10 in (2, 3, 4) and count % 100 not in (12, 13, 14):
+        word = few
+    else:
+        word = many
+    return f"{count} {word}"
 
 
 class TabletopAITUI:
@@ -231,13 +254,19 @@ class TabletopAITUI:
             return True
         if command == "/clear":
             self.agent.reset()
-            self.console.print("[bold green]История диалога очищена.[/bold green]")
+            self.console.print(
+                "[bold green]История диалога очищена. Краткосрочная и рабочая память пусты, "
+                "долговременная память сохранена — её снимает /memory forget all.[/bold green]"
+            )
             return True
         if command == "/usage":
             self._print_usage_report()
             return True
         if command == "/context":
             self._print_context_report()
+            return True
+        if command == "/memory":
+            self._handle_memory(user_input)
             return True
         if command == "/branches":
             self._open_branches_screen()
@@ -452,6 +481,7 @@ class TabletopAITUI:
                 meta = self.agent.ask(question, on_phase=report_phase)
             except APIError as exc:
                 self.last_error = str(exc)
+                self._print_memory_line()
                 self._print_compression_line()
                 self._print_facts_line()
                 self.console.print(f"[bold red]{exc}[/bold red]")
@@ -459,6 +489,7 @@ class TabletopAITUI:
                 self.console.rule(style="dim")
                 return
 
+        self._print_memory_line()
         self._print_compression_line()
         self._print_facts_line()
         answer = meta.content
@@ -550,6 +581,119 @@ class TabletopAITUI:
             f"[dim]  Оценка запроса: ≈ {report.tokens_estimate} токенов из "
             f"{report.max_session_tokens}[/dim]"
         )
+
+    def _handle_memory(self, user_input: str) -> None:
+        """Команда /memory: без аргументов — отчёт по слоям, с аргументами — операция над слоем.
+
+        Аргументы у команды значимы (в отличие от прочих команд приложения): подкоманда явно
+        выбирает, в какой слой идёт запись. Все операции — методы агента, поэтому интерфейс
+        не пишет в хранилища сам.
+        """
+        parts = user_input.split(maxsplit=2)
+        if len(parts) == 1:
+            self._print_memory_report()
+            return
+        subcommand = parts[1]
+        argument = parts[2].strip() if len(parts) > 2 else ""
+        if subcommand == "goal" and argument:
+            self.agent.remember_goal(argument)
+            self.console.print(f"[dim]Рабочая память: цель — {argument}[/dim]")
+            return
+        if subcommand == "remember" and argument:
+            record = self.agent.remember(argument)
+            self.console.print(
+                f"[dim]Долговременная память: {record.category} · {record.key} — "
+                f"{record.value}[/dim]"
+            )
+            return
+        if subcommand == "forget" and argument:
+            self._forget_memory(argument)
+            return
+        self.console.print(
+            "[dim]Подкоманды: /memory goal <цель задачи> | /memory remember <сведение о вас> | "
+            "/memory forget <ключ> | /memory forget all[/dim]"
+        )
+
+    def _forget_memory(self, key: str) -> None:
+        if key == "all":
+            self.agent.forget_all()
+            self.console.print(
+                "[bold green]Рабочая и долговременная память очищены. Краткосрочная память — "
+                "ход текущего диалога — не тронута: её очищает /clear.[/bold green]"
+            )
+            return
+        layer = self.agent.forget(key)
+        if layer is None:
+            self.console.print(f"[dim]Записи «{key}» нет ни в одном слое.[/dim]")
+            return
+        self.console.print(
+            f"[dim]Удалено из {MEMORY_LAYER_GENITIVE[layer]} памяти: {key}[/dim]"
+        )
+
+    def _print_memory_report(self) -> None:
+        """Отчёт /memory: три слоя из снимка агента, без запросов к модели.
+
+        Интерфейс не знает, как слои устроены внутри: он печатает снимок агента — содержимое
+        слоёв, их хранилища, срок жизни и перечень правил маршрутизации.
+        """
+        report = self.agent.memory_report()
+        self.console.print("[bold cyan]Память агента (без обращения к модели):[/bold cyan]")
+        self.console.print(
+            f"[dim]  Краткосрочная: "
+            f"{plural_ru(report.short_term_exchanges, 'обмен', 'обмена', 'обменов')} диалога "
+            f"({memory_layers.LAYER_LIFETIME[memory_layers.SHORT_TERM]})[/dim]"
+        )
+        self.console.print(
+            f"[dim]    хранилище: {report.history_store} "
+            f"({memory_layers.LAYER_STORE_HINT[memory_layers.SHORT_TERM]})[/dim]"
+        )
+        self.console.print(
+            f"[dim]  Рабочая: "
+            f"{plural_ru(len(report.working), 'запись', 'записи', 'записей')} "
+            f"({memory_layers.LAYER_LIFETIME[memory_layers.WORKING]})[/dim]"
+        )
+        for record in report.working:
+            self.console.print(f"[dim]    {record.category} · {record.key}: {record.value}[/dim]")
+        self.console.print(
+            f"[dim]    хранилище: {report.history_store} "
+            f"({memory_layers.LAYER_STORE_HINT[memory_layers.WORKING]})[/dim]"
+        )
+        self.console.print(
+            f"[dim]  Долговременная: "
+            f"{plural_ru(len(report.long_term), 'запись', 'записи', 'записей')} "
+            f"({memory_layers.LAYER_LIFETIME[memory_layers.LONG_TERM]})[/dim]"
+        )
+        for record in report.long_term:
+            self.console.print(f"[dim]    {record.category} · {record.key}: {record.value}[/dim]")
+        self.console.print(
+            f"[dim]    хранилище: {report.long_term_store} "
+            f"({memory_layers.LAYER_STORE_HINT[memory_layers.LONG_TERM]})[/dim]"
+        )
+        self.console.print("[dim]  Правила маршрутизации (что и куда попадает):[/dim]")
+        for line in report.rules:
+            self.console.print(f"[dim]    {line}[/dim]")
+        self.console.print(
+            "[dim]  Управление: /memory goal <цель> | /memory remember <сведение> | "
+            "/memory forget <ключ|all>[/dim]"
+        )
+
+    def _print_memory_line(self) -> None:
+        """Строка о решении маршрута после ответа: какие слои получили запись из реплики.
+
+        Печатается, только когда правило сработало, — иначе журнал шумел бы на каждом вопросе.
+        В history.json строка не попадает, как и строки о сжатии и фактах.
+        """
+        records = self.agent.last_routing
+        if not records:
+            return
+        parts = []
+        for record in records:
+            label = memory_layers.LAYER_LABELS[record.layer]
+            if record.layer == memory_layers.LONG_TERM:
+                parts.append(f"{label} ({record.category}: {record.key})")
+            else:
+                parts.append(f"{label} ({record.key})")
+        self.console.print(f"[dim]Память: {', '.join(parts)}[/dim]")
 
     def _print_usage_meta(self, meta: AnswerMeta) -> None:
         cost = f"${meta.cost_usd:.6f}" if meta.cost_usd is not None else "неизвестно"
