@@ -220,6 +220,7 @@ __marimo__/
 # Tabletop AI Assistant
 history.json
 memory.json
+profile.json
 
 # Solve-challenge-task: screen recordings and README drafts
 videos/
