@@ -13,9 +13,10 @@ except ImportError:  # pragma: no cover - readline недоступен на Win
 from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
+from rich.markup import escape
 from rich.panel import Panel
 
-from core import config, memory_layers
+from core import config, memory_layers, user_profile
 from core.answer_settings import AnswerFormat, AnswerSettings, ContextStrategy
 from core.api_client import (
     API_KEY_CHARSET_ERROR,
@@ -67,6 +68,21 @@ MEMORY_LAYER_GENITIVE = {
     memory_layers.WORKING: "рабочей",
     memory_layers.LONG_TERM: "долговременной",
 }
+
+# Подсказка по подкомандам профиля — одна на все случаи: отчёт, ошибка аргумента и неизвестная
+# подкоманда печатают её, чтобы пользователь не гадал, что доступно.
+PROFILE_HINT = (
+    "Подкоманды: /profile setup — диалог настройки | /profile use <имя> — переключить профиль | "
+    "/profile forget <имя> — удалить профиль"
+)
+PROFILE_INTERVIEW_HEADER = (
+    "Настройка профиля: {questions}. Вопрос за вопросом, Enter — пропустить раздел, "
+    "Ctrl+C — отменить настройку."
+)
+PROFILE_INTERVIEW_CANCELLED = "Настройка профиля отменена — профиль не изменён."
+# Приглашение ввода ответа: без rich-разметки, как основное приглашение приложения, — иначе
+# readline неверно считает ширину строки и портит её при возврате каретки.
+PROFILE_ANSWER_PROMPT = "> "
 
 
 def plural_ru(count: int, one: str, few: str, many: str) -> str:
@@ -256,7 +272,8 @@ class TabletopAITUI:
             self.agent.reset()
             self.console.print(
                 "[bold green]История диалога очищена. Краткосрочная и рабочая память пусты, "
-                "долговременная память сохранена — её снимает /memory forget all.[/bold green]"
+                "долговременная память и профиль пользователя сохранены — память снимает "
+                "/memory forget all, профиль — /profile forget <имя>.[/bold green]"
             )
             return True
         if command == "/usage":
@@ -267,6 +284,9 @@ class TabletopAITUI:
             return True
         if command == "/memory":
             self._handle_memory(user_input)
+            return True
+        if command == "/profile":
+            self._handle_profile(user_input)
             return True
         if command == "/branches":
             self._open_branches_screen()
@@ -603,7 +623,7 @@ class TabletopAITUI:
             record = self.agent.remember(argument)
             self.console.print(
                 f"[dim]Долговременная память: {record.category} · {record.key} — "
-                f"{record.value}[/dim]"
+                f"{escape(record.value)}[/dim]"
             )
             return
         if subcommand == "forget" and argument:
@@ -677,6 +697,118 @@ class TabletopAITUI:
             "/memory forget <ключ|all>[/dim]"
         )
 
+    def _handle_profile(self, user_input: str) -> None:
+        """Команда /profile: без аргументов — отчёт, с аргументами — настройка или операция.
+
+        Аргументы у команды значимы, как у `/memory`: подкоманда выбирает, что делать с профилем.
+        Все операции профиля — методы агента, поэтому интерфейс не пишет в файл профилей сам.
+        """
+        parts = user_input.split(maxsplit=2)
+        if len(parts) == 1:
+            self._print_profile_report()
+            return
+        subcommand = parts[1]
+        argument = parts[2].strip() if len(parts) > 2 else ""
+        if subcommand == "setup":
+            self._run_profile_interview()
+            return
+        if subcommand == "use" and argument:
+            self._use_profile(argument)
+            return
+        if subcommand == "forget" and argument:
+            self._forget_profile(argument)
+            return
+        self.console.print(f"[dim]{PROFILE_HINT}[/dim]")
+
+    def _run_profile_interview(self) -> None:
+        """Диалог настройки профиля: вопросы по одному, ответ — строкой с терминала.
+
+        Вопросы печатает приложение, а ответы читаются `sys.stdin.readline` — как ручной ввод
+        API-ключа: readline перехватывает SIGINT, поэтому с обычным `input()` Ctrl+C не поднял бы
+        `KeyboardInterrupt` и отмена настройки не сработала бы. Профиль собирает агент, а строку о
+        разделе интерфейс печатает по тому значению, которое уходит в файл.
+        """
+        state = user_profile.InterviewState()
+        questions = plural_ru(state.total, "вопрос", "вопроса", "вопросов")
+        self.console.print(
+            f"[bold cyan]{PROFILE_INTERVIEW_HEADER.format(questions=questions)}[/bold cyan]"
+        )
+        try:
+            while not state.finished:
+                self.console.print(
+                    f"[bold]Вопрос {state.index} из {state.total}. {state.question.prompt}[/bold]"
+                )
+                answer = self._read_profile_answer()
+                state = state.answer(answer)
+                value = user_profile.clip_value(answer)
+                label = user_profile.FIELD_LABELS[state.last_field]
+                self.console.print(
+                    f"[dim]Профиль: {label} — {escape(value) or 'без изменений'}[/dim]"
+                )
+        except (KeyboardInterrupt, EOFError):
+            self.console.print()
+            self.console.print(f"[bold yellow]{PROFILE_INTERVIEW_CANCELLED}[/bold yellow]")
+            return
+        profile = self.agent.setup_profile(state)
+        store = self.agent.profile_report().profile_store
+        self.console.print(
+            f"[bold green]Профиль «{escape(profile.name)}» сохранён и активен ({store}). "
+            "Уходит системным сообщением в каждый запрос.[/bold green]"
+        )
+
+    def _read_profile_answer(self) -> str:
+        """Читает ответ диалога настройки строкой без readline — как ручной ввод API-ключа."""
+        self.console.print(PROFILE_ANSWER_PROMPT, end="")
+        line = sys.stdin.readline()
+        if line == "":
+            raise EOFError
+        return line.strip()
+
+    def _use_profile(self, name: str) -> None:
+        if self.agent.use_profile(name) is None:
+            self.console.print(
+                f"[dim]Профиля «{escape(name)}» нет — профиль заводит настройка: /profile setup.[/dim]"
+            )
+            return
+        self.console.print(f"[dim]Профиль «{escape(name)}» теперь активен.[/dim]")
+
+    def _forget_profile(self, name: str) -> None:
+        if not self.agent.forget_profile(name):
+            self.console.print(f"[dim]Профиля «{escape(name)}» нет.[/dim]")
+            return
+        self.console.print(f"[dim]Профиль «{escape(name)}» удалён.[/dim]")
+        if not self.agent.profile_report().active_name:
+            self.console.print(
+                "[dim]Активного профиля нет — запросы уходят без персонализации.[/dim]"
+            )
+
+    def _print_profile_report(self) -> None:
+        """Отчёт /profile: персонализация из снимка агента, без запросов к модели.
+
+        Интерфейс не знает, как устроен файл профилей: он печатает снимок — активный профиль с
+        заполненными разделами, имена всех профилей файла, путь файла и срок жизни профиля.
+        """
+        report = self.agent.profile_report()
+        self.console.print("[bold cyan]Профиль пользователя (без обращения к модели):[/bold cyan]")
+        if report.active_name:
+            self.console.print(f"[dim]  Активный профиль: {escape(report.active_name)}[/dim]")
+            for label, value in report.sections:
+                self.console.print(f"[dim]    {label}: {escape(value)}[/dim]")
+        else:
+            self.console.print(
+                "[dim]  Активного профиля нет — настройте его командой /profile setup.[/dim]"
+            )
+        names = escape(", ".join(report.names)) if report.names else "нет"
+        self.console.print(f"[dim]  Профили файла: {names}[/dim]")
+        self.console.print(
+            f"[dim]    хранилище: {report.profile_store} "
+            "(живёт между сессиями, /clear его не трогает)[/dim]"
+        )
+        self.console.print(
+            "[dim]  В запрос: непустой профиль уходит системным сообщением в каждый вопрос.[/dim]"
+        )
+        self.console.print(f"[dim]  {PROFILE_HINT}[/dim]")
+
     def _print_memory_line(self) -> None:
         """Строка о решении маршрута после ответа: какие слои получили запись из реплики.
 
@@ -745,8 +877,13 @@ class TabletopAITUI:
         commands_hint = ", ".join(STATUS_COMMANDS)
         session = self.agent.session_usage
         session_cost = f"${session.cost_usd:.4f}" if session.cost_usd is not None else "неизвестно"
+        # Профиль печатается, только когда он непуст: пустой профиль в запрос не уходит, и строка
+        # о нём говорила бы о персонализации, которой нет. Раскладка статус-бара без профиля
+        # поэтому остаётся прежней.
+        profile = self.agent.profile_report()
+        profile_part = f"Профиль: {escape(profile.active_name)}  |  " if profile.sections else ""
         self.console.print(
-            f"[dim]Статус: Готов ✅  |  Модель: {self.model}  |  Формат: {FORMAT_LABELS[self.settings.format]}  |  "
+            f"[dim]Статус: Готов ✅  |  Модель: {self.model}  |  {profile_part}Формат: {FORMAT_LABELS[self.settings.format]}  |  "
             f"Стратегия: {STRATEGY_LABELS[self.settings.context_strategy]}  |  "
             f"Объём: {self.settings.max_words} слов  |  Лимит списка: {self.settings.list_limit}  |  "
             f"Температура: {self.settings.temperature:.1f}  |  "

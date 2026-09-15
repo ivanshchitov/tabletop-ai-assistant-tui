@@ -13,6 +13,7 @@ from core.api_client import AnswerMeta, APIError
 from core import tabletop_agent
 from core.history_manager import HistoryManager
 from core.long_term_memory import LongTermMemory
+from core.user_profile import ProfileStore
 from ui import branches_screen, keyboard, settings_screen, tui_app
 from ui.tui_app import TabletopAITUI
 
@@ -107,6 +108,9 @@ def isolated_long_term_memory(tmp_path, monkeypatch):
     """Долговременная память приложения всегда указывает на временный файл."""
     monkeypatch.setattr(
         tabletop_agent, "LongTermMemory", lambda: LongTermMemory(tmp_path / "memory.json")
+    )
+    monkeypatch.setattr(
+        tabletop_agent, "ProfileStore", lambda: ProfileStore(tmp_path / "profile.json")
     )
 
 
@@ -1176,10 +1180,13 @@ def test_routing_line_is_absent_without_matched_turns(make_app, recording_consol
     assert not recording_console.contains("Память:")
 
 
-def test_clear_says_the_long_term_layer_survived(make_app, recording_console):
+def test_clear_says_what_survived_and_how_to_remove_it(make_app, recording_console):
+    """Сообщение /clear перечисляет, что осталось: память снимает /memory, профиль — /profile."""
     make_app(["/clear", "/exit"], FakeClient()).run()
 
-    assert recording_console.contains("долговременная память сохранена")
+    assert recording_console.contains("долговременная память и профиль пользователя сохранены")
+    assert recording_console.contains("/memory forget all")
+    assert recording_console.contains("/profile forget")
 
 
 def test_memory_is_a_known_command_and_autocomplete_sees_it(make_app, recording_console):
@@ -1217,3 +1224,167 @@ def test_memory_report_uses_correct_plural_forms(make_app, recording_console):
     assert recording_console.contains("Рабочая: 2 записи")
     assert not recording_console.contains("1 обменов")
     assert not recording_console.contains("1 записей")
+
+
+# --- день 12: /profile и диалог настройки -----------------------------------------------
+
+
+def script_interview(monkeypatch, answers, interrupt_after: Optional[int] = None):
+    """Ответы диалога настройки читаются из sys.stdin.readline — как ручной ввод ключа."""
+    reader = iter(answers)
+    state = {"reads": 0}
+
+    class FakeStdin:
+        def readline(self):
+            if interrupt_after is not None and state["reads"] >= interrupt_after:
+                raise KeyboardInterrupt
+            state["reads"] += 1
+            try:
+                return next(reader) + "\n"
+            except StopIteration:
+                raise EOFError  # исчерпание ввода = Ctrl+D
+
+    monkeypatch.setattr("sys.stdin", FakeStdin())
+
+
+NOVICE_ANSWERS = ["новичок", "коротко и просто", "только игры до часа", "новичок", "евро"]
+
+
+def test_profile_command_reports_no_active_profile(make_app, recording_console):
+    client = FakeClient(["Ответ"])
+    make_app(["/profile", "/exit"], client).run()
+
+    assert client.calls == []
+    assert recording_console.contains("Профиль пользователя")
+    assert recording_console.contains("Активного профиля нет")
+    assert recording_console.contains("profile.json")
+    assert recording_console.contains("/profile setup")
+
+
+def test_profile_setup_asks_five_questions_in_order(make_app, recording_console, monkeypatch):
+    script_interview(monkeypatch, NOVICE_ANSWERS)
+    make_app(["/profile setup", "/exit"], FakeClient(["Ответ"])).run()
+
+    assert recording_console.contains("Вопрос 1 из 5. Как вас зовут?")
+    assert recording_console.contains(
+        "Вопрос 2 из 5. Как отвечать: коротко и просто или развёрнуто?"
+    )
+    assert recording_console.contains("Вопрос 5 из 5. Ваши любимые жанры и механики")
+    assert recording_console.contains("Профиль: Стиль — коротко и просто")
+    assert recording_console.contains("Профиль «новичок» сохранён и активен")
+
+
+def test_profile_setup_does_not_call_the_model(make_app, recording_console, monkeypatch):
+    """Настройка профиля — диалог с приложением: ни одного запроса к API."""
+    script_interview(monkeypatch, NOVICE_ANSWERS)
+    client = FakeClient(["Ответ"])
+    make_app(["/profile setup", "/exit"], client).run()
+
+    assert client.calls == []
+
+
+def test_profile_setup_reports_a_skipped_section(make_app, recording_console, monkeypatch):
+    script_interview(monkeypatch, ["новичок", "", "", "", ""])
+    make_app(["/profile setup", "/exit"], FakeClient(["Ответ"])).run()
+
+    assert recording_console.contains("Профиль: Стиль — без изменений")
+    assert recording_console.contains("Профиль «новичок» сохранён и активен")
+
+
+def test_profile_report_shows_sections_and_all_profiles(make_app, recording_console, monkeypatch):
+    script_interview(monkeypatch, NOVICE_ANSWERS)
+    make_app(["/profile setup", "/exit"], FakeClient(["Ответ"])).run()
+
+    script_interview(monkeypatch, ["эксперт", "развёрнуто", "тяжёлые стратегии", "клуб", "евро"])
+    app = make_app(["/profile setup", "/profile", "/exit"], FakeClient(["Ответ"]))
+    app.run()
+
+    assert recording_console.contains("Активный профиль: эксперт")
+    assert recording_console.contains("Стиль: развёрнуто")
+    assert recording_console.contains("Профили файла: новичок, эксперт")
+    assert recording_console.contains("уходит системным сообщением в каждый вопрос")
+    assert recording_console.contains("/profile use <имя>")
+
+
+def test_profile_setup_cancelled_by_keyboard_keeps_the_profile(make_app, recording_console, monkeypatch):
+    script_interview(monkeypatch, ["новичок", "коротко и просто"], interrupt_after=2)
+    app = make_app(["/profile setup", "/profile", "/exit"], FakeClient(["Ответ"]))
+    app.run()
+
+    assert recording_console.contains("Настройка профиля отменена")
+    assert recording_console.contains("Активного профиля нет")
+    assert app.agent.profile_report().names == ()
+
+
+def test_profile_use_switches_the_active_profile(make_app, recording_console, monkeypatch):
+    script_interview(monkeypatch, NOVICE_ANSWERS)
+    make_app(["/profile setup", "/exit"], FakeClient(["Ответ"])).run()
+
+    script_interview(monkeypatch, ["эксперт", "", "", "", ""])
+    app = make_app(["/profile setup", "/profile use новичок", "/profile", "/exit"], FakeClient(["Ответ"]))
+    app.run()
+
+    assert recording_console.contains("Профиль «новичок» теперь активен")
+    assert recording_console.contains("Активный профиль: новичок")
+
+
+def test_profile_use_unknown_name_is_reported(make_app, recording_console):
+    make_app(["/profile use эксперт", "/exit"], FakeClient(["Ответ"])).run()
+
+    assert recording_console.contains("Профиля «эксперт» нет")
+
+
+def test_profile_forget_removes_the_profile(make_app, recording_console, monkeypatch):
+    script_interview(monkeypatch, NOVICE_ANSWERS)
+    app = make_app(["/profile setup", "/profile forget новичок", "/profile", "/exit"], FakeClient(["Ответ"]))
+    app.run()
+
+    assert recording_console.contains("Профиль «новичок» удалён")
+    assert app.agent.profile_report().names == ()
+    assert recording_console.contains("Профили файла: нет")
+
+
+def test_unknown_profile_subcommand_shows_the_hint(make_app, recording_console):
+    make_app(["/profile что-то", "/exit"], FakeClient(["Ответ"])).run()
+
+    assert recording_console.contains("/profile setup")
+
+
+def test_question_carries_the_profile_after_setup(make_app, recording_console, monkeypatch):
+    script_interview(monkeypatch, NOVICE_ANSWERS)
+    client = FakeClient(["Ответ"])
+    make_app(["/profile setup", "Подбери, во что нам поиграть вечером", "/exit"], client).run()
+
+    messages = client.calls[0]["messages"]
+    assert "Профиль пользователя «новичок»" in messages[1]["content"]
+    assert "Стиль: коротко и просто" in messages[1]["content"]
+
+
+def test_profile_is_a_known_command_and_autocomplete_sees_it(make_app, recording_console):
+    make_app(["/exit"], FakeClient(["Ответ"])).run()
+
+    assert "/profile" in tui_app.COMMANDS
+
+
+def test_status_bar_shows_the_active_profile(make_app, recording_console, monkeypatch):
+    """Активный профиль виден после каждого шага, а без профиля статус-бар прежний."""
+    script_interview(monkeypatch, NOVICE_ANSWERS)
+    make_app(["/profile setup", "Вопрос", "/exit"], FakeClient(["Ответ"])).run()
+
+    assert recording_console.contains("Модель: deepseek-v4-flash  |  Профиль: новичок  |  Формат:")
+
+
+def test_status_bar_hides_the_profile_when_there_is_none(make_app, recording_console):
+    make_app(["/exit"], FakeClient(["Ответ"])).run()
+
+    assert not recording_console.contains("Профиль:")
+
+
+def test_profile_text_with_markup_characters_does_not_break_the_report(
+    make_app, recording_console, monkeypatch
+):
+    """Значение профиля — текст пользователя: скобочные последовательности печатаются как есть."""
+    script_interview(monkeypatch, ["[/]имя", "[/dim] и ещё [скобки]"])
+    make_app(["/profile setup", "/profile", "/exit"], FakeClient(["Ответ"])).run()
+
+    assert recording_console.contains("[/dim] и ещё [скобки]")
