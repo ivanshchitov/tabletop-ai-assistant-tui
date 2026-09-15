@@ -79,14 +79,26 @@ def memory_file(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def app(stub, history_file, memory_file, tui_display, request):
+def profile_file(tmp_path: Path) -> Path:
+    """Файл профилей пользователя: прогон не должен трогать profile.json репозитория."""
+    return tmp_path / "profile.json"
+
+
+@pytest.fixture
+def app(stub, history_file, memory_file, profile_file, tui_display, request):
     """Фабрика сессий: одна и та же история переживает несколько запусков подряд."""
     mode, mirror = tui_display
     sessions = []
 
     def factory(**kwargs) -> AppSession:
         kwargs.setdefault("mirror", mirror)
-        session = AppSession(api_url=stub.url, history_file=history_file, memory_file=memory_file, **kwargs)
+        session = AppSession(
+            api_url=stub.url,
+            history_file=history_file,
+            memory_file=memory_file,
+            profile_file=profile_file,
+            **kwargs,
+        )
         sessions.append(session)
         return session
 

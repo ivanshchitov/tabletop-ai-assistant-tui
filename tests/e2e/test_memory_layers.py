@@ -62,7 +62,7 @@ def test_clear_keeps_the_long_term_layer_but_wipes_the_working_one(app, stub, me
     with app() as session:
         session.ask(RESULT_QUESTION, "Ответ stub-модели.")
         session.send_line("/clear")
-        session.wait_for("долговременная память сохранена")
+        session.wait_for("долговременная память и профиль пользователя сохранены")
         session.send_line("/memory")
         session.wait_for("Краткосрочная: 0 обменов диалога")
 
