@@ -111,7 +111,7 @@ def app(stub, history_file, memory_file, profile_file, tui_display, request):
 
 
 @pytest.fixture
-def live_app(history_file, memory_file, tui_display, request):
+def live_app(history_file, memory_file, profile_file, tui_display, request):
     """Сессия против настоящего OpenCode Zen — без stub-сервера и с реальным ключом.
 
     Пропускает тест, если ключа нет: репозиторий должен оставаться проверяемым без него.
@@ -128,7 +128,13 @@ def live_app(history_file, memory_file, tui_display, request):
     def factory(**kwargs):
         kwargs.setdefault("api_key", None)  # ключ берётся приложением из .env
         kwargs.setdefault("mirror", mirror)
-        session = AppSession(history_file=history_file, memory_file=memory_file, api_url=None, **kwargs)
+        session = AppSession(
+            history_file=history_file,
+            memory_file=memory_file,
+            profile_file=profile_file,
+            api_url=None,
+            **kwargs,
+        )
         sessions.append(session)
         return session
 
