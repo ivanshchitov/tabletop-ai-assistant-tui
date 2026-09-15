@@ -1,6 +1,7 @@
 """Агент: память диалога, стратегии контекста и пересылка LLM."""
 
 import json
+from pathlib import Path
 from typing import List, Optional
 
 import pytest
@@ -13,6 +14,7 @@ from core import memory_layers
 from core.history_manager import HistoryManager
 from core.long_term_memory import LongTermMemory
 from core.tabletop_agent import TabletopAgent
+from core.user_profile import InterviewState, ProfileStore
 
 
 class FakeAgentClient:
@@ -73,6 +75,9 @@ def isolated_history(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         tabletop_agent, "LongTermMemory", lambda: LongTermMemory(tmp_path / "memory.json")
+    )
+    monkeypatch.setattr(
+        tabletop_agent, "ProfileStore", lambda: ProfileStore(tmp_path / "profile.json")
     )
 
 
@@ -1370,3 +1375,163 @@ def test_forget_all_wipes_both_layers_but_keeps_the_dialogue():
     assert report.working == ()
     assert report.long_term == ()
     assert report.short_term_exchanges == 1
+
+
+# --- персонализация: профиль пользователя ---------------------------------------------
+
+
+def setup_profile(
+    agent,
+    name: str = "новичок",
+    style: str = "",
+    constraints: str = "",
+    experience: str = "",
+    genres: str = "",
+):
+    """Проходит диалог настройки профиля так же, как интерфейс: пять ответов по порядку."""
+    state = InterviewState()
+    for answer in (name, style, constraints, experience, genres):
+        state = state.answer(answer)
+    return agent.setup_profile(state)
+
+
+def test_profile_message_follows_the_system_prompt_and_precedes_memory():
+    agent, client = make_agent()
+    setup_profile(agent, style="коротко и просто", constraints="только игры до часа")
+    agent.remember_goal("Подобрать игру на вечер")
+
+    agent.ask("Что посоветуешь?")
+
+    messages = client.calls[0]["messages"]
+    assert [m["role"] for m in messages] == ["system", "system", "system", "user"]
+    assert "Tabletop AI Assistant" in messages[0]["content"]
+    assert "Профиль пользователя «новичок»" in messages[1]["content"]
+    assert "Стиль: коротко и просто" in messages[1]["content"]
+    assert "Рабочая память" in messages[2]["content"]
+    assert "Что посоветуешь?" in messages[3]["content"]
+
+
+def test_every_question_carries_the_profile():
+    agent, client = make_agent()
+    setup_profile(agent, style="коротко и просто")
+
+    agent.ask("Первый вопрос")
+    agent.ask("Второй вопрос")
+
+    for call in client.calls:
+        profile = [m for m in call["messages"] if m["role"] == "system"][1]
+        assert "Стиль: коротко и просто" in profile["content"]
+
+
+def test_agent_without_profile_sends_no_profile_message():
+    agent, client = make_agent()
+    agent.ask("Что посоветуешь?")
+
+    messages = client.calls[0]["messages"]
+    assert [m["role"] for m in messages] == ["system", "user"]
+    assert "Профиль пользователя" not in "".join(m["content"] for m in messages)
+
+
+def test_profile_message_survives_the_token_ceiling():
+    """Профиль уходит в запрос вне сокращаемой части: потолок режет ходы, а не персонализацию."""
+    agent, client = make_agent(answers=["Ответ " + "длинный " * 40, "Ещё ответ"])
+    setup_profile(agent, style="коротко и просто, без терминов")
+    agent.settings = agent.settings.with_max_session_tokens(5000)
+    for index in range(6):
+        agent.ask(f"Вопрос номер {index} " + "подробно " * 60)
+
+    messages = client.calls[-1]["messages"]
+    profile = [m for m in messages if m["role"] == "system"][1]
+    assert "Стиль: коротко и просто, без терминов" in profile["content"]
+
+
+def test_setup_profile_replaces_only_the_answered_sections():
+    agent, client = make_agent()
+    setup_profile(agent, style="коротко", constraints="до часа")
+
+    profile = setup_profile(agent, name="новичок", style="развёрнуто")
+
+    assert profile.name == "новичок"
+    assert profile.style == "развёрнуто"
+    assert profile.constraints == "до часа"
+
+
+def test_setup_profile_falls_back_to_a_free_name():
+    agent, client = make_agent()
+
+    first = setup_profile(agent, name="", style="коротко")
+    second = setup_profile(agent, name="", style="подробно")
+
+    assert (first.name, second.name) == ("профиль 1", "профиль 2")
+    assert agent.profile_report().names == ("профиль 1", "профиль 2")
+
+
+def test_profile_is_written_to_its_own_file_at_once():
+    agent, client = make_agent()
+
+    setup_profile(agent, style="коротко и просто")
+
+    saved = json.loads(Path(agent.profile_report().profile_store).read_text(encoding="utf-8"))
+    assert saved["profiles"]["новичок"]["style"] == "коротко и просто"
+    assert agent.history.dialogues == []
+
+
+def test_use_profile_switches_the_profile_for_the_next_question():
+    agent, client = make_agent()
+    setup_profile(agent, name="новичок", style="коротко")
+    setup_profile(agent, name="эксперт", style="развёрнуто")
+
+    assert agent.use_profile("новичок") is not None
+    agent.ask("Что посоветуешь?")
+
+    messages = client.calls[0]["messages"]
+    assert "Стиль: коротко" in messages[1]["content"]
+
+
+def test_use_of_an_unknown_profile_does_not_create_it():
+    agent, client = make_agent()
+    setup_profile(agent, name="новичок", style="коротко")
+
+    assert agent.use_profile("эксперт") is None
+    assert agent.profile_report().names == ("новичок",)
+    assert agent.profile_report().active_name == "новичок"
+
+
+def test_forget_profile_stops_sending_it():
+    agent, client = make_agent()
+    setup_profile(agent, style="коротко")
+
+    assert agent.forget_profile("новичок") is True
+
+    agent.ask("Что посоветуешь?")
+    messages = client.calls[0]["messages"]
+    assert [m["role"] for m in messages] == ["system", "user"]
+    assert agent.forget_profile("новичок") is False
+
+
+def test_profile_report_describes_the_profile_without_api_calls():
+    agent, client = make_agent()
+    setup_profile(agent, style="коротко и просто", genres="евро")
+    calls_before = len(client.calls)
+
+    report = agent.profile_report()
+
+    assert len(client.calls) == calls_before
+    assert report.active_name == "новичок"
+    assert report.sections == (("Стиль", "коротко и просто"), ("Жанры и механики", "евро"))
+    assert report.names == ("новичок",)
+    assert report.profile_store.endswith("profile.json")
+
+
+def test_reset_keeps_the_profile_and_its_file():
+    agent, client = make_agent()
+    setup_profile(agent, style="коротко и просто")
+    agent.ask("Первый вопрос")
+
+    agent.reset()
+
+    assert agent.profile_report().active_name == "новичок"
+    agent.ask("Второй вопрос")
+    messages = client.calls[-1]["messages"]
+    assert [m["role"] for m in messages] == ["system", "system", "user"]
+    assert "Стиль: коротко и просто" in messages[1]["content"]

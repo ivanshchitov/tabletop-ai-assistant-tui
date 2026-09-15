@@ -18,6 +18,7 @@ from .answer_settings import AnswerFormat, AnswerSettings, ContextStrategy
 from .api_client import APIClient, AnswerMeta, APIError
 from .history_manager import HistoryManager
 from .long_term_memory import LongTermMemory
+from .user_profile import InterviewState, ProfileStore, UserProfile, clip_value, profile_message
 
 
 class RequestPhase(Enum):
@@ -85,6 +86,20 @@ class MemoryReport:
 
 
 @dataclass
+class ProfileReport:
+    """Снимок персонализации для отчётов интерфейса (без обращения к модели).
+
+    Разделы идут парами «подпись — содержимое», потому что профиль в запрос уходит подписями:
+    отчёт показывает ровно то, что видит модель, а не машинные имена раздела.
+    """
+
+    active_name: str
+    sections: Tuple[Tuple[str, str], ...]
+    names: Tuple[str, ...]
+    profile_store: str
+
+
+@dataclass
 class AgentConfig:
     """Единый конфиг агента: настройки ответа сессии и модель."""
 
@@ -123,6 +138,7 @@ class TabletopAgent:
         model: Optional[str] = None,
         history: Optional[HistoryManager] = None,
         long_term: Optional[LongTermMemory] = None,
+        profile: Optional[ProfileStore] = None,
     ) -> None:
         self.client = client
         self.config = AgentConfig(
@@ -133,6 +149,9 @@ class TabletopAgent:
         # Долговременный слой памяти — свой файл: сведения о пользователе переживают и /clear,
         # и перезапуск, поэтому конверт истории его не держит.
         self.long_term = long_term if long_term is not None else LongTermMemory()
+        # Персонализация — тоже свой файл: профиль настраивает сам пользователь, он не выводится
+        # правилами из реплик, и его не касается ни /clear, ни очистка слоёв памяти.
+        self.profile = profile if profile is not None else ProfileStore()
         # Рабочий слой — данные текущей задачи (цель и ограничения): его место в конверте
         # истории, потому что жизнь слоя равна жизни диалога.
         self._working: Dict[str, str] = {}
@@ -273,6 +292,43 @@ class TabletopAgent:
             rules=memory_layers.describe_rules(),
         )
 
+    def profile_report(self) -> ProfileReport:
+        """Снимок персонализации для отчётов интерфейса.
+
+        Отдаёт имя активного профиля, его заполненные разделы, имена всех профилей файла и путь
+        файла. Ни одного обращения к модели не делает, файл профилей читает сам и наружу его
+        структуру не выпускает — интерфейс рендерит снимок.
+        """
+        active = self.profile.active()
+        return ProfileReport(
+            active_name=active.name,
+            sections=active.entries,
+            names=self.profile.names(),
+            profile_store=str(self.profile.path),
+        )
+
+    def setup_profile(self, state: InterviewState) -> UserProfile:
+        """Собирает профиль из ответов диалога настройки, сохраняет его и делает активным.
+
+        Проходит диалог терминальный слой: он печатает вопросы и читает строки, а собирает профиль
+        агент — поверх профиля с названным именем, если такой уже есть (пустой ответ оставляет
+        раздел как был, поэтому повторная настройка — редактирование), и с именем по порядку, если
+        вопрос об имени пропущен.
+        """
+        named = clip_value(state.answers[0]) if state.answers else ""
+        base = self.profile.get(named) or UserProfile(name=named)
+        profile = state.profile(base, self.profile.next_name())
+        self.profile.save(profile)
+        return profile
+
+    def use_profile(self, name: str) -> Optional[UserProfile]:
+        """Делает профиль активным; None — такого профиля нет (заводит профили только настройка)."""
+        return self.profile.use(name)
+
+    def forget_profile(self, name: str) -> bool:
+        """Удаляет профиль по имени; False — такого профиля нет."""
+        return self.profile.forget(name)
+
     def remember_goal(self, goal: str) -> None:
         """Записывает цель текущей задачи в рабочую память, заменяя прежнюю цель."""
         self._store_working(memory_layers.CATEGORY_GOAL, goal)
@@ -354,8 +410,9 @@ class TabletopAgent:
 
         Краткосрочная память — лог ходов, рабочая — цель и ограничения задачи и память стратегии:
         всё это принадлежит текущему диалогу. Долговременная память — сведения о пользователе
-        между сессиями: она остаётся и в памяти, и в своём файле, снять её можно только явно
-        командой `/memory forget all`.
+        между сессиями — и профиль персонализации остаются и в памяти, и в своих файлах: профиль
+        говорит, как отвечать этому человеку, а не что было в диалоге. Снять долговременную память
+        можно только явно командой `/memory forget all`, профили — командой `/profile forget`.
         """
         self._turns.clear()
         self._summary = None
@@ -461,10 +518,13 @@ class TabletopAgent:
         return self._shrink_to_ceiling(user_prompt)
 
     def _build_messages(self, user_prompt: str, skip: int = 0) -> List[Dict[str, str]]:
-        """Сборка запроса: system настроек, память слоёв, память стратегии, ходы, новый user-ход."""
+        """Сборка запроса: system настроек, профиль, память слоёв, память стратегии, ходы, новый ход."""
         messages: List[Dict[str, str]] = [
             {"role": "system", "content": prompts.build_system_message(self.config.format)}
         ]
+        profile = self._profile_message()
+        if profile is not None:
+            messages.append(profile)
         memory = self._memory_message()
         if memory is not None:
             messages.append(memory)
@@ -474,6 +534,18 @@ class TabletopAgent:
         messages.extend(self._view_turns(skip))
         messages.append({"role": "user", "content": user_prompt})
         return messages
+
+    def _profile_message(self) -> Optional[Dict[str, str]]:
+        """Системное сообщение профиля персонализации: пустой профиль — None.
+
+        Профиль идёт сразу после system настроек и выше памяти: он отвечает на «как отвечать»
+        и не меняется от вопроса к вопросу, а память отвечает на «что известно». Инструкция
+        ассета внутри сообщения подчиняет предпочтения профиля настройкам приложения.
+        """
+        content = profile_message(self.profile.active())
+        if content is None:
+            return None
+        return {"role": "system", "content": content}
 
     def _memory_message(self) -> Optional[Dict[str, str]]:
         """Системное сообщение слоёв памяти: долговременная выше рабочей; пустые слои — None.
