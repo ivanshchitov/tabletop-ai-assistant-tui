@@ -87,7 +87,7 @@ openspec archive <change-id> --yes        # non-interactive: without --yes the C
   from the existing code/tests) as a set of capabilities, each the target for future `MODIFIED`
   deltas: `agent`, `question-answering`, `answer-settings`, `api-integration`,
   `history-persistence`, `terminal-ui`, `settings-screen`, `configuration`, `context-strategies`,
-  `memory-model`, `test-infrastructure`, `model-selection`.
+  `memory-model`, `user-profile`, `test-infrastructure`, `model-selection`.
   It records deliberate decisions worth knowing before touching related code: the JSON format's
   refusal reply is a machine-readable `{"error": ...}` object rather than the verbatim refusal
   phrase used by free/compact (not a bug to fix), and `AnswerSettings` is session-only by design —
@@ -149,10 +149,10 @@ than repeating it):
 
 ## Architecture
 
-Two packages: `core/` (agent, settings, prompts, API client, memory layers and stores, context
-strategies and the compression logic — no `rich`/terminal dependency) and `ui/` (`tui_app.py`, `keyboard.py`,
-`commands_screen.py`, `settings_screen.py`, `branches_screen.py`, `models_screen.py` — everything
-that touches the terminal). Modules inside `core/`
+Two packages: `core/` (agent, settings, prompts, API client, memory layers and stores, the user
+profile, context strategies and the compression logic — no `rich`/terminal dependency) and `ui/`
+(`tui_app.py`, `keyboard.py`, `commands_screen.py`, `settings_screen.py`, `branches_screen.py`,
+`models_screen.py` — everything that touches the terminal). Modules inside `core/`
 import each other with relative imports (`from . import config`, `from .answer_settings import
 AnswerFormat`); `ui/` imports from `core` with absolute imports (`from core import config,
 prompts`) since they're sibling packages, and imports its own sibling module with a relative
@@ -160,17 +160,21 @@ import (`from . import keyboard`). The entry point is `tabletop-ai-assistant.py`
 (hyphenated, so it's not importable as a module — it's only ever run directly:
 `from ui.tui_app import TabletopAITUI`), which is why `core/config.py`'s `BASE_DIR` resolves two
 parents up (`Path(__file__).resolve().parent.parent`) rather than one — it has to reach back past
-`core/` to the repo root where `.env`, `assets/`, `history.json` and `memory.json` actually live.
+`core/` to the repo root where `.env`, `assets/`, `history.json`, `memory.json` and
+`profile.json` actually live.
 
 **Environment switches (`core/config.py`):** `OPENCODE_API_URL`, `TABLETOP_HISTORY_FILE`,
-`TABLETOP_MEMORY_FILE`, `TABLETOP_REQUEST_TIMEOUT`, `TABLETOP_TYPING_DELAY` (the last one read in
-`ui/tui_app.py`), `TABLETOP_COMPRESS_AFTER` (the session setting's default, messages, default 10)
-and `TABLETOP_MAX_SESSION_TOKENS` (the session setting's default, tokens, default 20000) override
-the corresponding defaults. They exist so the e2e layer can point the app at a local stub
-server, keep history and long-term memory in temp files, collapse the typing animation — or
-exercise compression and the token ceiling in seconds. `HISTORY_FILE`/`MEMORY_FILE` especially:
-their paths derive from `__file__`, not the working directory, so without the override *any* run —
-a test run included — would write to the single real `history.json`/`memory.json` in the repo root.
+`TABLETOP_MEMORY_FILE`, `TABLETOP_PROFILE_FILE`, `TABLETOP_REQUEST_TIMEOUT`,
+`TABLETOP_TYPING_DELAY` (the last one read in `ui/tui_app.py`), `TABLETOP_COMPRESS_AFTER` (the
+session setting's default, messages, default 10) and `TABLETOP_MAX_SESSION_TOKENS` (the session
+setting's default, tokens, default 20000) override the corresponding defaults. They exist so the
+e2e layer can point the app at a local stub server, keep history, long-term memory and the user
+profile in temp files, collapse the typing animation — or exercise compression and the token
+ceiling in seconds. `HISTORY_FILE`/`MEMORY_FILE`/`PROFILE_FILE` especially: their paths derive
+from `__file__`, not the working directory, so without the override *any* run — a test run
+included — would write to the single real `history.json`/`memory.json`/`profile.json` in the repo
+root. A new on-disk state file means a new env switch **and** a pass-through in
+`tests/e2e/harness.AppSession` — see the agent-loop gotchas above.
 
 **Settings flow:** `core/answer_settings.AnswerSettings` (`format: AnswerFormat`,
 `context_strategy: ContextStrategy`, `max_words: int`, `list_limit: int`, `temperature: float`,
@@ -299,13 +303,59 @@ between sessions). Deliberate decisions baked in:
 - `TabletopAgent.memory_report()` returns a `MemoryReport` snapshot (exchange count, both layers'
   records, store paths, rule descriptions) — the terminal renders it and never reads `_working`
   or the stores directly. Same isolation boundary as `context_report()`.
-- `/memory` is a plain command with **meaningful arguments** (`goal`/`remember`/`forget`), unlike
-  every other command whose arguments are ignored. It was deliberately not built as another panel
+- `/memory` and `/profile` are plain commands with **meaningful arguments** (`goal`/`remember`/
+  `forget`, `setup`/`use`/`forget`), unlike every other command whose arguments are ignored. It was deliberately not built as another panel
   reducer: the operations take free text, which would have meant yet another input mode in
   `keyboard.py`. `remember` uses the rule's category and key when a pattern matches and otherwise
   files the text as a note under its own sequential key, so notes don't evict each other.
 - Journal lines (routing decision after an answer, operation results after `/memory`) are
   screen-only, never written to `history.json` — the same rule as the compression and facts lines.
+
+**User profile (`core/user_profile.py`, `/profile`):** personalization — declared preferences that
+shape every answer, deliberately kept apart from the memory layers. Deliberate decisions baked in:
+- **A profile is not a memory record.** Memory entries are *derived* by the deterministic rule table
+  from what the user says; the profile is *declared* by the user in a setup dialogue and describes
+  how to answer, not what is known. It lives in its own file `profile.json`
+  (`TABLETOP_PROFILE_FILE`, gitignored) holding several profiles plus an `active` name; `/clear`
+  never touches it (same asymmetry as long-term memory), and only `/profile forget <name>` drops one.
+- Sections are fixed: the profile name plus «Стиль», «Ограничения», «Опыт», «Жанры и механики».
+  The question script is `QUESTIONS` (at most five questions: the name and one per section), and
+  `InterviewState` is a pure automaton — `question` → `answer(text)` → `profile(base, default_name)`
+  — while `ui/tui_app.py` only prints the question and reads the line. That is what makes the
+  dialogue testable without a terminal, the same reason key handling lives in the panel reducers.
+  A test holds the "no more than five questions" invariant and the section coverage.
+- Answers are read with `sys.stdin.readline`, **not** `input()`: readline swallows SIGINT, so with
+  `input()` Ctrl+C would not raise `KeyboardInterrupt` and the setup could not be cancelled (same
+  reason as the manual API-key prompt). The dialogue catches `KeyboardInterrupt`/`EOFError` around
+  itself and cancels **only** the setup, writing nothing; everywhere else Ctrl+C still exits the app.
+- An empty answer leaves the section as it was (for a new profile — empty), so a repeated setup is
+  an edit and a stray Enter destroys nothing; an empty name falls back to a free `профиль N` (the
+  same trick as `/memory`'s sequential notes). Answers are clipped to
+  `config.PROFILE_VALUE_MAX_CHARS`, and the journal line prints the stored value, not the typed one.
+- **Storage is JSON, not the markdown files the week-3 README suggests**: repo convention is state
+  in JSON with tolerant reading (missing/corrupt file = no profiles, write errors never break the
+  session), while `assets/*.md` is where model instructions live.
+- Request composition: system → **profile message** → memory layers → strategy memory → dialogue
+  turns → fresh user turn. The profile answers "how to answer", so it sits right after the system
+  prompt and above memory. `assets/profile_prompt.md` subordinates preferences to the app settings
+  (format, word limit, list limit) and to the fresh message — otherwise a profile could break the
+  JSON/compact format contracts and the word ceilings the e2e tests assert.
+- An empty profile adds no message, so the request shape without personalization is unchanged
+  (several tests depend on that). `use` never creates a profile — only the setup dialogue does, so
+  a typo can't push an empty profile into a request; deleting the active profile leaves none active.
+- The status bar shows the active profile's name right after the model, but **only when the profile
+  is non-empty**: an empty profile never reaches the request, so a line about it would advertise
+  personalization that isn't there — and the layout without a profile stays exactly as before
+  (several screen snapshots depend on it). Profile names and section values are user text, so every
+  line that prints them goes through `rich.markup.escape` — a value like `[/dim]` otherwise raises
+  `MarkupError` inside `console.print`. The same escaping was applied to the `/memory remember` line,
+  which had the same latent crash.
+- `TabletopAgent.profile_report()` returns a `ProfileReport` snapshot (active name, sections as
+  label/value pairs, all profile names, store path) — the terminal renders it and never reads
+  `profile.json` itself; the same isolation boundary as `context_report()`/`memory_report()`.
+- The dialogue is `/profile setup`; `/profile` prints the report, `use <name>` switches the active
+  profile. Like `/memory`, the command has **meaningful arguments**, and it was deliberately kept
+  out of the panel-reducer pattern because a question-answer dialogue is not a form.
 
 **`/commands` (`ui/commands_screen.py`):** an interactive panel listing every command with a short
 description (↑/↓ move, Enter runs the selected command, Esc cancels with zero API calls).
@@ -525,13 +575,17 @@ saved: `dialogues` stays a flat list across branches.
 ## Test layout
 
 - `tests/unit/` — no subprocesses, ~3s for the whole layer. `core/` logic (including the memory
-  routing table and the long-term store), the `/commands`, `/settings`, `/branches` and `/models`
-  reducers, and `TabletopAITUI` driven through injected dependencies:
+  routing table, the long-term store, the profile store and the setup dialogue automaton), the
+  `/commands`, `/settings`, `/branches` and `/models` reducers, and `TabletopAITUI` driven through
+  injected dependencies:
   `TabletopAITUI(console=, history=, client=)` takes a `rich` console writing to a buffer, a
   `HistoryManager` on `tmp_path`, and a fake client that records what was asked. Passing a client
-  also skips the API-key prompt at startup. Agent tests patch the *default* stores
-  (`tabletop_agent.HistoryManager`/`LongTermMemory`) so no test ever touches the real
-  `history.json`/`memory.json`.
+  also skips the API-key prompt at startup. Agent and TUI tests patch the *default* stores
+  (`tabletop_agent.HistoryManager`/`LongTermMemory`/`ProfileStore`) so no test ever touches the real
+  `history.json`/`memory.json`/`profile.json`. The setup dialogue is driven in unit tests by
+  replacing `sys.stdin` (it reads lines, not `input()`), and in e2e by sending a line only after the
+  app's own question is on screen — the echoed answer appears before the next question is ready, so
+  waiting on the echo loses an answer.
 - `tests/unit/test_keyboard.py` — the only unit file that needs a pty (see above).
 - `tests/e2e/` — the real `tabletop-ai-assistant.py` running in `pty.fork()`, with output fed
   through `pyte` so assertions read the *rendered* screen rather than a stream of cursor codes.
@@ -541,7 +595,8 @@ saved: `dialogues` stays a flat list across branches.
   local server that both answers and **records every request**, which is where most of the value
   is: the tests assert on what actually went to the API (system message per format, the word and
   list limits in the user prompt, `max_tokens`, the session temperature, the absence of `stop`,
-  the retry count).
+  the retry count, and — for `/profile` — that two profiles produce two different system messages
+  for the same question).
   `_write_all` re-writes what a single `os.write` couldn't fit into the terminal buffer —
   without it a >2000-character question loses its tail along with the trailing Enter.
 - `tests/e2e/snapshots/` — whole-screen snapshots. The stub server's port is normalized away
@@ -555,6 +610,10 @@ saved: `dialogues` stays a flat list across branches.
   ceilings) because model output is non-deterministic; assert on the requirement, never on an
   exact wording. Note that assertions run against the *rendered* screen, so markdown is already
   gone — rich draws a ```json block as a bordered code block with no backticks left in the text.
+- `tests/e2e/test_profile.py` — the setup dialogue in a real pty: five questions answered line by
+  line, the profile landing in the temp `profile.json`, the next question carrying the profile
+  message, `/clear` and a restart keeping it, `Ctrl+C` cancelling without writing, and the repo's
+  real `profile.json` staying untouched.
 - `tests/e2e/cassettes/` — real `deepseek-v4-flash` answers, recorded once with
   `pytest tests/e2e/test_recorded_answers.py -m network --record-cassettes` (needs a real key,
   spends quota) and replayed by the stub afterwards. Tests skip themselves when a cassette is
