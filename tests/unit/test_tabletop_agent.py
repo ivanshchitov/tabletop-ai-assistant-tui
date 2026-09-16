@@ -13,7 +13,9 @@ from core.api_client import AnswerMeta, APIError
 from core import memory_layers
 from core.history_manager import HistoryManager
 from core.long_term_memory import LongTermMemory
-from core.tabletop_agent import TabletopAgent
+from core import task_state
+from core.tabletop_agent import RequestPhase, TabletopAgent
+from core.task_state import Stage, TaskStore
 from core.user_profile import InterviewState, ProfileStore
 
 
@@ -78,6 +80,9 @@ def isolated_history(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         tabletop_agent, "ProfileStore", lambda: ProfileStore(tmp_path / "profile.json")
+    )
+    monkeypatch.setattr(
+        tabletop_agent, "TaskStore", lambda: TaskStore(tmp_path / "task.json")
     )
 
 
@@ -1535,3 +1540,185 @@ def test_reset_keeps_the_profile_and_its_file():
     messages = client.calls[-1]["messages"]
     assert [m["role"] for m in messages] == ["system", "system", "user"]
     assert "Стиль: коротко и просто" in messages[1]["content"]
+
+
+# --- задача: конвейер, состояние и снимок ---
+
+PLAN_JSON = '{"items": ["Тема и жанр", "Ход игрока", "Подсчёт очков"]}'
+OK_JSON = '{"ok": true, "issues": []}'
+
+
+def _agent_with_tasks(goal: str = "Разработать игру про улиток", client=None) -> TabletopAgent:
+    agent = TabletopAgent(client if client is not None else FakeAgentClient())
+    assert agent.add_task(goal) is True
+    return agent
+
+
+def test_task_step_runs_the_pipeline_and_counts_the_usage():
+    client = FakeAgentClient(answers=[PLAN_JSON, "Раздел 1", "Раздел 2", "Раздел 3", OK_JSON])
+    agent = _agent_with_tasks(client=client)
+
+    report = agent.task_step()
+
+    assert report.needs_edits is True
+    assert agent.task.state.tasks[0].plan == ("Тема и жанр", "Ход игрока", "Подсчёт очков")
+    assert TaskStore(agent.task.path).state.tasks[0].plan_round == 1
+    assert agent.session_usage.requests == 1
+    assert agent.last_result is not None
+
+    agent.task_answer_edits("")
+    while agent.task_step() is not None:
+        pass
+
+    assert agent.task.state.finished is True
+    assert agent.session_usage.requests == 5
+
+
+def test_task_step_reports_the_pipeline_phases():
+    client = FakeAgentClient(answers=[PLAN_JSON, "Раздел 1", "Раздел 2", "Раздел 3", OK_JSON])
+    agent = _agent_with_tasks(client=client)
+    phases = []
+    agent.task_step(phases.append)
+    agent.task_answer_edits("")
+    while True:
+        report = agent.task_step(phases.append)
+        if report is None:
+            break
+
+    assert phases == [
+        RequestPhase.TASK_PLAN,
+        RequestPhase.TASK_EXECUTE,
+        RequestPhase.TASK_EXECUTE,
+        RequestPhase.TASK_EXECUTE,
+        RequestPhase.TASK_VALIDATE,
+    ]
+
+
+def test_pipeline_request_uses_the_session_model_and_a_pinned_ceiling():
+    client = FakeAgentClient(answers=[PLAN_JSON])
+    agent = _agent_with_tasks(client=client)
+    agent.model = "kimi-k3"
+
+    agent.task_step()
+
+    call = client.calls[0]
+    assert call["model"] == "kimi-k3"
+    assert call["temperature"] is None
+    assert call["max_tokens"] == config.max_tokens_for_words(config.TASK_PLAN_MAX_WORDS)
+
+
+def test_task_step_never_raises_on_api_error():
+    client = FakeAgentClient(error=APIError("нет сети"))
+    agent = _agent_with_tasks(client=client)
+
+    report = agent.task_step()
+
+    assert report.finished_task is True
+    assert report.failure == "нет сети"
+    assert agent.task.state.tasks[0].status.value == "не удалось"
+
+
+def test_task_state_message_goes_into_the_dialogue_request():
+    agent = _agent_with_tasks(client=FakeAgentClient(answers=["Ответ"]))
+    agent.task.save(
+        task_state.accept_plan(
+            task_state.plan_built(task_state.begin_task(agent.task.state), ("Тема", "Ход"))
+        )
+    )
+
+    agent.ask("что дальше?")
+
+    messages = agent.client.calls[0]["messages"]
+    assert messages[0]["role"] == "system"
+    assert "Тема" in messages[1]["content"]
+    assert "Execution" in messages[1]["content"]
+    assert messages[-1]["role"] == "user"
+
+
+def test_request_shape_is_unchanged_without_a_task():
+    agent = TabletopAgent(FakeAgentClient(answers=["Ответ"]))
+
+    agent.ask("Расскажи про Каркассон")
+
+    messages = agent.client.calls[0]["messages"]
+    assert [message["role"] for message in messages] == ["system", "user"]
+    assert all("Задача пользователя" not in message["content"] for message in messages)
+
+
+def test_clear_does_not_touch_the_task_queue():
+    agent = _agent_with_tasks()
+
+    agent.reset()
+
+    assert [task.goal for task in agent.task.state.tasks] == ["Разработать игру про улиток"]
+
+
+def test_task_report_snapshot_carries_the_plan_and_the_artifact():
+    agent = _agent_with_tasks()
+    agent.task.save(
+        task_state.add_section(
+            task_state.accept_plan(
+                task_state.plan_built(
+                    task_state.begin_task(agent.task.state), ("Тема", "Ход", "Очки")
+                )
+            ),
+            "Гонки улиток по садовой дорожке.",
+        )
+    )
+
+    report = agent.task_report()
+
+    assert report.active_number == 1
+    assert report.queue[0].goal == "Разработать игру про улиток"
+    assert report.queue[0].status == "в работе"
+    assert report.stages == ("Planning", "Execution", "Validation", "Done")
+    assert report.active_stage == "Execution"
+    assert report.current_step == "2/3: «Ход»"
+    assert report.plan == (("Тема", "✓"), ("Ход", "◦"), ("Очки", "◦"))
+    assert report.artifact_sections == ("Тема",)
+    assert report.artifact_chars == len("Гонки улиток по садовой дорожке.")
+    assert report.paused is False
+    assert report.task_store == str(agent.task.path)
+
+
+def test_task_report_is_empty_without_tasks():
+    agent = TabletopAgent(FakeAgentClient())
+
+    report = agent.task_report()
+
+    assert report.queue == ()
+    assert report.active_number == 0
+    assert report.plan == ()
+    assert report.expected_action == "поставить задачу командой /task add"
+
+
+def test_pause_and_resume_are_saved_and_survive_a_restart():
+    agent = _agent_with_tasks()
+    agent.task.save(
+        task_state.plan_built(task_state.begin_task(agent.task.state), ("Тема", "Ход"))
+    )
+
+    agent.pause_tasks()
+
+    assert agent.tasks_paused is True
+    assert TaskStore(agent.task.path).state.paused is True
+    assert agent.task_report().paused is True
+
+    restored = TabletopAgent(FakeAgentClient(), task=TaskStore(agent.task.path))
+    assert restored.tasks_paused is True
+    assert restored.task_report().current_step == agent.task_report().current_step
+
+    agent.resume_tasks()
+    assert agent.tasks_paused is False
+
+
+def test_empty_goal_and_dropping_the_queue():
+    agent = TabletopAgent(FakeAgentClient())
+
+    assert agent.add_task("   ") is False
+
+    agent.add_task("Разработать игру")
+    agent.drop_tasks()
+
+    assert agent.task.state.tasks == ()
+    assert TaskStore(agent.task.path).state.tasks == ()

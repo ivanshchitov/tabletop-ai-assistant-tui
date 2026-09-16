@@ -9,15 +9,26 @@
 """
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from . import config, context_compressor, context_strategies, memory_layers, prompts
+from . import (
+    config,
+    context_compressor,
+    context_strategies,
+    memory_layers,
+    prompts,
+    task_pipeline,
+    task_state,
+)
 from .usage import SessionLedger, SessionUsage, estimate_tokens
 from .answer_settings import AnswerFormat, AnswerSettings, ContextStrategy
 from .api_client import APIClient, AnswerMeta, APIError
 from .history_manager import HistoryManager
 from .long_term_memory import LongTermMemory
+from .task_pipeline import TaskStepReport
+from .task_state import Stage, TaskItem, TaskState, TaskStore
 from .user_profile import InterviewState, ProfileStore, UserProfile, clip_value, profile_message
 
 
@@ -31,6 +42,11 @@ class RequestPhase(Enum):
     COMPRESSION = "compression"
     FACTS_UPDATE = "facts_update"
     REQUEST = "request"
+    # Фазы конвейера задачи: значения совпадают с именами фаз конвейера, поэтому переход
+    # «фаза конвейера → уведомление интерфейса» — одно преобразование, без таблицы.
+    TASK_PLAN = task_pipeline.PHASE_PLAN
+    TASK_EXECUTE = task_pipeline.PHASE_EXECUTE
+    TASK_VALIDATE = task_pipeline.PHASE_VALIDATE
 
 
 @dataclass
@@ -100,6 +116,39 @@ class ProfileReport:
 
 
 @dataclass
+class TaskQueueEntry:
+    """Строка очереди задач для отчёта: цель, статус, место в работе и объём артефакта."""
+
+    goal: str
+    status: str
+    stage: str
+    step: str
+    artifact_chars: int
+
+
+@dataclass
+class TaskReport:
+    """Снимок состояния задачи для интерфейса (без обращения к модели).
+
+    Терминальный слой рендерит снимок и не знает ни правил автомата, ни файла состояния: этап,
+    текущий шаг и ожидаемое действие уже посчитаны, план приходит с отметками выполнения.
+    """
+
+    queue: Tuple[TaskQueueEntry, ...]
+    active_number: int
+    stages: Tuple[str, ...]
+    active_stage: str
+    current_step: str
+    expected_action: str
+    plan: Tuple[Tuple[str, str], ...]
+    artifact_sections: Tuple[str, ...]
+    artifact_chars: int
+    issues: Tuple[str, ...]
+    paused: bool
+    task_store: str
+
+
+@dataclass
 class AgentConfig:
     """Единый конфиг агента: настройки ответа сессии и модель."""
 
@@ -139,6 +188,8 @@ class TabletopAgent:
         history: Optional[HistoryManager] = None,
         long_term: Optional[LongTermMemory] = None,
         profile: Optional[ProfileStore] = None,
+        task: Optional[TaskStore] = None,
+        task_results_dir: Optional[Path] = None,
     ) -> None:
         self.client = client
         self.config = AgentConfig(
@@ -152,6 +203,18 @@ class TabletopAgent:
         # Персонализация — тоже свой файл: профиль настраивает сам пользователь, он не выводится
         # правилами из реплик, и его не касается ни /clear, ни очистка слоёв памяти.
         self.profile = profile if profile is not None else ProfileStore()
+        # Очередь задач — снова свой файл: задача переживает и `/clear`, и перезапуск, а
+        # конвейер её ведения живёт здесь же — решение о том, что уходит модели, принимает
+        # агент, а терминальный слой только показывает снимок и рисует панель.
+        self.task = task if task is not None else TaskStore()
+        self._pipeline = task_pipeline.TaskPipeline(
+            self.task,
+            self._ask_task,
+            task_results_dir if task_results_dir is not None else config.TASK_RESULTS_DIR,
+        )
+        # Слушатель фаз на время шага конвейера: запросы конвейера сообщают те же фазы,
+        # что и вспомогательные запросы стратегий.
+        self._phase_listener: Optional[Callable[[RequestPhase], None]] = None
         # Рабочий слой — данные текущей задачи (цель и ограничения): его место в конверте
         # истории, потому что жизнь слоя равна жизни диалога.
         self._working: Dict[str, str] = {}
@@ -306,6 +369,124 @@ class TabletopAgent:
             names=self.profile.names(),
             profile_store=str(self.profile.path),
         )
+
+    def add_task(self, goal: str) -> bool:
+        """Ставит задачу в очередь; False — цель пуста, задача не заведена."""
+        state = task_state.add_task(self.task.state, goal)
+        if len(state.tasks) == len(self.task.state.tasks):
+            return False
+        self.task.save(state)
+        return True
+
+    def drop_tasks(self) -> None:
+        """Снимает очередь задач: только это её и очищает — `/clear` задачу не трогает."""
+        self.task.save(task_state.drop_all(self.task.state))
+
+    def pause_tasks(self) -> None:
+        """Ставит прогон на паузу: срабатывает на границе операции, состояние уже на диске."""
+        self.task.save(task_state.set_paused(self.task.state, True))
+
+    def resume_tasks(self) -> None:
+        """Снимает паузу: прогон продолжается с сохранённого этапа и шага."""
+        self.task.save(task_state.set_paused(self.task.state, False))
+
+    @property
+    def tasks_paused(self) -> bool:
+        """Стоит ли прогон на паузе (только чтение)."""
+        return self.task.state.paused
+
+    def task_step(self, on_phase: Optional[Callable[[RequestPhase], None]] = None) -> Optional[TaskStepReport]:
+        """Одна операция конвейера задачи; None — незавершённых задач нет.
+
+        Уведомления о фазах запросов конвейера уходят тому же слушателю, что и фазы вопроса:
+        интерфейс показывает по ним подписи индикатора. Расход каждого запроса конвейера
+        записывается в общий накопитель сессии.
+        """
+        self._phase_listener = on_phase
+        try:
+            return self._pipeline.step()
+        finally:
+            self._phase_listener = None
+
+    def task_answer_edits(self, text: str) -> None:
+        """Принимает ответ пользователя о правках к плану задачи."""
+        self._pipeline.answer_edits(text)
+
+    def task_report(self) -> TaskReport:
+        """Снимок состояния задачи для интерфейса.
+
+        Отдаёт очередь со статусами, этап, текущий шаг, ожидаемое действие, план с отметками
+        выполнения, разделы и объём артефакта, замечания проверки, признак паузы и путь файла
+        состояния. Ни одного обращения к модели не делает; интерфейс рендерит снимок и не читает
+        ни файл состояния, ни внутренние структуры агента.
+        """
+        state = self.task.state
+        task = state.active
+        queue = tuple(
+            TaskQueueEntry(
+                goal=item.goal,
+                status=item.status.value,
+                stage=task_state.STAGE_LABELS[item.stage],
+                step=state.current_step if index == state.active_index else "—",
+                artifact_chars=sum(
+                    len(section.text) for section in item.sections if section.text.strip()
+                ),
+            )
+            for index, item in enumerate(state.tasks)
+        )
+        if task is None:
+            return TaskReport(
+                queue=queue,
+                active_number=0,
+                stages=tuple(task_state.STAGE_LABELS[stage] for stage in task_state.STAGES),
+                active_stage="",
+                current_step=state.current_step,
+                expected_action=state.expected_action,
+                plan=(),
+                artifact_sections=(),
+                artifact_chars=0,
+                issues=(),
+                paused=state.paused,
+                task_store=str(self.task.path),
+            )
+        written = [section for section in task.sections if section.text.strip()]
+        return TaskReport(
+            queue=queue,
+            active_number=state.active_index + 1,
+            stages=tuple(task_state.STAGE_LABELS[stage] for stage in task_state.STAGES),
+            active_stage=task_state.STAGE_LABELS[task.stage],
+            current_step=state.current_step,
+            expected_action=state.expected_action,
+            plan=tuple(
+                (item, _plan_mark(task, index)) for index, item in enumerate(task.plan)
+            ),
+            artifact_sections=tuple(section.item for section in written),
+            artifact_chars=sum(len(section.text) for section in written),
+            issues=tuple(
+                f"{issue.item}. {issue.text}" if issue.item else issue.text
+                for issue in task.issues
+            ),
+            paused=state.paused,
+            task_store=str(self.task.path),
+        )
+
+    def _ask_task(
+        self, messages: List[Dict[str, str]], max_words: int, phase: str
+    ) -> AnswerMeta:
+        """Запрос конвейера задачи: модель сессии, без температуры сессии, прижатый потолок.
+
+        Расход учитывается в общем накопителе, а ошибка API поднимается наверх — конвейер
+        переводит её в состояние задачи, а не в исключение для интерфейса.
+        """
+        self._signal(self._phase_listener, RequestPhase(phase))
+        meta = self.client.ask_with_usage_messages(
+            messages,
+            max_tokens=config.max_tokens_for_words(max_words),
+            model=self.config.model,
+        )
+        self._last_result = meta
+        self._ledger.record(meta)
+        return meta
 
     def setup_profile(self, state: InterviewState) -> UserProfile:
         """Собирает профиль из ответов диалога настройки, сохраняет его и делает активным.
@@ -525,6 +706,9 @@ class TabletopAgent:
         profile = self._profile_message()
         if profile is not None:
             messages.append(profile)
+        task = self._task_message()
+        if task is not None:
+            messages.append(task)
         memory = self._memory_message()
         if memory is not None:
             messages.append(memory)
@@ -543,6 +727,18 @@ class TabletopAgent:
         ассета внутри сообщения подчиняет предпочтения профиля настройкам приложения.
         """
         content = profile_message(self.profile.active())
+        if content is None:
+            return None
+        return {"role": "system", "content": content}
+
+    def _task_message(self) -> Optional[Dict[str, str]]:
+        """Системное сообщение состояния задачи: пустая очередь — None.
+
+        Стоит между профилем и слоями памяти: профиль отвечает на «как отвечать», состояние
+        задачи — на «что мы сейчас делаем», память — на «что известно». Пустая очередь и очередь
+        без незавершённых задач сообщения не дают, поэтому форма запроса без задачи не меняется.
+        """
+        content = task_state.task_message(self.task.state)
         if content is None:
             return None
         return {"role": "system", "content": content}
@@ -755,3 +951,10 @@ class TabletopAgent:
             "total_tokens": meta.total_tokens,
             "cost_usd": meta.cost_usd,
         }
+
+
+def _plan_mark(task: TaskItem, index: int) -> str:
+    """Отметка подзадачи плана для снимка: выполнена, не выполнена или ещё не начата."""
+    if index >= len(task.sections):
+        return "◦"
+    return "✗" if task.sections[index].failed else "✓"
