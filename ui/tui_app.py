@@ -1060,10 +1060,10 @@ class TabletopAITUI:
             unresolved = "; ".join(escape(issue) for issue in step.issues)
             return (
                 f"{head}задача завершена с замечаниями: {sections} артефакта, "
-                f"{step.artifact_chars} символов; не закрыто: {unresolved}"
+                f"{plural_ru(step.artifact_chars, 'символ', 'символа', 'символов')}; не закрыто: {unresolved}"
             )
         return (
-            f"{head}задача решена: {sections} артефакта, {step.artifact_chars} символов, "
+            f"{head}задача решена: {sections} артефакта, {plural_ru(step.artifact_chars, 'символ', 'символа', 'символов')}, "
             "замечаний проверки нет"
         )
 
@@ -1092,7 +1092,7 @@ class TabletopAITUI:
                 place = f"{entry.stage}, {entry.step}"
             else:
                 place = (
-                    f"{entry.status}, артефакт {entry.artifact_chars} символов"
+                    f"{entry.status}, артефакт {plural_ru(entry.artifact_chars, 'символ', 'символа', 'символов')}"
                     if entry.artifact_chars
                     else entry.status
                 )
@@ -1122,7 +1122,7 @@ class TabletopAITUI:
                 )
         self.console.print(
             f"  Артефакт: {plural_ru(len(report.artifact_sections), 'раздел', 'раздела', 'разделов')}, "
-            f"{report.artifact_chars} символов"
+            f"{plural_ru(report.artifact_chars, 'символ', 'символа', 'символов')}"
         )
         issues = "; ".join(escape(issue) for issue in report.issues) if report.issues else "—"
         self.console.print(f"  Замечания проверки: {issues}")
@@ -1162,7 +1162,7 @@ class TabletopAITUI:
         if report.artifact_chars:
             lines.append(
                 f"Артефакт:           {plural_ru(len(report.artifact_sections), 'раздел', 'раздела', 'разделов')}, "
-                f"{report.artifact_chars} символов"
+                f"{plural_ru(report.artifact_chars, 'символ', 'символа', 'символов')}"
             )
         if self._task_spend:
             label, meta = self._task_spend[-1]

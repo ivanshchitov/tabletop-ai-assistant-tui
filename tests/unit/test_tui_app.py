@@ -1522,7 +1522,7 @@ def test_task_report_after_all_tasks_are_done(make_app, recording_console):
 
     chars = len("Раздел артефакта") + len("Второй раздел") + len("Третий раздел")
     assert recording_console.contains("Очередь (1)")
-    assert recording_console.contains(f"решена, артефакт {chars} символов")
+    assert recording_console.contains(f"решена, артефакт {chars} символа")
     assert recording_console.contains("Незавершённых задач нет — прогон остановлен")
 
 
