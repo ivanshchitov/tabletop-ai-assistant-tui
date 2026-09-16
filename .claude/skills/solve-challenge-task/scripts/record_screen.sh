@@ -3,7 +3,7 @@ set -euo pipefail
 
 STATE_DIR="${TMPDIR:-/tmp}/solve-challenge-task"
 STATE_FILE="$STATE_DIR/recorder.state"
-MAX_SECONDS=600
+MAX_SECONDS=1800
 
 usage() {
     cat >&2 <<'EOF'

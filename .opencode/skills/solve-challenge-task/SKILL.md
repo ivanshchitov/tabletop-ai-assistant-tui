@@ -155,7 +155,7 @@ allowed-tools: Bash, Read, Write, Edit, Glob, Grep, Skill
 ## `scripts/record_screen.sh`
 
 - `doctor` — платформа, рекордеры, вердикт «ГОТОВ / НЕ ГОТОВ» с подсказкой установки; на macOS дополнительно снимает 2-секундную пробу в `$TMPDIR` и проверяет кадр (ловит отсутствие разрешения «Запись экрана»). Ничего не пишет вне `$TMPDIR`.
-- `start <basename>` — запись в `<basename>.<ext>` (`.mp4` ffmpeg, `.mkv` wf-recorder, `.mov` screencapture), PID-файл, жёсткий лимит 10 минут.
+- `start <basename>` — запись в `<basename>.<ext>` (`.mp4` ffmpeg, `.mkv` wf-recorder, `.mov` screencapture), PID-файл, жёсткий лимит 30 минут (страховка от забытой записи).
 - `stop` — SIGINT, ожидание до 15 сек (файл финализируется), размер файла; `kill -9` только по таймауту.
 
 Выбор рекордера: macOS — `ffmpeg avfoundation`, иначе `screencapture -V`; Linux Wayland — `wf-recorder`, иначе `gpu-screen-recorder`; Linux X11 — `ffmpeg x11grab`. x11grab под Wayland даёт чёрный кадр — `doctor` об этом скажет.
