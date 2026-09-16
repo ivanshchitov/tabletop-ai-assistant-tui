@@ -150,7 +150,8 @@ than repeating it):
 ## Architecture
 
 Two packages: `core/` (agent, settings, prompts, API client, memory layers and stores, the user
-profile, context strategies and the compression logic — no `rich`/terminal dependency) and `ui/`
+profile, the task state machine and its pipeline, context strategies and the compression logic — no
+`rich`/terminal dependency) and `ui/`
 (`tui_app.py`, `keyboard.py`, `commands_screen.py`, `settings_screen.py`, `branches_screen.py`,
 `models_screen.py` — everything that touches the terminal). Modules inside `core/`
 import each other with relative imports (`from . import config`, `from .answer_settings import
@@ -164,16 +165,16 @@ parents up (`Path(__file__).resolve().parent.parent`) rather than one — it has
 `profile.json` actually live.
 
 **Environment switches (`core/config.py`):** `OPENCODE_API_URL`, `TABLETOP_HISTORY_FILE`,
-`TABLETOP_MEMORY_FILE`, `TABLETOP_PROFILE_FILE`, `TABLETOP_REQUEST_TIMEOUT`,
+`TABLETOP_MEMORY_FILE`, `TABLETOP_PROFILE_FILE`, `TABLETOP_TASK_FILE`, `TABLETOP_REQUEST_TIMEOUT`,
 `TABLETOP_TYPING_DELAY` (the last one read in `ui/tui_app.py`), `TABLETOP_COMPRESS_AFTER` (the
 session setting's default, messages, default 10) and `TABLETOP_MAX_SESSION_TOKENS` (the session
 setting's default, tokens, default 20000) override the corresponding defaults. They exist so the
 e2e layer can point the app at a local stub server, keep history, long-term memory and the user
 profile in temp files, collapse the typing animation — or exercise compression and the token
-ceiling in seconds. `HISTORY_FILE`/`MEMORY_FILE`/`PROFILE_FILE` especially: their paths derive
+ceiling in seconds. `HISTORY_FILE`/`MEMORY_FILE`/`PROFILE_FILE`/`TASK_FILE` especially: their paths derive
 from `__file__`, not the working directory, so without the override *any* run — a test run
-included — would write to the single real `history.json`/`memory.json`/`profile.json` in the repo
-root. A new on-disk state file means a new env switch **and** a pass-through in
+included — would write to the single real `history.json`/`memory.json`/`profile.json`/`task.json`
+in the repo root. A new on-disk state file means a new env switch **and** a pass-through in
 `tests/e2e/harness.AppSession` — see the agent-loop gotchas above.
 
 **Settings flow:** `core/answer_settings.AnswerSettings` (`format: AnswerFormat`,
@@ -357,6 +358,121 @@ shape every answer, deliberately kept apart from the memory layers. Deliberate d
   profile. Like `/memory`, the command has **meaningful arguments**, and it was deliberately kept
   out of the panel-reducer pattern because a question-answer dialogue is not a form.
 
+**Task state machine (`core/task_state.py`, `core/task_pipeline.py`, `/task`):** a user goal enters
+as a *task* in a queue and is carried through four stages — `Planning` → `Execution` → `Validation`
+→ `Done` — by the agent itself, without the user steering the transitions. Deliberate decisions
+baked in:
+- **The stage machine is code, not a model contract.** `task_state` holds the fields the day-13 task
+  names (`этап`, `текущий шаг`, `ожидаемое действие`) and the transition table: Planning ends by
+  asking the user for edits (non-empty answer → another Planning round, empty → Execution), Execution
+  runs the plan's sub-tasks one by one, Validation checks the artifact, Done reports a summary and
+  moves to the next queued task. `текущий шаг`/`ожидаемое действие` are *derived* properties, never
+  stored, so they cannot drift away from the stage. The model supplies content only — the plan, the
+  artifact sections, the review verdict — and never chooses a transition; that is why "the agent
+  jumped a stage" is structurally impossible here.
+- **One operation per call.** `agent.task_step()` performs exactly one stage operation (a plan
+  request, one sub-task, the validation, the summary) and writes `task.json` *before* the next
+  request; the terminal layer only loops, redraws the panel and polls the pause key. `TaskPipeline`
+  never touches `rich` or HTTP: it gets `ask(messages, max_words, phase)` injected, which is what
+  makes every branch testable with a fake request.
+- **The pipeline's requests carry their own length limits.** Every pipeline request names what it
+  wants (`Число подзадач`, `Формулировка подзадачи — до N символов`, `Объём раздела — не больше N
+  слов`) as part of the user message, not only in the asset: `max_tokens` is derived from per-phase ceilings (`TASK_PLAN_MAX_WORDS`,
+  `TASK_SECTION_MAX_WORDS`, `TASK_VALIDATE_MAX_WORDS`) but a reasoning model spends its reasoning
+  tokens *outside* that ceiling, so a section
+  asked for loosely came back with thousands of tokens and a five-sub-task run took minutes. Ask for
+  a section, not for prose.
+- **The plan ceiling is per task and grows.** `MAX_PLAN_ITEMS` (10) caps the *first* plan — a
+  runaway plan would stretch the run — but the limit lives on `TaskItem.plan_limit` and rises when
+  real work appears: a plan rebuilt after the user's edits keeps every item (the user asked for
+  them), and sub-tasks named by validation are appended whole rather than truncated. `plan_built`
+  truncates only the initial plan; `validation_verdict` never drops additions. The plan request
+  names the task's current limit (`Число подзадач: от 3 до {plan_limit}`), so a grown ceiling is
+  what the model is asked for on the next round.
+- **Bounded loops.** `MAX_PLAN_ROUNDS` (5) caps Planning rounds — on the last round the plan is taken
+  as is; `MAX_VALIDATION_ATTEMPTS` (2) caps the Validation→Execution fix loop — exhausted attempts
+  finish the task `Done` *with* the unresolved issues listed, and a review issue that names no
+  sub-task ends the task right away, because there would be nothing to fix.
+- **The result lands in its own file, and the review is deliberately lenient.** When a task reaches
+  Done, `task_state.write_result()` writes `tasks/<номер>-<латинская-слога>.md` (`TABLETOP_TASKS_DIR`,
+  gitignored, isolated in tests like every other state path): goal, a one-line итог and one `##`
+  section per plan item, plus an issues block when some remarks stayed open. The file text is built
+  in `task_state.result_markdown()` without Russian plurals («Разделов: 9») — the phrase with
+  declension is the terminal layer's job (`plural_ru`), and the TUI prints `Результат: <путь>` right
+  after the итог. A write error returns `None` and never breaks the run. The validation prompt is
+  written to pass a *usable* artifact: only an absent sub-task, contradictions that make the rules
+  unusable and placeholders count as issues; nitpicks are explicitly not, and `MAX_VALIDATION_ATTEMPTS`
+  is 3 — the live demo kept ending "с замечаниями" because any nitpick counted.
+- **Validation is deterministic first.** `deterministic_issues()` flags a missing section, a section
+  marked not-executed, an empty one and one whose answer hit `max_tokens` (`finish_reason == "length"`);
+  the model review only adds to that list, and an unavailable/unparsable review never cancels the
+  deterministic verdict — the summary says "модельная проверка недоступна". Plan and verdict JSON are
+  parsed client-side (first JSON object in the text) exactly like the facts extractor, for the same
+  reasoning-model reasons.
+- **Artifact lives inside `task.json`**, one section per executed sub-task, keyed by plan index — not
+  a file per task. The project already keeps answers verbatim in a store envelope, and a second state
+  file would have meant another switch and another test-isolation pass for the same result.
+- **Pause is a state flag, taken at the operation boundary.** The terminal enters cbreak mode for the
+  run and reads the key with `keyboard.read_key_nowait()` *before* each operation — the in-flight
+  request finishes, the state is already on disk, so nothing is lost and the resume continues from the
+  saved step. `p` pauses; so does Ctrl+C, because cbreak keeps `ISIG`, so SIGINT surfaces inside the
+  run loop and MUST be translated into a pause rather than into an exit (the app-wide "Ctrl+C exits"
+  rule still holds everywhere else, `/exit` remains available from the prompt). The flag is stored in
+  `task.json`, so a pause survives a restart.
+- **Visibility is one `rich.Live` panel for the whole run, with the status bar under it.** The panel
+  (task N of M, the four stages with the current one marked, the step, the expected action, the plan
+  as a *list* — one sub-task per line with its mark, the artifact volume, the pause hint) lives from
+  the first operation to the end of the run, and the live region also carries the status bar *below*
+  the panel (`Group(panel, Rule, status)`) — the user asked for the status bar to be printed after
+  the panel and never covered by it, which inside a live region means exactly this. The panel is
+  `transient=True`, so the scrollback keeps just the app's own lines: `⏱` metrics per request, the
+  pause line, the per-task summary. Journal prints during a live run go *above* the region — that is
+  rich's behaviour for `console.print` while a `Live` is active, and it is why the question about
+  edits no longer needs the panel to be stopped (stopping and restarting the same `Live` made the
+  redraw overwrite the printed lines). `/task` prints the full snapshot instead; for a queue with no
+  unfinished task it prints the queue and stops there (there is no active stage then — asking for it
+  used to raise `ValueError`).
+  Marks like `[x]` MUST go through `rich.markup.escape`: rich reads `[x]` as an unknown tag and
+  silently drops it (plain `[ ]` survives — do not "fix" that asymmetry by hand).
+- **The answer to the plan question is read key by key, with `keyboard.read_char()`, and rendered in
+  the panel.** `readline` cannot be used inside the run: the terminal is in cbreak mode for the pause
+  key and cbreak does not echo, so the typed text would be invisible — and stopping the panel to ask
+  would contradict "the panel shows the state always". `read_char()` exists because `read_key()`
+  returns a single *byte*: Cyrillic is two bytes in UTF-8, so a byte-wise reader turned the user's
+  edits into replacement characters before they reached the model.
+- **Validation may extend the plan, and the fix round never redoes finished work.** The review's JSON
+  may carry `items` — work the plan did not have. `validation_verdict(state, issues, new_items)`
+  appends them to the plan (bounded per round by `MAX_PLAN_ITEMS`) and both they and the *unfinished*
+  sub-tasks (`incomplete_indexes`: no section, failed section, empty section) go into `fixing`;
+  Execution executes exactly those, so the panel marks the new ones `[ ]` → `[x]` like any other.
+  An issue about a section that is already written does **not** restart it — the user's rule is that
+  finished work is not redone; the issue stays in the list and shows up in the Done summary (a
+  truncated section counts as written for the same reason, with its issue reported, not re-generated).
+  Without the new-items path a general issue ("the artifact lacks X") had nothing to fix and ended the
+  task with an open remark.
+- **The run's spend is shown in the panel, labelled — and nowhere else.** Every pipeline step
+  records `(label, meta)` into `self._task_spend`, where the label is the point *before* the request
+  (`Execution, 2/3: «…»`, `Validation, попытка 1/2`); the panel renders the last request with its
+  label, time, tokens and cost plus the run total. `_print_task_step` deliberately prints **no**
+  `⏱` lines during a run (per-request numbers without "what for" were the first complaint, a stream
+  of them in the journal the second): the journal keeps only notices and the task summary, and the
+  `⏱` line still belongs to ordinary question answers.
+- **The standard input field is visible during the run, and Enter uses it.** The live region is the
+  panel + status bar + `INPUT_PROMPT` with `self._run_input` — the same prompt literal the main loop
+  uses (`INPUT_PROMPT`, `_next_input`). `_collect_typed_keys` drains keys between operations: a bare
+  `p` on an empty line still pauses, Enter with a non-empty line pauses *and* hands the line to the
+  main loop through `_pending_input` (so `/task`, `/exit` or a question are handled normally, the run
+  having stopped at a safe boundary). Backspace edits the line; nothing typed is lost. The panel's
+  `TASK_PAUSE_HINT` line ("Пауза — клавиша p или Ctrl+C; Enter — выполнить введённое") is rendered
+  on **every** frame of the run — the user asked for the pause recipe to be always on screen, so it
+  must not be hidden behind the busy label or the edits question.
+- **The queue is not the dialogue.** `/clear` empties the dialogue and never the queue; only
+  `/task stop` drops it, and only while the run is not in progress (the prompt is busy during a run,
+  so that is structural, not a guard). A failed request marks the task `не удалось` with the reason and
+  the run moves to the next task — pipeline failures never raise into the UI.
+- **`tests/e2e/harness.AppSession` passes `TABLETOP_TASK_FILE`** like the other stores; without it an
+  e2e run would read and write the real `task.json` in the repo root.
+
 **`/commands` (`ui/commands_screen.py`):** an interactive panel listing every command with a short
 description (↑/↓ move, Enter runs the selected command, Esc cancels with zero API calls).
 Deliberate decisions baked in:
@@ -453,12 +569,15 @@ session. Deliberate decisions baked in:
   of ~93s) — accepted deliberately so slow-but-working reasoning responses aren't misreported as
   failures.
 
-**`ui/keyboard.py` (raw terminal input for the interactive panels: `/commands`, `/settings`, `/branches`, `/models`)** — two non-obvious constraints,
+**`ui/keyboard.py` (raw terminal input for the interactive panels: `/commands`, `/settings`, `/branches`, `/models`, plus the task run's pause key)** — two non-obvious constraints,
 both found by testing against a real PTY rather than mocks:
 - Read raw bytes with `os.read(fd, 1)`, not `sys.stdin.read(1)`. The buffered `TextIOWrapper` can
   pull multiple bytes of an escape sequence (e.g. arrow key `ESC [ A`) into its own internal buffer
   in one syscall; the `select()` lookahead used to distinguish a lone Esc from the start of an
   arrow sequence only sees the fd, not that buffer, so it misreads a burst as Esc + stray chars.
+- `read_key_nowait()` is the non-blocking sibling of `read_key()` (empty string when nothing is
+  typed): the task run redraws its panel and polls the pause key between operations, and a blocking
+  read there would only notice the keypress after the *next* operation.
 - Enter cbreak/raw mode **once for the whole screen** via `keyboard.raw_mode()`, not per keystroke.
   Toggling the terminal mode around each individual `read_key()` call creates a window where
   canonical mode is briefly restored between reads; a burst of bytes (e.g. several Backspace
@@ -575,14 +694,15 @@ saved: `dialogues` stays a flat list across branches.
 ## Test layout
 
 - `tests/unit/` — no subprocesses, ~3s for the whole layer. `core/` logic (including the memory
-  routing table, the long-term store, the profile store and the setup dialogue automaton), the
+  routing table, the long-term store, the profile store and the setup dialogue automaton, the task
+  state machine with every transition branch and the task pipeline against a fake request), the
   `/commands`, `/settings`, `/branches` and `/models` reducers, and `TabletopAITUI` driven through
   injected dependencies:
   `TabletopAITUI(console=, history=, client=)` takes a `rich` console writing to a buffer, a
   `HistoryManager` on `tmp_path`, and a fake client that records what was asked. Passing a client
   also skips the API-key prompt at startup. Agent and TUI tests patch the *default* stores
-  (`tabletop_agent.HistoryManager`/`LongTermMemory`/`ProfileStore`) so no test ever touches the real
-  `history.json`/`memory.json`/`profile.json`. The setup dialogue is driven in unit tests by
+  (`tabletop_agent.HistoryManager`/`LongTermMemory`/`ProfileStore`/`TaskStore`) so no test ever
+  touches the real `history.json`/`memory.json`/`profile.json`/`task.json`. The setup dialogue is driven in unit tests by
   replacing `sys.stdin` (it reads lines, not `input()`), and in e2e by sending a line only after the
   app's own question is on screen — the echoed answer appears before the next question is ready, so
   waiting on the echo loses an answer.
@@ -610,6 +730,13 @@ saved: `dialogues` stays a flat list across branches.
   ceilings) because model output is non-deterministic; assert on the requirement, never on an
   exact wording. Note that assertions run against the *rendered* screen, so markdown is already
   gone — rich draws a ```json block as a bordered code block with no backticks left in the text.
+- `tests/e2e/test_task_flow.py` — the task pipeline in a real pty: a full two-task run without a
+  single keypress (the stub records the order and shape of the plan/execute/validate requests), the
+  edits round rebuilding the plan, a pause pressed mid-Execution and the resume continuing from the
+  saved step, a restart continuing the same task from `task.json`, `task.json` surviving `/clear`, a
+  failed task keeping the queue moving, and the repo's real `task.json` staying untouched. The run is
+  slowed down by the stub replies' `delay` so the panel states are observable: with instant replies a
+  whole run finishes in milliseconds and the assertions race the app.
 - `tests/e2e/test_profile.py` — the setup dialogue in a real pty: five questions answered line by
   line, the profile landing in the temp `profile.json`, the next question carrying the profile
   message, `/clear` and a restart keeping it, `Ctrl+C` cancelling without writing, and the repo's
