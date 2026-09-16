@@ -13,8 +13,11 @@ except ImportError:  # pragma: no cover - readline недоступен на Win
 from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
+from rich.console import Group
 from rich.markup import escape
 from rich.panel import Panel
+from rich.rule import Rule
+from rich.text import Text
 
 from core import config, memory_layers, user_profile
 from core.answer_settings import AnswerFormat, AnswerSettings, ContextStrategy
@@ -27,7 +30,7 @@ from core.api_client import (
     is_valid_json_answer,
 )
 from core.history_manager import HistoryManager
-from core.tabletop_agent import RequestPhase, TabletopAgent
+from core.tabletop_agent import RequestPhase, TabletopAgent, TaskReport
 
 from . import branches_screen, commands_screen, keyboard, models_screen, settings_screen
 from .settings_screen import SettingsScreenState
@@ -84,6 +87,34 @@ PROFILE_INTERVIEW_CANCELLED = "Настройка профиля отменен�
 # readline неверно считает ширину строки и портит её при возврате каретки.
 PROFILE_ANSWER_PROMPT = "> "
 
+# Команда /task: прогон идёт без приглашения ввода, поэтому управление — клавиша паузы и Ctrl+C.
+TASK_PAUSE_KEY = "p"
+TASK_HINT = (
+    "Подкоманды: /task add <цель> — поставить задачу в очередь | /task run — запустить и "
+    "продолжить прогон | /task stop — снять очередь"
+)
+TASK_EMPTY_HINT = (
+    "Очередь задач пуста — поставьте задачу: /task add <что нужно сделать>, затем /task run."
+)
+TASK_EMPTY_EPILOGUE = "Очередь задач пуста — прогон остановлен."
+# Подсказка о паузе — постоянная строка панели: как остановить задачу, видно в любой момент.
+TASK_PAUSE_HINT = "Пауза — клавиша p или Ctrl+C; Enter — выполнить введённое"
+TASK_PAUSE_NOTICE = "⏸ Пауза: {stage}, шаг {step} — состояние сохранено; продолжить: /task run"
+TASK_EDITS_QUESTION = "Правки к плану (пустая строка — принять план и идти дальше): "
+TASK_EDITS_REJECTED = "Круги планирования исчерпаны — план принят как есть."
+# Подписи фаз конвейера в живой панели: те же слова, что и у спиннера вопроса.
+# Приглашение ввода: та же строка, что у главного цикла, — во время прогона поле ввода
+# показывается стандартным образом, ниже панели и статус-бара.
+INPUT_PROMPT = "> Введите вопрос (или /exit для выхода): "
+TASK_PHASE_LABELS = {
+    RequestPhase.TASK_PLAN: "Планирование...",
+    RequestPhase.TASK_EXECUTE: "Выполнение подзадачи...",
+    RequestPhase.TASK_VALIDATE: "Проверка...",
+}
+# Отметки подзадач плана в панели и отчёте: выполнена, не выполнена, ещё не начата.
+# Печатаются через escape(): набор [x] rich принимает за разметку и выбросил бы его из вывода.
+TASK_MARK_LABELS = {"✓": "[x]", "✗": "[!]", "◦": "[ ]"}
+
 
 def plural_ru(count: int, one: str, few: str, many: str) -> str:
     """«1 обмен», «2 обмена», «5 обменов»: число отчёта вместе с верной формой слова.
@@ -122,6 +153,11 @@ class TabletopAITUI:
         # Обе памяти агента — внутри агента: история передаётся ему при создании,
         # и он сам восстанавливает контекст; UI только показывает сохранённое.
         self.agent = TabletopAgent(client, history=history)
+        # Ход прогона задачи: набранная в поле ввода строка, строка, которую после остановки
+        # обработает главный цикл, и траты по запросам с пометкой, на что они были.
+        self._run_input = ""
+        self._pending_input: Optional[str] = None
+        self._task_spend: List[Tuple[str, AnswerMeta]] = []
         self._exit_requested = False
         self._setup_autocomplete()
 
@@ -188,7 +224,7 @@ class TabletopAITUI:
                 try:
                     # Обычный input() без rich-разметки: readline знает точную длину
                     # приглашения и не портит его при удалении введённого текста (backspace).
-                    user_input = input("> Введите вопрос (или /exit для выхода): ")
+                    user_input = self._next_input()
                 except EOFError:
                     self._exit()
                     return
@@ -221,6 +257,18 @@ class TabletopAITUI:
             self.console.print()
             self._exit()
             return
+
+    def _next_input(self) -> str:
+        """Возвращает строку для главного цикла.
+
+        Строка, набранная в поле ввода во время прогона задачи, обрабатывается после остановки:
+        прогон на это время встаёт на паузу, состояние уже записано на диск.
+        """
+        if self._pending_input is not None:
+            line, self._pending_input = self._pending_input, None
+            self.console.print(f"{INPUT_PROMPT}{line}")
+            return line
+        return input(INPUT_PROMPT)
 
     def _read_manual_key(self) -> str:
         """Читает ключ с терминала без readline.
@@ -287,6 +335,9 @@ class TabletopAITUI:
             return True
         if command == "/profile":
             self._handle_profile(user_input)
+            return True
+        if command == "/task":
+            self._handle_task(user_input)
             return True
         if command == "/branches":
             self._open_branches_screen()
@@ -809,6 +860,344 @@ class TabletopAITUI:
         )
         self.console.print(f"[dim]  {PROFILE_HINT}[/dim]")
 
+    # --- задача: команда, отчёт и прогон ---
+
+    def _handle_task(self, user_input: str) -> None:
+        """Команда /task: без аргументов — отчёт, с подкомандой — действие над очередью.
+
+        Аргументы значимы, как у `/memory` и `/profile`: задача — это не вопрос модели, а очередь
+        работ, поэтому у неё есть постановка, запуск и снятие. Прогон ведёт агент; здесь только
+        цикл «выполнить операцию, перерисовать панель, опросить клавишу паузы».
+        """
+        _, _, argument = user_input.partition(" ")
+        subcommand, _, rest = argument.strip().partition(" ")
+        if not subcommand:
+            self._print_task_report()
+            return
+        if subcommand == "add":
+            self._add_task(rest)
+            return
+        if subcommand == "run":
+            self._run_task_pipeline()
+            return
+        if subcommand == "stop":
+            self._stop_tasks()
+            return
+        self.console.print(f"[dim]{TASK_HINT}[/dim]")
+
+    def _add_task(self, goal: str) -> None:
+        if not self.agent.add_task(goal):
+            self.console.print(f"[bold yellow]Цель не указана.[/bold yellow] {TASK_HINT}")
+            return
+        report = self.agent.task_report()
+        self.console.print(
+            f"[bold green]Задача в очереди "
+            f"({len(report.queue)} из {len(report.queue)}):[/bold green] "
+            f"{escape(report.queue[-1].goal)}"
+        )
+
+    def _stop_tasks(self) -> None:
+        report = self.agent.task_report()
+        if not report.queue:
+            self.console.print("[dim]Очередь задач и так пуста.[/dim]")
+            return
+        self.agent.drop_tasks()
+        self.console.print(
+            "[bold green]Очередь задач снята.[/bold green] Новую задачу ставит /task add."
+        )
+
+    def _run_task_pipeline(self) -> None:
+        """Прогон конвейера задачи: живая панель, шаги агента и пауза по клавише или Ctrl+C.
+
+        Пауза опрашивается перед каждой операцией, поэтому идущий запрос доводится до конца, а
+        состояние к этому моменту уже записано на диск. Панель (rich.Live со transient) живёт
+        ровно на время операции и исчезает между ними: живая перерисовка затирала бы строки
+        журнала — вопрос о правках, метрики и итог задачи. След прогона в журнале именно эти
+        строки и составляет.
+        """
+        report = self.agent.task_report()
+        if not report.queue or report.active_number == 0:
+            self.console.print(f"[dim]{TASK_EMPTY_HINT}[/dim]")
+            return
+        if self.agent.tasks_paused:
+            self.agent.resume_tasks()
+            self.console.print("[dim]Пауза снята — продолжаю с сохранённого шага.[/dim]")
+
+        paused = False
+        try:
+            with keyboard.raw_mode():
+                # Панель живёт весь прогон, включая ожидание ответа пользователя: состояние
+                # задачи должно быть видно и тогда, когда от пользователя ждут правок. Строки
+                # журнала (метрики, итоги) печатаются выше панели — rich умеет печатать поверх
+                # живой области, — а ввод идёт в саму панель, поэтому она ничего не перекрывает.
+                with Live(console=self.console, refresh_per_second=8, transient=True) as live:
+                    def draw(busy: str = "", answer: Optional[str] = None) -> None:
+                        live.update(self._run_frame(busy, answer))
+
+                    self._task_spend = []
+                    self._run_input = ""
+                    draw()
+                    while True:
+                        if self._collect_typed_keys(draw):
+                            # Enter с непустой строкой: прогон встаёт на паузу, а строку
+                            # обработает главный цикл — как обычный ввод пользователя.
+                            self._pending_input = self._run_input.strip()
+                            paused = True
+                            break
+                        before = self.agent.task_report()
+                        label = (
+                            f"{before.active_stage}, {before.current_step}"
+                            if before.active_stage
+                            else ""
+                        )
+                        step = self.agent.task_step(
+                            lambda phase: draw(TASK_PHASE_LABELS.get(phase, ""))
+                        )
+                        if step is None:
+                            break
+                        if step.meta is not None:
+                            self._task_spend.append((label, step.meta))
+                        self._print_task_step(step)
+                        if step.needs_edits:
+                            self.agent.task_answer_edits(self._ask_plan_edits(draw))
+                        draw()
+        except KeyboardInterrupt:
+            # Ctrl+C в cbreak-режиме приходит сигналом: пауза безопаснее выхода (работа уже на
+            # диске), а выйти всегда можно из приглашения командой /exit.
+            paused = True
+
+        if paused:
+            report = self.agent.task_report()
+            self.agent.pause_tasks()
+            self.console.print(
+                "[bold yellow]"
+                + TASK_PAUSE_NOTICE.format(stage=report.active_stage, step=report.current_step)
+                + "[/bold yellow]"
+            )
+            return
+        self.console.print(f"[bold green]{TASK_EMPTY_EPILOGUE}[/bold green]")
+
+    def _run_frame(self, busy: str = "", answer: Optional[str] = None):
+        """Кадр прогона: панель, статус-бар под ней и поле ввода — как в главном цикле."""
+        return Group(
+            self._render_task_panel(self.agent.task_report(), busy, answer),
+            Rule(style="dim"),
+            Text.from_markup(f"[dim]{self._status_bar_line()}[/dim]"),
+            Text.from_markup(f"{escape(INPUT_PROMPT)}{escape(self._run_input)}"),
+        )
+
+    def _collect_typed_keys(self, draw) -> bool:
+        """Забирает набранное с терминала в поле ввода; True — Enter с непустой строкой.
+
+        Клавиша паузы работает, только когда строка пуста: иначе набор «p» в начале строки
+        останавливал бы прогон вместо того, чтобы попасть в ввод.
+        """
+        while True:
+            key = keyboard.read_key_nowait()
+            if not key:
+                return False
+            if key == TASK_PAUSE_KEY and not self._run_input:
+                return True
+            if key == keyboard.ENTER:
+                if self._run_input.strip():
+                    return True
+                continue
+            if key == keyboard.BACKSPACE:
+                self._run_input = self._run_input[:-1]
+            elif len(key) == 1:
+                self._run_input += key
+            draw()
+
+    def _ask_plan_edits(self, draw) -> str:
+        """Читает правки к плану по клавишам, отражая ввод в самой панели.
+
+        `readline` здесь не годится: прогон идёт в cbreak-режиме (он нужен, чтобы клавиша паузы
+        приходила сразу), а этот режим не отражает ввод — набранное было бы не видно, и панель
+        пришлось бы закрывать на время вопроса, а она должна показывать состояние всегда. Поэтому
+        строку собираем сами и показываем её прямо в панели; Ctrl+C во время ввода остаётся
+        паузой (сигнал приходит в цикл прогона).
+        """
+        typed = ""
+        draw(answer=typed)
+        while True:
+            key = keyboard.read_char()
+            if key == keyboard.ENTER:
+                break
+            if key == keyboard.BACKSPACE:
+                typed = typed[:-1]
+            elif len(key) == 1:
+                typed += key
+            draw(answer=typed)
+        notice = f"Правки: {typed.strip()}" if typed.strip() else "Правок нет — план принят."
+        self.console.print(f"[dim]{escape(notice)}[/dim]")
+        return typed
+
+    def _print_task_step(self, step) -> None:
+        """Строки журнала по итогам операции прогона: замечания и итог задачи.
+
+        Строк метрик здесь намеренно нет: во время выполнения задачи траты показывает панель
+        (последний запрос и итог по прогону), а журнал остаётся чистым — по просьбе пользователя.
+        """
+        if step.notice:
+            self.console.print(f"[dim]{escape(step.notice)}[/dim]")
+        if step.finished_task:
+            self.console.print(f"[bold green]{self._task_summary(step)}[/bold green]")
+        if step.result_path:
+            self.console.print(f"[dim]Результат: {escape(step.result_path)}[/dim]")
+
+    @staticmethod
+    def _task_summary(step) -> str:
+        """Строка итога задачи: «Итог: …» — общий маркер для всех трёх исходов.
+
+        Факты приходят снимком шага, а фраза собирается здесь: русские склонения — дело
+        интерфейса, и в отчётах приложения они собираются одним и тем же `plural_ru`.
+        """
+        sections = plural_ru(step.sections, "раздел", "раздела", "разделов")
+        head = f"Итог: «{escape(step.goal)}» — "
+        if step.failure:
+            return f"{head}задача не удалась: {escape(step.failure)}"
+        if step.issues:
+            unresolved = "; ".join(escape(issue) for issue in step.issues)
+            return (
+                f"{head}задача завершена с замечаниями: {sections} артефакта, "
+                f"{step.artifact_chars} символов; не закрыто: {unresolved}"
+            )
+        return (
+            f"{head}задача решена: {sections} артефакта, {step.artifact_chars} символов, "
+            "замечаний проверки нет"
+        )
+
+    def _print_task_report(self) -> None:
+        """Отчёт /task: этапы, очередь, план с отметками и артефакт из снимка агента.
+
+        Ни одного обращения к модели и ни одного чтения файла состояния: интерфейс рендерит
+        снимок, правила автомата остаются в агенте.
+        """
+        report = self.agent.task_report()
+        self.console.print("[bold]Задача агента[/bold]")
+        stages = " → ".join(
+            f"[reverse bold]{label}[/reverse bold]" if label == report.active_stage else label
+            for label in report.stages
+        )
+        self.console.print(f"Этапы: {stages}")
+        self.console.print()
+        if not report.queue:
+            self.console.print(f"[dim]{TASK_EMPTY_HINT}[/dim]")
+            self.console.print(f"[dim]Состояние: {report.task_store}[/dim]")
+            return
+        self.console.print(f"Очередь ({len(report.queue)}):")
+        for number, entry in enumerate(report.queue, start=1):
+            marker = "▸" if number == report.active_number else " "
+            if number == report.active_number:
+                place = f"{entry.stage}, {entry.step}"
+            else:
+                place = (
+                    f"{entry.status}, артефакт {entry.artifact_chars} символов"
+                    if entry.artifact_chars
+                    else entry.status
+                )
+            self.console.print(
+                f"  {marker} {number}. {escape(entry.goal)} — {escape(place)}"
+            )
+        self.console.print()
+        if report.active_number == 0:
+            # Все задачи очереди завершены: активной нет, и полей этапа у отчёта тоже нет.
+            self.console.print("Незавершённых задач нет — прогон остановлен.")
+            self.console.print(f"  Состояние: {report.task_store}")
+            self.console.print(f"[dim]{TASK_HINT}[/dim]")
+            return
+        active = report.queue[report.active_number - 1]
+        self.console.print(f"Текущая задача: «{escape(active.goal)}»")
+        self.console.print(
+            f"  Этап: {report.active_stage} ({report.stages.index(report.active_stage) + 1} "
+            f"из {len(report.stages)})"
+        )
+        self.console.print(f"  Текущий шаг: {escape(report.current_step)}")
+        self.console.print(f"  Ожидаемое действие: {escape(report.expected_action)}")
+        if report.plan:
+            self.console.print("  План:")
+            for item, mark in report.plan:
+                self.console.print(
+                    f"    {escape(TASK_MARK_LABELS.get(mark, mark))} {escape(item)}"
+                )
+        self.console.print(
+            f"  Артефакт: {plural_ru(len(report.artifact_sections), 'раздел', 'раздела', 'разделов')}, "
+            f"{report.artifact_chars} символов"
+        )
+        issues = "; ".join(escape(issue) for issue in report.issues) if report.issues else "—"
+        self.console.print(f"  Замечания проверки: {issues}")
+        self.console.print(f"  Пауза: {'да' if report.paused else 'нет'}")
+        self.console.print(f"  Состояние: {report.task_store}")
+        self.console.print(f"[dim]{TASK_HINT}[/dim]")
+
+    def _render_task_panel(
+        self, report: TaskReport, busy: str = "", answer: Optional[str] = None
+    ) -> Panel:
+        """Живая панель прогона: задача, этапы, шаг, действие, план списком и строка ввода.
+
+        Панель показывается весь прогон, в том числе когда от пользователя ждут ответа: тогда
+        вместо подписи фазы в ней строка вопроса с набранным текстом. План печатается по одной
+        подзадаче на строку — следить за прогрессом по списку видно, а в одну строку нет.
+        """
+        active_index = (
+            report.stages.index(report.active_stage) if report.active_stage in report.stages else 0
+        )
+        stages = []
+        for index, label in enumerate(report.stages):
+            if index == active_index:
+                stages.append(f"[reverse bold]▸ {label}[/reverse bold]")
+            else:
+                stages.append(f"{'✓' if index < active_index else '·'} {label}")
+        lines = [
+            "Этапы:              " + "   ".join(stages),
+            f"Текущий шаг:        {escape(report.current_step)}",
+            f"Ожидаемое действие: {escape(report.expected_action)}",
+        ]
+        if report.plan:
+            lines.append("План:")
+            lines.extend(
+                f"  {escape(TASK_MARK_LABELS.get(mark, mark))} {escape(item)}"
+                for item, mark in report.plan
+            )
+        if report.artifact_chars:
+            lines.append(
+                f"Артефакт:           {plural_ru(len(report.artifact_sections), 'раздел', 'раздела', 'разделов')}, "
+                f"{report.artifact_chars} символов"
+            )
+        if self._task_spend:
+            label, meta = self._task_spend[-1]
+            lines.append(f"Последний запрос:   {escape(label)} — {self._meta_summary(meta)}")
+            lines.append(f"За прогон:          {self._spend_summary()}")
+        # Как поставить задачу на паузу, панель говорит всегда — и во время запроса, и когда
+        # ждёт правок, и когда ждёт клавишу.
+        lines.append(f"[dim]{TASK_PAUSE_HINT}[/dim]")
+        if busy:
+            lines.append(f"[bold yellow]{busy}[/bold yellow]")
+        if answer is not None:
+            lines.append(
+                "[bold]Правки к плану (Enter — принять, Ctrl+C — пауза):[/bold] "
+                f"{escape(answer)}"
+            )
+        title = (
+            f"Задача {report.active_number}/{len(report.queue)}: "
+            f"«{escape(report.queue[report.active_number - 1].goal)}»"
+        )
+        return Panel("\n".join(lines), title=title, border_style="cyan", title_align="left")
+
+    @staticmethod
+    def _meta_summary(meta: AnswerMeta) -> str:
+        cost = f"${meta.cost_usd:.4f}" if meta.cost_usd is not None else "неизвестно"
+        return f"{meta.elapsed_seconds:.1f}с, {meta.total_tokens} ток., {cost}"
+
+    def _spend_summary(self) -> str:
+        """Траты прогона целиком: сколько запросов, токенов и денег он стоил."""
+        tokens = sum(meta.total_tokens for _, meta in self._task_spend)
+        if any(meta.cost_usd is None for _, meta in self._task_spend):
+            cost = "неизвестно"
+        else:
+            cost = f"${sum(meta.cost_usd for _, meta in self._task_spend):.4f}"
+        return f"{plural_ru(len(self._task_spend), 'запрос', 'запроса', 'запросов')}, {tokens} ток., {cost}"
+
     def _print_memory_line(self) -> None:
         """Строка о решении маршрута после ответа: какие слои получили запись из реплики.
 
@@ -827,10 +1216,11 @@ class TabletopAITUI:
                 parts.append(f"{label} ({record.key})")
         self.console.print(f"[dim]Память: {', '.join(parts)}[/dim]")
 
-    def _print_usage_meta(self, meta: AnswerMeta) -> None:
+    def _print_usage_meta(self, meta: AnswerMeta, label: str = "") -> None:
         cost = f"${meta.cost_usd:.6f}" if meta.cost_usd is not None else "неизвестно"
+        where = f"{escape(label)}  |  " if label else ""
         self.console.print(
-            f"[dim]⏱ {meta.elapsed_seconds:.2f}с  |  "
+            f"[dim]⏱ {where}{meta.elapsed_seconds:.2f}с  |  "
             f"Токены: {meta.prompt_tokens}+{meta.completion_tokens}={meta.total_tokens}  |  "
             f"Стоимость: {cost}[/dim]"
         )
@@ -873,7 +1263,8 @@ class TabletopAITUI:
                 time.sleep(TYPING_DELAY)
             live.update(Markdown(answer))
 
-    def _print_status_bar(self) -> None:
+    def _status_bar_line(self) -> str:
+        """Текст статус-бара одной строкой: его печатают и обычные шаги, и живая панель прогона."""
         commands_hint = ", ".join(STATUS_COMMANDS)
         session = self.agent.session_usage
         session_cost = f"${session.cost_usd:.4f}" if session.cost_usd is not None else "неизвестно"
@@ -882,16 +1273,30 @@ class TabletopAITUI:
         # поэтому остаётся прежней.
         profile = self.agent.profile_report()
         profile_part = f"Профиль: {escape(profile.active_name)}  |  " if profile.sections else ""
-        self.console.print(
-            f"[dim]Статус: Готов ✅  |  Модель: {self.model}  |  {profile_part}Формат: {FORMAT_LABELS[self.settings.format]}  |  "
+        # Строка задачи — тоже только когда очередь непуста: пустая очередь в запрос не уходит,
+        # и раскладка статус-бара без задач остаётся прежней.
+        task = self.agent.task_report()
+        task_part = ""
+        if task.active_number:
+            place = ", пауза" if task.paused else ""
+            task_part = (
+                f"Задача: {task.active_number}/{len(task.queue)} "
+                f"«{escape(task.queue[task.active_number - 1].goal)}» — "
+                f"{task.active_stage} {escape(task.current_step)}{place}  |  "
+            )
+        return (
+            f"Статус: Готов ✅  |  Модель: {self.model}  |  {profile_part}{task_part}"
+            f"Формат: {FORMAT_LABELS[self.settings.format]}  |  "
             f"Стратегия: {STRATEGY_LABELS[self.settings.context_strategy]}  |  "
             f"Объём: {self.settings.max_words} слов  |  Лимит списка: {self.settings.list_limit}  |  "
             f"Температура: {self.settings.temperature:.1f}  |  "
             f"Команды: {commands_hint}  |  "
-            f"Сессия: {session.total_tokens} ток., {session_cost}[/dim]"
+            f"Сессия: {session.total_tokens} ток., {session_cost}"
         )
-        self.console.rule(style="dim")
 
+    def _print_status_bar(self) -> None:
+        self.console.print(f"[dim]{self._status_bar_line()}[/dim]")
+        self.console.rule(style="dim")
 
     def _exit(self) -> None:
         self.console.print(f"[bold yellow]{GOODBYE_MESSAGE}[/bold yellow]")

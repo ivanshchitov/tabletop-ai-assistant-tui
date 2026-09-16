@@ -189,3 +189,69 @@ def test_raw_mode_is_reentrant_across_screens(tty_stdin):
         with keyboard.raw_mode():
             pass
     assert _stable_attrs(fd) == before
+
+
+# --- неблокирующее чтение (прогон задачи опрашивает клавишу паузы) -----------------------
+
+
+def test_read_key_nowait_returns_empty_without_input(cbreak_tty):
+    assert keyboard.read_key_nowait() == ""
+
+
+def test_read_key_nowait_returns_the_key(cbreak_tty):
+    cbreak_tty(b"p")
+
+    assert keyboard.read_key_nowait() == "p"
+    assert keyboard.read_key_nowait() == ""
+
+
+def test_read_key_nowait_reads_a_special_key(cbreak_tty):
+    cbreak_tty(b"\x1b[A")
+
+    assert keyboard.read_key_nowait() == keyboard.UP
+
+
+def test_read_key_nowait_does_not_swallow_a_burst(cbreak_tty):
+    """Пачка байтов не теряется: каждый вызов отдаёт ровно одну клавишу.
+
+    Ctrl+C в проверку не входит: cbreak-режим сохраняет ISIG, поэтому он приходит сигналом,
+    а не байтом, — пауза по Ctrl+C приходит в приложение исключением, а не клавишей.
+    """
+    cbreak_tty(b"pq")
+
+    assert keyboard.read_key_nowait() == "p"
+    assert keyboard.read_key_nowait() == "q"
+    assert keyboard.read_key_nowait() == ""
+
+
+# --- чтение символа (строка правок в прогоне задачи) -------------------------------------
+
+
+def test_read_char_reads_cyrillic_letters(cbreak_tty):
+    """Кириллица в UTF-8 — два байта: по байту она рассыпается, поэтому читаем символ целиком."""
+    cbreak_tty("привет".encode("utf-8"))
+
+    assert "".join(keyboard.read_char() for _ in range(6)) == "привет"
+
+
+def test_read_char_reads_latin_letters(cbreak_tty):
+    cbreak_tty(b"ok")
+
+    assert keyboard.read_char() == "o"
+    assert keyboard.read_char() == "k"
+
+
+def test_read_char_maps_special_keys(cbreak_tty):
+    cbreak_tty(b"\r\x7f\x1b[A")
+
+    assert keyboard.read_char() == keyboard.ENTER
+    assert keyboard.read_char() == keyboard.BACKSPACE
+    assert keyboard.read_char() == keyboard.UP
+
+
+def test_read_char_does_not_swallow_a_burst(cbreak_tty):
+    cbreak_tty("да\n".encode("utf-8"))
+
+    assert keyboard.read_char() == "д"
+    assert keyboard.read_char() == "а"
+    assert keyboard.read_char() == keyboard.ENTER

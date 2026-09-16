@@ -54,6 +54,57 @@ def read_key() -> str:
     return _read_key_unix()
 
 
+def read_key_nowait() -> str:
+    """Неблокирующее чтение клавиши внутри `with raw_mode():`; пустая строка — ввода нет.
+
+    Прогон задачи перерисовывает панель и опрашивает клавишу паузы между операциями: ждать
+    нажатия здесь нельзя, иначе пауза срабатывала бы только после следующего нажатия вообще,
+    то есть через одну операцию, а не сразу после текущей.
+    """
+    if termios is None:
+        return _read_key_windows_nowait()
+    fd = sys.stdin.fileno()
+    if not select.select([fd], [], [], 0)[0]:
+        return ""
+    return _read_key_unix()
+
+
+def read_char() -> str:
+    """Читает один символ (в том числе многобайтный) внутри `with raw_mode():`.
+
+    `read_key()` отдаёт один *байт*: для стрелок, Enter и одиночных латинских клавиш этого
+    хватает, а для текста — нет. Кириллица в UTF-8 занимает два байта, и по байту она
+    рассыпается на «заменяющие» символы, поэтому набранный ответ пользователя доходил бы до
+    модели мусором. Здесь читаем ведущий байт, добираем продолжение по его длине и декодируем
+    целый символ; спецклавиши возвращаются теми же кодами, что у `read_key()`.
+    """
+    if termios is None:
+        return _read_key_windows()
+    fd = sys.stdin.fileno()
+    first = os.read(fd, 1)
+    if first == b"\x1b":
+        if select.select([fd], [], [], 0.05)[0]:
+            second = os.read(fd, 1)
+            if second == b"[" and select.select([fd], [], [], 0.05)[0]:
+                return _ARROW_CODES.get(os.read(fd, 1).decode(errors="replace"), ESC)
+        return ESC
+    if first in (b"\r", b"\n"):
+        return ENTER
+    if first in (b"\x7f", b"\x08"):
+        return BACKSPACE
+    lead = first[0]
+    if lead & 0xE0 == 0xC0:
+        length = 2
+    elif lead & 0xF0 == 0xE0:
+        length = 3
+    elif lead & 0xF8 == 0xF0:
+        length = 4
+    else:
+        length = 1
+    data = first + b"".join(os.read(fd, 1) for _ in range(length - 1))
+    return data.decode(errors="replace")
+
+
 def _read_key_unix() -> str:
     fd = sys.stdin.fileno()
     # os.read() на самом fd, а не sys.stdin.read(): буферизованный TextIOWrapper может
@@ -91,3 +142,11 @@ def _read_key_windows() -> str:  # pragma: no cover - Windows
     if ch == "\x08":
         return BACKSPACE
     return ch
+
+
+def _read_key_windows_nowait() -> str:  # pragma: no cover - Windows
+    import msvcrt
+
+    if not msvcrt.kbhit():
+        return ""
+    return _read_key_windows()

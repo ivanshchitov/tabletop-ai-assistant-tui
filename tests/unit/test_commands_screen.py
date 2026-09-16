@@ -17,6 +17,7 @@ def test_panel_lists_all_commands_with_descriptions():
         "/context",
         "/memory",
         "/profile",
+        "/task",
         "/branches",
     ]
     for command, description in commands_screen.COMMAND_OPTIONS:

@@ -13,6 +13,8 @@ from core.api_client import AnswerMeta, APIError
 from core import tabletop_agent
 from core.history_manager import HistoryManager
 from core.long_term_memory import LongTermMemory
+from core import task_state
+from core.task_state import TaskStore
 from core.user_profile import ProfileStore
 from ui import branches_screen, keyboard, settings_screen, tui_app
 from ui.tui_app import TabletopAITUI
@@ -105,13 +107,14 @@ def _noop_context():
 
 @pytest.fixture(autouse=True)
 def isolated_long_term_memory(tmp_path, monkeypatch):
-    """Долговременная память приложения всегда указывает на временный файл."""
+    """Долговременная память, профиль и очередь задач всегда указывают на временные файлы."""
     monkeypatch.setattr(
         tabletop_agent, "LongTermMemory", lambda: LongTermMemory(tmp_path / "memory.json")
     )
     monkeypatch.setattr(
         tabletop_agent, "ProfileStore", lambda: ProfileStore(tmp_path / "profile.json")
     )
+    monkeypatch.setattr(tabletop_agent, "TaskStore", lambda: TaskStore(tmp_path / "task.json"))
 
 
 @pytest.fixture(autouse=True)
@@ -1388,3 +1391,386 @@ def test_profile_text_with_markup_characters_does_not_break_the_report(
     make_app(["/profile setup", "/profile", "/exit"], FakeClient(["Ответ"])).run()
 
     assert recording_console.contains("[/dim] и ещё [скобки]")
+
+
+# --- команда /task: отчёт, очередь и прогон ---
+
+PLAN_JSON_TUI = '{"items": ["Тема", "Ход", "Очки"]}'
+OK_JSON_TUI = '{"ok": true, "issues": []}'
+
+
+def _task_app(make_app, client, inputs, monkeypatch, keys=(), typed=()):
+    """Приложение с подменённым терминалом прогона.
+
+    `keys` — ответы на опрос клавиши паузы (пустая строка — «паузы нет»), `typed` — нажатия,
+    которые сценарий вводит в строку правок (последним считается Enter, если его не передали).
+    """
+    monkeypatch.setattr(tui_app.keyboard, "raw_mode", _noop_context)
+    pending = list(keys)
+
+    def read_key_nowait():
+        return pending.pop(0) if pending else ""
+
+    typed_keys = list(typed)
+
+    def read_key():
+        return typed_keys.pop(0) if typed_keys else keyboard.ENTER
+
+    monkeypatch.setattr(tui_app.keyboard, "read_key_nowait", read_key_nowait)
+    monkeypatch.setattr(tui_app.keyboard, "read_char", read_key)
+    return make_app(inputs, client)
+
+
+def test_task_command_is_known_and_autocompletes(make_app, recording_console):
+    make_app(["/exit"], FakeClient()).run()
+
+    assert "/task" in tui_app.COMMANDS
+
+
+def test_task_report_on_the_empty_queue_does_not_ask_the_model(make_app, recording_console):
+    client = FakeClient()
+    make_app(["/task", "/exit"], client).run()
+
+    assert client.calls == []
+    assert recording_console.contains("Задача агента")
+    assert recording_console.contains("Этапы: Planning → Execution → Validation → Done")
+    assert recording_console.contains("Очередь задач пуста")
+    assert recording_console.contains("task.json")
+
+
+def test_task_add_and_stop_manage_the_queue(make_app, recording_console):
+    client = FakeClient()
+    app = make_app(
+        [
+            "/task add",
+            "/task add Собрать подборку на вечер",
+            "/task add Разработать игру про улиток",
+            "/task stop",
+            "/task",
+            "/exit",
+        ],
+        client,
+    )
+    app.run()
+
+    assert recording_console.contains("Цель не указана")
+    assert recording_console.contains("Задача в очереди (1 из 1)")
+    assert recording_console.contains("Задача в очереди (2 из 2)")
+    assert recording_console.contains("Очередь задач снята")
+    assert recording_console.contains("Очередь задач пуста")
+    assert client.calls == []
+
+
+def _app_with_plan(make_app, app_goals=("Тема", "Ход", "Очки")):
+    app = make_app(["/exit"], FakeClient())
+    app.agent.add_task("Разработать игру про улиток")
+    app.agent.task.save(
+        task_state.add_section(
+            task_state.accept_plan(
+                task_state.plan_built(task_state.begin_task(app.agent.task.state), app_goals)
+            ),
+            "Раздел артефакта",
+        )
+    )
+    return app
+
+
+def test_task_report_shows_the_plan_with_marks_and_the_artifact(make_app, recording_console):
+    app = _app_with_plan(make_app, ("Тема", "Ход"))
+
+    app._handle_task("/task")
+
+    assert recording_console.contains("Очередь (1)")
+    assert recording_console.contains("▸ 1. Разработать игру про улиток — Execution, 2/2: «Ход»")
+    assert recording_console.contains("Текущая задача: «Разработать игру про улиток»")
+    assert recording_console.contains("Этап: Execution (2 из 4)")
+    assert recording_console.contains("Текущий шаг: 2/2: «Ход»")
+    assert recording_console.contains("Ожидаемое действие: выполнить подзадачу «Ход»")
+    assert recording_console.contains("[x] Тема")
+    assert recording_console.contains("[ ] Ход")
+    assert recording_console.contains("Артефакт: 1 раздел, 16 символов")
+    assert recording_console.contains("Пауза: нет")
+
+
+def test_task_report_lists_the_plan_one_item_per_line(make_app, recording_console):
+    app = _app_with_plan(make_app)
+
+    app._handle_task("/task")
+
+    lines = [line.strip() for line in recording_console.text.splitlines()]
+    assert "План:" in lines
+    assert "[x] Тема" in lines
+    assert "[ ] Ход" in lines
+
+
+def test_task_report_after_all_tasks_are_done(make_app, recording_console):
+    """Очередь без незавершённых задач: отчёт печатает задачи и объём артефактов, без падения."""
+    app = _app_with_plan(make_app)
+    app.agent.task.save(
+        task_state.validation_verdict(
+            task_state.start_validation(
+                task_state.add_section(
+                    task_state.add_section(app.agent.task.state, "Второй раздел"),
+                    "Третий раздел",
+                )
+            ),
+            [],
+        )
+    )
+
+    app._handle_task("/task")
+
+    chars = len("Раздел артефакта") + len("Второй раздел") + len("Третий раздел")
+    assert recording_console.contains("Очередь (1)")
+    assert recording_console.contains(f"решена, артефакт {chars} символов")
+    assert recording_console.contains("Незавершённых задач нет — прогон остановлен")
+
+
+def test_task_report_survives_markup_in_the_goal(make_app, recording_console):
+    """Цель задачи — текст пользователя: скобочные последовательности печатаются как есть."""
+    app = make_app(["/exit"], FakeClient())
+    app.agent.add_task("[/dim] игра со [скобками]")
+
+    app._handle_task("/task")
+
+    assert recording_console.contains("[/dim] игра со [скобками]")
+
+
+def test_task_panel_shows_stages_step_action_and_plan(make_app, recording_console):
+    app = _app_with_plan(make_app, ("Тема", "Ход"))
+
+    recording_console.console.print(app._render_task_panel(app.agent.task_report()))
+
+    assert recording_console.contains("Задача 1/1: «Разработать игру про улиток»")
+    assert recording_console.contains("✓ Planning")
+    assert recording_console.contains("▸ Execution")
+    assert recording_console.contains("Текущий шаг: 2/2: «Ход»")
+    assert recording_console.contains("Ожидаемое действие: выполнить подзадачу «Ход»")
+    assert recording_console.contains("[x] Тема")
+    assert recording_console.contains("[ ] Ход")
+
+
+def test_task_panel_lists_the_plan_one_item_per_line(make_app, recording_console):
+    """План в панели — список: подзадачи на разных строках, а не одна длинная строка."""
+    app = _app_with_plan(make_app)
+
+    recording_console.console.print(app._render_task_panel(app.agent.task_report()))
+
+    lines = recording_console.text.splitlines()
+    done_lines = [line for line in lines if "[x] Тема" in line]
+    todo_lines = [line for line in lines if "[ ] Ход" in line]
+    assert done_lines and todo_lines
+    assert done_lines[0] != todo_lines[0]
+
+
+def test_task_panel_shows_the_question_with_the_typed_answer(make_app, recording_console):
+    """Пока ждут правки, панель остаётся на экране и показывает саму строку ввода."""
+    app = _app_with_plan(make_app)
+
+    recording_console.console.print(
+        app._render_task_panel(app.agent.task_report(), answer="добавь подсчёт очков")
+    )
+
+    assert recording_console.contains(
+        "Правки к плану (Enter — принять, Ctrl+C — пауза): добавь подсчёт очков"
+    )
+
+
+def test_task_panel_hints_how_to_pause_on_every_frame(make_app, recording_console):
+    """Подсказка о паузе — на каждом кадре панели: и во время запроса, и при вопросе о правках."""
+    app = _app_with_plan(make_app)
+
+    for panel in (
+        app._render_task_panel(app.agent.task_report()),
+        app._render_task_panel(app.agent.task_report(), "Выполнение подзадачи..."),
+        app._render_task_panel(app.agent.task_report(), answer="добавь подсчёт"),
+    ):
+        before = recording_console.text
+        recording_console.console.print(panel)
+        assert "Пауза — клавиша p или Ctrl+C" in recording_console.text[len(before):]
+
+    assert recording_console.contains("Выполнение подзадачи...")
+
+
+def test_status_bar_shows_the_task_while_the_queue_is_full(make_app, recording_console):
+    make_app(["/task add Разработать игру", "/exit"], FakeClient()).run()
+
+    assert recording_console.contains("Задача: 1/1 «Разработать игру» — Planning")
+
+
+def test_status_bar_hides_the_task_without_a_queue(make_app, recording_console):
+    make_app(["/exit"], FakeClient()).run()
+
+    assert not recording_console.contains("Задача:")
+
+
+def test_task_run_drives_the_whole_queue_to_done(make_app, recording_console, monkeypatch):
+    client = FakeClient([PLAN_JSON_TUI, "Раздел 1", "Раздел 2", "Раздел 3", OK_JSON_TUI])
+    app = _task_app(
+        make_app, client, ["/task add Разработать игру", "/task run", "/exit"], monkeypatch
+    )
+
+    app.run()
+
+    assert recording_console.contains("Правок нет — план принят.")
+    assert recording_console.contains("Итог: «Разработать игру» — задача решена: 3 раздела артефакта")
+    assert recording_console.contains("Результат: ")  # файл результата назван в журнале
+    assert recording_console.contains("Очередь задач пуста — прогон остановлен")
+    assert app.agent.task.state.tasks[0].status.value == "решена"
+    assert [call["model"] for call in client.calls] == [config.DEFAULT_MODEL] * 5
+
+
+def test_task_run_echoes_the_edits_answer(make_app, recording_console, monkeypatch):
+    """Ответ на вопрос о правках печатается строкой: прогон идёт в режиме без отражения ввода."""
+    client = FakeClient(
+        [
+            PLAN_JSON_TUI,
+            '{"items": ["Правила", "Компоненты", "Плейтест"]}',
+            "Раздел 1",
+            "Раздел 2",
+            "Раздел 3",
+            OK_JSON_TUI,
+        ]
+    )
+    app = _task_app(
+        make_app,
+        client,
+        ["/task add Игра", "/task run", "/exit"],
+        monkeypatch,
+        typed=list("добавь пункт про подсчёт") + [keyboard.ENTER],
+    )
+
+    app.run()
+
+    assert recording_console.contains("Правки: добавь пункт про подсчёт")
+    request = client.calls[1]["messages"][-1]["content"]
+    assert "добавь пункт про подсчёт" in request
+    assert "1. Тема" in request  # прежний план ушёл в запрос
+    assert "Артефакт:" in client.calls[-1]["messages"][-1]["content"]  # последний запрос — проверка
+
+
+def test_task_run_prints_the_status_bar_with_the_task_line(make_app, recording_console, monkeypatch):
+    """После прогона статус-бар печатается как обычно — со строкой задачи в нём."""
+    client = FakeClient([PLAN_JSON_TUI, "Раздел 1", "Раздел 2", "Раздел 3", OK_JSON_TUI])
+    app = _task_app(
+        make_app, client, ["/task add Разработать игру", "/task run", "/exit"], monkeypatch
+    )
+
+    app.run()
+
+    assert recording_console.text.count("Задача: 1/1 «Разработать игру»") >= 1
+
+
+def test_task_run_pauses_on_the_key_and_continues_from_the_same_step(
+    make_app, recording_console, monkeypatch
+):
+    client = FakeClient([PLAN_JSON_TUI, "Раздел 1", "Раздел 2", "Раздел 3", OK_JSON_TUI])
+    app = _task_app(
+        make_app,
+        client,
+        ["/task add Разработать игру", "/task run", "/task", "/task run", "/exit"],
+        monkeypatch,
+        keys=("", "", "p"),
+    )
+
+    app.run()
+
+    assert recording_console.contains("⏸ Пауза: Execution")
+    assert recording_console.contains("Пауза: да")
+    assert recording_console.contains("Пауза снята — продолжаю с сохранённого шага")
+    assert recording_console.contains("Очередь задач пуста — прогон остановлен")
+    assert app.agent.task.state.finished is True
+    # После паузы конвейер продолжил со второй подзадачи: первая уже в артефакте.
+    resumed = client.calls[2]["messages"][-1]["content"]
+    assert "Твоя подзадача: 2. Ход" in resumed
+
+
+def test_task_run_pauses_on_ctrl_c_without_exiting_the_app(
+    make_app, recording_console, monkeypatch
+):
+    client = FakeClient([PLAN_JSON_TUI, "Раздел 1", "Раздел 2", "Раздел 3", OK_JSON_TUI])
+    calls = {"count": 0}
+
+    def read_key_nowait():
+        calls["count"] += 1
+        if calls["count"] >= 2:
+            raise KeyboardInterrupt
+        return ""
+
+    monkeypatch.setattr(tui_app.keyboard, "raw_mode", _noop_context)
+    monkeypatch.setattr(tui_app.keyboard, "read_key_nowait", read_key_nowait)
+    monkeypatch.setattr(tui_app.keyboard, "read_char", lambda: keyboard.ENTER)
+    app = make_app(["/task add Игра", "/task run", "/task", "/exit"], client)
+
+    app.run()
+
+    assert recording_console.contains("⏸ Пауза:")
+    assert recording_console.contains("Пауза: да")
+    assert app.agent.tasks_paused is True
+    assert recording_console.contains("До встречи")
+
+
+def test_task_run_without_a_queue_prints_the_hint(make_app, recording_console, monkeypatch):
+    client = FakeClient()
+    app = _task_app(make_app, client, ["/task run", "/exit"], monkeypatch)
+
+    app.run()
+
+    assert recording_console.contains("Очередь задач пуста — поставьте задачу")
+    assert client.calls == []
+
+
+def test_unknown_task_subcommand_prints_the_hint(make_app, recording_console):
+    make_app(["/task что-то", "/exit"], FakeClient()).run()
+
+    assert recording_console.contains("/task add <цель>")
+
+
+def test_task_panel_shows_what_the_spend_was_for(make_app, recording_console):
+    """Траты прогона — в панели, с пометкой, на какой запрос они ушли."""
+    app = _app_with_plan(make_app)
+    meta = AnswerMeta(
+        content="",
+        model="deepseek-v4-flash",
+        elapsed_seconds=12.5,
+        prompt_tokens=100,
+        completion_tokens=200,
+        total_tokens=300,
+        cost_usd=0.001,
+    )
+    app._task_spend = [("Execution, 2/3: «Ход»", meta), ("Validation, попытка 1/2", meta)]
+
+    recording_console.console.print(app._render_task_panel(app.agent.task_report()))
+
+    assert recording_console.contains("Последний запрос: Validation, попытка 1/2 — 12.5с, 300 ток., $0.0010")
+    assert recording_console.contains("За прогон: 2 запроса, 600 ток., $0.0020")
+
+
+def test_task_run_frame_shows_the_standard_input_field(make_app, recording_console):
+    """Поле ввода во время прогона — то же приглашение, что у главного цикла."""
+    app = _app_with_plan(make_app)
+    app._run_input = "подбери игру"
+
+    recording_console.console.print(app._run_frame())
+
+    assert recording_console.contains("> Введите вопрос (или /exit для выхода): подбери игру")
+
+
+def test_typed_line_pauses_the_run_and_is_handled_by_the_main_loop(
+    make_app, recording_console, monkeypatch
+):
+    """Enter с набранной строкой останавливает прогон, а строку обрабатывает главный цикл."""
+    client = FakeClient([PLAN_JSON_TUI, "Раздел 1", "Раздел 2", "Раздел 3", OK_JSON_TUI])
+    app = _task_app(
+        make_app,
+        client,
+        ["/task add Игра", "/task run", "/task stop", "/exit"],
+        monkeypatch,
+        # Набор приходит между операциями: строку собирает поле ввода прогона.
+        keys=("", "", "", "/", "t", "a", "s", "k", keyboard.ENTER),
+    )
+
+    app.run()
+    assert recording_console.contains("⏸ Пауза:")
+    assert recording_console.contains("Очередь задач снята")  # строка дошла до главного цикла
+    assert app.agent.task.state.tasks == ()
