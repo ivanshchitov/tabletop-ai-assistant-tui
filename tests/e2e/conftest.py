@@ -85,7 +85,19 @@ def profile_file(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def app(stub, history_file, memory_file, profile_file, tui_display, request):
+def task_file(tmp_path: Path) -> Path:
+    """Файл состояния задачи: прогон не должен трогать task.json репозитория."""
+    return tmp_path / "task.json"
+
+
+@pytest.fixture
+def tasks_dir(tmp_path: Path) -> Path:
+    """Каталог результатов задач: прогон не должен писать в реальный tasks/ репозитория."""
+    return tmp_path / "tasks"
+
+
+@pytest.fixture
+def app(stub, history_file, memory_file, profile_file, task_file, tasks_dir, tui_display, request):
     """Фабрика сессий: одна и та же история переживает несколько запусков подряд."""
     mode, mirror = tui_display
     sessions = []
@@ -97,6 +109,8 @@ def app(stub, history_file, memory_file, profile_file, tui_display, request):
             history_file=history_file,
             memory_file=memory_file,
             profile_file=profile_file,
+            task_file=task_file,
+            tasks_dir=tasks_dir,
             **kwargs,
         )
         sessions.append(session)
@@ -111,7 +125,7 @@ def app(stub, history_file, memory_file, profile_file, tui_display, request):
 
 
 @pytest.fixture
-def live_app(history_file, memory_file, profile_file, tui_display, request):
+def live_app(history_file, memory_file, profile_file, task_file, tasks_dir, tui_display, request):
     """Сессия против настоящего OpenCode Zen — без stub-сервера и с реальным ключом.
 
     Пропускает тест, если ключа нет: репозиторий должен оставаться проверяемым без него.
@@ -132,6 +146,8 @@ def live_app(history_file, memory_file, profile_file, tui_display, request):
             history_file=history_file,
             memory_file=memory_file,
             profile_file=profile_file,
+            task_file=task_file,
+            tasks_dir=tasks_dir,
             api_url=None,
             **kwargs,
         )

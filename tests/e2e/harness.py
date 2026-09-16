@@ -57,6 +57,8 @@ class AppSession:
         history_file: Path,
         memory_file: Optional[Path] = None,
         profile_file: Optional[Path] = None,
+        task_file: Optional[Path] = None,
+        tasks_dir: Optional[Path] = None,
         api_url: Optional[str] = None,
         cols: int = 100,
         rows: int = 40,
@@ -107,6 +109,13 @@ class AppSession:
             # Профили пользователя — тоже свой файл: прогон не должен читать и писать
             # реальный profile.json репозитория.
             env["TABLETOP_PROFILE_FILE"] = str(profile_file)
+        if task_file is not None:
+            # Очередь задач — свой файл: прогон не должен читать и писать реальный task.json
+            # репозитория и видеть задачи прошлых сессий.
+            env["TABLETOP_TASK_FILE"] = str(task_file)
+        if tasks_dir is not None:
+            # Результаты задач — свой каталог: прогон не должен писать файлы в реальный tasks/.
+            env["TABLETOP_TASKS_DIR"] = str(tasks_dir)
         if api_url is not None:
             env["OPENCODE_API_URL"] = api_url
             env["TABLETOP_REQUEST_TIMEOUT"] = "1"
