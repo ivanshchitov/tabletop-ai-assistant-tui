@@ -221,6 +221,8 @@ __marimo__/
 history.json
 memory.json
 profile.json
+task.json
+tasks/
 
 # Solve-challenge-task: screen recordings and README drafts
 videos/
