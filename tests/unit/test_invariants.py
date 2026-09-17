@@ -136,3 +136,31 @@ def test_retry_prompt_lists_violations_and_asks_to_rewrite_or_refuse():
     assert "«приложени»" in text and "«монопол»" in text
     assert "перепиши" in text.casefold()
     assert "откажи" in text.casefold()
+
+
+# --- отрицание: сказать «без приложений» — соблюсти правило, а не нарушить ---
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Все три игры — без приложений и электроники.",
+        "Никаких смартфонов за столом не нужно.",
+        "Не рекомендую Монополию, зато советую Каркассон.",
+        "Никаких игр на деньги и никакого покера за столом.",
+    ],
+)
+def test_negated_mention_is_not_a_violation(text):
+    assert check_answer(text) == ()
+
+
+@pytest.mark.parametrize(
+    "text, number",
+    [
+        ("Без приложений не обойтись: скачайте приложение перед партией.", 1),
+        ("Возьмите Монополию — она без приложений.", 3),
+        ("Обязательно понадобится смартфон.", 1),
+    ],
+)
+def test_plain_mention_next_to_a_negated_one_is_still_a_violation(text, number):
+    assert [v.number for v in check_answer(text)] == [number]

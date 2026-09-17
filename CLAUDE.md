@@ -379,7 +379,11 @@ is never allowed to break (day 14). Deliberate decisions baked in:
   "fresh message wins"). The forbidden words are deliberately **not** sent — a list would invite
   synonyms instead of compliance. The code: `check_answer()` is a case-insensitive substring check
   per rule (one `Violation(number, rule, term)` per rule, `term` is the table stem, not the answer
-  fragment).
+  fragment). **A negated mention is not a violation**: an occurrence preceded within
+  `NEGATION_WINDOW` (20) chars by a word starting with one of `NEGATIONS` («без», «не», «нет»,
+  «никаких», «ни», «запрещ», «отсутств») is skipped — the first live demo tripped on the model's
+  own compliant «все игры — без приложений» and retried for nothing. Heuristic, not grammar
+  («нельзя без смартфона» slips through); the prompt stays the first line of defence.
 - **Refusal detection is a 200-char window, not a prefix.** `is_refusal()` looks for
   `REFUSAL_PREFIX` in the first `REFUSAL_WINDOW` characters, because in JSON format the refusal
   sits inside `{"error": "..."}` in a code block. A refusal is skipped by the word check: it names

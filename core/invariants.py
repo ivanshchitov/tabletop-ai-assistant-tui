@@ -22,6 +22,13 @@ INVARIANTS_PROMPT_ASSET = "invariants_prompt.md"
 REFUSAL_PREFIX = "Не могу предложить"
 REFUSAL_WINDOW = 200
 
+# Отрицание перед запрещённым словом — соблюдение правила, а не нарушение: «без приложений»,
+# «не рекомендую Монополию». Маркеры ищутся как начала слов в окне символов перед вхождением.
+# Эвристика, не грамматика: «нельзя без смартфона» пропустится, «обязательно приложение» —
+# поймается; промпт остаётся первой линией защиты, проверка — второй.
+NEGATIONS = ("без", "не", "нет", "никаких", "ни", "запрещ", "отсутств")
+NEGATION_WINDOW = 20
+
 
 @dataclass(frozen=True)
 class Invariant:
@@ -94,10 +101,25 @@ def check_answer(answer: str, invariants: Sequence[Invariant] = INVARIANTS) -> T
     violations: List[Violation] = []
     for invariant in invariants:
         for term in invariant.forbidden:
-            if term in text:
+            if _has_plain_mention(text, term):
                 violations.append(Violation(invariant.number, invariant.rule, term))
                 break
     return tuple(violations)
+
+
+def _has_plain_mention(text: str, term: str) -> bool:
+    """Есть ли вхождение оборота без отрицания перед ним (в окне NEGATION_WINDOW символов)."""
+    start = text.find(term)
+    while start != -1:
+        if not _negated(text[max(0, start - NEGATION_WINDOW):start]):
+            return True
+        start = text.find(term, start + 1)
+    return False
+
+
+def _negated(before: str) -> bool:
+    words = before.replace("—", " ").replace("-", " ").split()
+    return any(word.strip("«»\"'(),.:;!?").startswith(NEGATIONS) for word in words)
 
 
 @lru_cache(maxsize=None)
