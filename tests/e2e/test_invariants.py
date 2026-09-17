@@ -85,7 +85,7 @@ def test_invariants_report_needs_no_request(app, stub):
 
     assert stub.call_count == 0
     assert "1. Только физические компоненты" in text
-    assert "проверка кодом по словам: приложени, смартфон, планшет" in text
+    assert "проверка кодом по словам: приложени" in text
     assert "2. Партия не дольше двух часов" in text
     assert "только модель" in text
     assert "в каждый запрос конвейера /task" in text

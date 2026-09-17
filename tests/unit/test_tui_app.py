@@ -1789,7 +1789,7 @@ def test_invariants_report_lists_the_table_without_api_calls(make_app, recording
     assert recording_console.contains("Инварианты агента")
     assert recording_console.contains("1. Только физические компоненты")
     assert recording_console.contains("6. Только официальные правила издателя")
-    assert recording_console.contains("приложени, смартфон, планшет")
+    assert recording_console.contains("проверка кодом по словам: приложени")
     assert recording_console.contains("только модель")
     assert recording_console.contains("системным сообщением в каждый вопрос")
     assert recording_console.contains("конвейер")

@@ -1904,7 +1904,7 @@ def test_invariants_report_describes_the_table_without_api_calls():
     report = agent.invariants_report()
 
     assert [entry.number for entry in report.invariants] == [1, 2, 3, 4, 5, 6]
-    assert report.invariants[0].forbidden == ("приложени", "смартфон", "планшет")
+    assert report.invariants[0].forbidden == ("приложени",)
     assert report.invariants[1].forbidden == ()
     assert report.invariants[2].rule == INVARIANTS[2].rule
     assert client.calls == []

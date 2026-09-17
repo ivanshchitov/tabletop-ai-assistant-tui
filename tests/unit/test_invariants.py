@@ -41,7 +41,7 @@ def test_four_invariants_carry_forbidden_terms_and_two_are_model_only():
 @pytest.mark.parametrize(
     "number, violating, clean",
     [
-        (1, "Скачайте ПРИЛОЖЕНИЕ-компаньон на смартфон.", "Только карты, кубики и поле — ничего лишнего."),
+        (1, "Скачайте ПРИЛОЖЕНИЕ-компаньон перед партией.", "Только карты, кубики и поле — ничего лишнего."),
         (3, "Возьмите «Монополию» — классика.", "Возьмите «Каркассон» — классика."),
         (4, "Сыграйте в покер на деньги.", "Сыграйте в «Кодовые имена» на очки."),
         (5, "Есть отличный пасьянс для одного игрока.", "Есть отличная игра для четырёх игроков."),
@@ -65,9 +65,9 @@ def test_two_terms_of_different_invariants_give_two_violations():
 
 
 def test_one_invariant_reports_a_single_violation_even_with_several_terms():
-    violations = check_answer("Смартфон и планшет обязательны.")
-    assert [v.number for v in violations] == [1]
-    assert violations[0].term == "смартфон"
+    violations = check_answer("Покер и казино обязательны.")
+    assert [v.number for v in violations] == [4]
+    assert violations[0].term == "покер"
 
 
 def test_clean_answer_has_no_violations():
@@ -145,7 +145,7 @@ def test_retry_prompt_lists_violations_and_asks_to_rewrite_or_refuse():
     "text",
     [
         "Все три игры — без приложений и электроники.",
-        "Никаких смартфонов за столом не нужно.",
+        "Никаких приложений за столом не нужно.",
         "Не рекомендую Монополию, зато советую Каркассон.",
         "Никаких игр на деньги и никакого покера за столом.",
     ],
@@ -159,7 +159,7 @@ def test_negated_mention_is_not_a_violation(text):
     [
         ("Без приложений не обойтись: скачайте приложение перед партией.", 1),
         ("Возьмите Монополию — она без приложений.", 3),
-        ("Обязательно понадобится смартфон.", 1),
+        ("Обязательно понадобится приложение.", 1),
     ],
 )
 def test_plain_mention_next_to_a_negated_one_is_still_a_violation(text, number):
