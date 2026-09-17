@@ -362,7 +362,7 @@ shape every answer, deliberately kept apart from the memory layers. Deliberate d
 **Invariants (`core/invariants.py`, `assets/invariants_prompt.md`, `/invariants`):** rules the agent
 is never allowed to break (day 14). Deliberate decisions baked in:
 - **A fixed table in code, not a state file.** `invariants.INVARIANTS` is six `Invariant(number,
-  rule, forbidden)` records in the board-game domain (physical components only; a session no longer
+  rule, forbidden)` records in the board-game domain (no companion apps; a session no longer
   than two hours; no «Монополия»; no gambling; no solo games; official rules only) — the same
   device as `memory_layers.RULES`: one unit test per rule, no `TABLETOP_*` switch, no harness
   pass-through, nothing in `history.json`, and `/clear` cannot touch it. There are **no** add/forget
@@ -383,7 +383,7 @@ is never allowed to break (day 14). Deliberate decisions baked in:
   `NEGATION_WINDOW` (20) chars by a word starting with one of `NEGATIONS` («без», «не», «нет»,
   «никаких», «ни», «запрещ», «отсутств») is skipped — the first live demo tripped on the model's
   own compliant «все игры — без приложений» and retried for nothing. Heuristic, not grammar
-  («нельзя без смартфона» slips through); the prompt stays the first line of defence.
+  («нельзя без приложения» slips through); the prompt stays the first line of defence.
 - **Refusal detection is a 200-char window, not a prefix.** `is_refusal()` looks for
   `REFUSAL_PREFIX` in the first `REFUSAL_WINDOW` characters, because in JSON format the refusal
   sits inside `{"error": "..."}` in a code block. A refusal is skipped by the word check: it names
