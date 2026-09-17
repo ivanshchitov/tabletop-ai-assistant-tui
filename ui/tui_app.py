@@ -342,6 +342,9 @@ class TabletopAITUI:
         if command == "/branches":
             self._open_branches_screen()
             return True
+        if command == "/invariants":
+            self._print_invariants_report()
+            return True
         return False
 
     def _open_commands_screen(self) -> None:
@@ -563,10 +566,16 @@ class TabletopAITUI:
         self._print_memory_line()
         self._print_compression_line()
         self._print_facts_line()
+        rejected = self._print_invariants_lines()
         answer = meta.content
         self.console.print("[bold magenta]Tabletop AI Assistant:[/bold magenta]")
         self._print_typing(answer)
-        if self.settings.format == AnswerFormat.JSON and not is_valid_json_answer(answer):
+        # Отказ приложения — не ответ модели: судить его по формату модели нечестно.
+        if (
+            self.settings.format == AnswerFormat.JSON
+            and not rejected
+            and not is_valid_json_answer(answer)
+        ):
             self.console.print("[bold yellow]⚠ Модель не вернула валидный JSON.[/bold yellow]")
         if meta.finish_reason == "length":
             if answer:
@@ -1238,6 +1247,55 @@ class TabletopAITUI:
         self.console.print(
             f"[dim]Контекст сжат: {report.messages} сообщений "
             f"({report.exchanges} обменов) → резюме[/dim]"
+        )
+
+    def _print_invariants_lines(self) -> bool:
+        """Строки о нарушении инвариантов последним ответом — и только о нарушении.
+
+        Соблюдённые инварианты не журналируются: строка на каждый ответ засоряла бы журнал, а
+        статус-бар их не упоминает. Возвращает, отклонён ли ответ. В history.json строки не
+        попадают.
+        """
+        check = self.agent.last_invariants
+        if check is None or not check.violations:
+            return False
+        first = ", ".join(
+            f"Инвариант {v.number} нарушен («{escape(v.term)}»)" for v in check.violations
+        )
+        self.console.print(f"[bold red]⛔ {first} — повторный запрос.[/bold red]")
+        if check.rejected:
+            final = "; ".join(
+                f"инвариант {v.number} «{escape(v.rule)}» (в ответе: «{escape(v.term)}»)"
+                for v in check.final_violations
+            )
+            self.console.print(f"[bold red]⛔ Ответ отклонён: {final}.[/bold red]")
+        return check.rejected
+
+    def _print_invariants_report(self) -> None:
+        """Отчёт /invariants: таблица инвариантов из снимка агента, без запросов к модели.
+
+        Аргументов у команды нет: инварианты фиксированы, команд управления ими не существует.
+        """
+        report = self.agent.invariants_report()
+        self.console.print("[bold cyan]Инварианты агента (без обращения к модели):[/bold cyan]")
+        for inv in report.invariants:
+            self.console.print(f"[dim]  {inv.number}. {escape(inv.rule)}[/dim]")
+            if inv.forbidden:
+                words = ", ".join(escape(term) for term in inv.forbidden)
+                self.console.print(f"[dim]     проверка кодом по словам: {words}[/dim]")
+            else:
+                self.console.print("[dim]     проверка: только модель (слов для кода нет)[/dim]")
+        self.console.print(
+            "[dim]  В запрос: уходят системным сообщением в каждый вопрос и в каждый запрос "
+            "конвейера /task, сразу после профиля.[/dim]"
+        )
+        self.console.print(
+            "[dim]  Проверка ответа: нарушивший ответ возвращается модели с перечнем нарушений "
+            f"({config.INVARIANT_RETRIES} раз), затем отклоняется и заменяется отказом.[/dim]"
+        )
+        self.console.print(
+            "[dim]  Отказ модели по инварианту начинается со слов «Не могу предложить» и "
+            "называет инвариант.[/dim]"
         )
 
     def _print_facts_line(self) -> None:

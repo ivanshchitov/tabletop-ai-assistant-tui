@@ -19,6 +19,7 @@ def test_panel_lists_all_commands_with_descriptions():
         "/profile",
         "/task",
         "/branches",
+        "/invariants",
     ]
     for command, description in commands_screen.COMMAND_OPTIONS:
         assert command.startswith("/")

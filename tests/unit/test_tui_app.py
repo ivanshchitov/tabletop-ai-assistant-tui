@@ -1775,3 +1775,67 @@ def test_typed_line_pauses_the_run_and_is_handled_by_the_main_loop(
     assert recording_console.contains("⏸ Пауза:")
     assert recording_console.contains("Очередь задач снята")  # строка дошла до главного цикла
     assert app.agent.task.state.tasks == ()
+
+
+# --- день 14: /invariants и строки о нарушении ------------------------------------------
+
+
+def test_invariants_report_lists_the_table_without_api_calls(make_app, recording_console):
+    client = FakeClient(["Ответ"])
+    app = make_app(["/invariants", "/exit"], client)
+    app.run()
+
+    assert client.calls == []
+    assert recording_console.contains("Инварианты агента")
+    assert recording_console.contains("1. Только физические компоненты")
+    assert recording_console.contains("6. Только официальные правила издателя")
+    assert recording_console.contains("приложени, смартфон, планшет")
+    assert recording_console.contains("только модель")
+    assert recording_console.contains("системным сообщением в каждый вопрос")
+    assert recording_console.contains("конвейер")
+
+
+def test_invariants_arguments_are_ignored(make_app, recording_console):
+    client = FakeClient(["Ответ"])
+    make_app(["/invariants forget all", "/exit"], client).run()
+
+    assert client.calls == []
+    assert recording_console.contains("1. Только физические компоненты")
+
+
+def test_clean_answer_prints_nothing_about_invariants(make_app, recording_console):
+    make_app(["Что взять на вечер?", "/exit"], FakeClient(["Берите Каркассон."])).run()
+
+    assert not recording_console.contains("⛔")
+    assert not recording_console.contains("Инвариант")
+    assert not recording_console.contains("нвариант")  # ни в статус-баре, ни в журнале
+
+
+def test_violation_prints_the_retry_line_and_the_clean_retry(make_app, recording_console):
+    client = FakeClient(["Берите Монополию!", "Берите Каркассон."])
+    make_app(["Что взять на вечер?", "/exit"], client).run()
+
+    assert len(client.calls) == 2
+    assert recording_console.contains("⛔ Инвариант 3 нарушен («монопол») — повторный запрос")
+    assert recording_console.contains("Берите Каркассон.")
+    assert not recording_console.contains("Ответ отклонён")
+
+
+def test_second_violation_prints_the_rejection_and_the_app_refusal(make_app, recording_console):
+    client = FakeClient(["Берите Монополию!", "Ну возьмите монополию.", "Чисто."])
+    make_app(["Что взять на вечер?", "/exit"], client).run()
+
+    assert recording_console.contains("⛔ Инвариант 3 нарушен («монопол») — повторный запрос")
+    assert recording_console.contains("⛔ Ответ отклонён: инвариант 3")
+    assert recording_console.contains("Не могу предложить: ответ нарушает инвариант 3")
+    assert not recording_console.contains("Ну возьмите")
+
+
+def test_rejected_answer_does_not_trigger_the_json_warning(make_app, recording_console):
+    client = FakeClient(["Берите Монополию!", "Ну возьмите монополию.", "Чисто."])
+    app = make_app(["Что взять на вечер?", "/exit"], client)
+    app.settings = AnswerSettings().with_format(AnswerFormat.JSON)
+    app.run()
+
+    assert recording_console.contains("⛔ Ответ отклонён")
+    assert not recording_console.contains("Модель не вернула валидный JSON")
