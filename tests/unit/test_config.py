@@ -222,3 +222,8 @@ def test_facts_limits_bound_the_extractor_output():
     assert 50 <= config.FACTS_MAX_WORDS <= 300
     assert config.max_tokens_for_words(config.FACTS_MAX_WORDS) > config.FACTS_MAX_WORDS
     assert 1 < config.MAX_FACTS_KEYS <= 100
+
+
+def test_invariant_retries_is_a_single_repeat():
+    """Нарушивший инварианты ответ переспрашивается ровно один раз, затем отклоняется."""
+    assert config.INVARIANT_RETRIES == 1
