@@ -17,6 +17,7 @@ from . import (
     config,
     context_compressor,
     context_strategies,
+    invariants,
     memory_layers,
     prompts,
     task_pipeline,
@@ -113,6 +114,24 @@ class ProfileReport:
     sections: Tuple[Tuple[str, str], ...]
     names: Tuple[str, ...]
     profile_store: str
+
+
+@dataclass(frozen=True)
+class InvariantsCheck:
+    """Результат проверки последнего ответа на инварианты: что нарушил первый ответ, был ли
+    повторный запрос, отклонён ли итог (и что нарушил повторный ответ)."""
+
+    violations: Tuple[invariants.Violation, ...]
+    retried: bool
+    rejected: bool
+    final_violations: Tuple[invariants.Violation, ...] = ()
+
+
+@dataclass
+class InvariantsReport:
+    """Снимок таблицы инвариантов для отчёта интерфейса (без обращения к модели)."""
+
+    invariants: Tuple[invariants.Invariant, ...]
 
 
 @dataclass
@@ -241,6 +260,7 @@ class TabletopAgent:
         self._last_compression: Optional[CompressionReport] = None
         self._last_facts: Optional[FactsReport] = None
         self._last_result: Optional[AnswerMeta] = None
+        self._last_invariants: Optional[InvariantsCheck] = None
         # Учёт расхода сессии: каждый успешный запрос к API (вопрос и вспомогательные).
         self._ledger = SessionLedger()
         # Память агента — своя: контекст восстанавливается из файла истории сразу при
@@ -278,6 +298,11 @@ class TabletopAgent:
     def last_facts(self) -> Optional[FactsReport]:
         """Отчёт последнего обновления фактов: удалось ли и сколько ключей в блоке."""
         return self._last_facts
+
+    @property
+    def last_invariants(self) -> Optional[InvariantsCheck]:
+        """Результат проверки последнего ответа на инварианты — для строк журнала интерфейса."""
+        return self._last_invariants
 
     @property
     def last_routing(self) -> Tuple[memory_layers.MemoryRecord, ...]:
@@ -326,18 +351,67 @@ class TabletopAgent:
         self._route_memory(question)
         skip = self._prepare_context(question, user_prompt, on_phase)
         self._signal(on_phase, RequestPhase.REQUEST)
+        messages = self._build_messages(user_prompt, skip)
+        meta = self._ask_question(messages)
+        meta = self._enforce_invariants(messages, meta, on_phase)
+        self._remember(user_prompt, meta.content)
+        # Долговременная память: пара «вопрос–ответ» с метриками — на диск сразу после ответа.
+        self.history.add(question, meta.content, usage=self._usage_block(meta))
+        return meta
+
+    def _ask_question(self, messages: List[Dict[str, str]]) -> AnswerMeta:
+        """Запрос вопроса с настройками сессии; расход учтён, метрики — в `last_result`."""
         meta = self.client.ask_with_usage_messages(
-            self._build_messages(user_prompt, skip),
+            messages,
             max_tokens=config.max_tokens_for_words(self.config.max_words),
             temperature=self.config.temperature,
             model=self.config.model,
         )
         self._last_result = meta
         self._ledger.record(meta)
-        self._remember(user_prompt, meta.content)
-        # Долговременная память: пара «вопрос–ответ» с метриками — на диск сразу после ответа.
-        self.history.add(question, meta.content, usage=self._usage_block(meta))
         return meta
+
+    def _enforce_invariants(
+        self,
+        messages: List[Dict[str, str]],
+        meta: AnswerMeta,
+        on_phase: Optional[Callable[[RequestPhase], None]],
+    ) -> AnswerMeta:
+        """Проверка ответа на инварианты кодом: повтор с перечнем нарушений, затем отклонение.
+
+        Повторный запрос — продолжение того же диалога: ответ модели ходом assistant и перечень
+        нарушений ходом user, чтобы модель видела, что именно не так. Нарушивший и повторный ответ
+        отклоняется: вместо него — отказ приложения, который называет инвариант и найденное слово;
+        в стек и в историю ложится только то, что увидел пользователь. Ошибка повторного запроса
+        поднимается наверх, как ошибка любого запроса: ничего не записано.
+        """
+        violations = invariants.check_answer(meta.content)
+        if not violations:
+            self._last_invariants = InvariantsCheck(violations=(), retried=False, rejected=False)
+            return meta
+        final = violations
+        for _ in range(config.INVARIANT_RETRIES):
+            self._signal(on_phase, RequestPhase.REQUEST)
+            retry = messages + [
+                {"role": "assistant", "content": meta.content},
+                {"role": "user", "content": invariants.retry_prompt(final)},
+            ]
+            meta = self._ask_question(retry)
+            final = invariants.check_answer(meta.content)
+            if not final:
+                self._last_invariants = InvariantsCheck(violations, retried=True, rejected=False)
+                return meta
+        self._last_invariants = InvariantsCheck(violations, retried=True, rejected=True, final_violations=final)
+        return AnswerMeta(
+            content=invariants.refusal_text(final),
+            model=meta.model,
+            elapsed_seconds=meta.elapsed_seconds,
+            prompt_tokens=meta.prompt_tokens,
+            completion_tokens=meta.completion_tokens,
+            total_tokens=meta.total_tokens,
+            cost_usd=meta.cost_usd,
+            finish_reason=meta.finish_reason,
+        )
 
     def memory_report(self) -> MemoryReport:
         """Снимок слоёв памяти для отчётов интерфейса.
@@ -369,6 +443,10 @@ class TabletopAgent:
             names=self.profile.names(),
             profile_store=str(self.profile.path),
         )
+
+    def invariants_report(self) -> InvariantsReport:
+        """Снимок таблицы инвариантов для отчёта интерфейса; запросов к модели не делает."""
+        return InvariantsReport(invariants=invariants.INVARIANTS)
 
     def add_task(self, goal: str) -> bool:
         """Ставит задачу в очередь; False — цель пуста, задача не заведена."""
@@ -479,6 +557,9 @@ class TabletopAgent:
         переводит её в состояние задачи, а не в исключение для интерфейса.
         """
         self._signal(self._phase_listener, RequestPhase(phase))
+        # Инварианты — вторым сообщением, после system этапа: конвейер о них не знает, как не
+        # знает о модели и потолке — что уходит модели, решает агент.
+        messages = [messages[0], self._invariants_message(), *messages[1:]]
         meta = self.client.ask_with_usage_messages(
             messages,
             max_tokens=config.max_tokens_for_words(max_words),
@@ -699,13 +780,16 @@ class TabletopAgent:
         return self._shrink_to_ceiling(user_prompt)
 
     def _build_messages(self, user_prompt: str, skip: int = 0) -> List[Dict[str, str]]:
-        """Сборка запроса: system настроек, профиль, память слоёв, память стратегии, ходы, новый ход."""
+        """Сборка запроса: system настроек, профиль, инварианты, задача, память слоёв, память стратегии, ходы, новый ход."""
         messages: List[Dict[str, str]] = [
             {"role": "system", "content": prompts.build_system_message(self.config.format)}
         ]
         profile = self._profile_message()
         if profile is not None:
             messages.append(profile)
+        # Инварианты — сразу после профиля и выше задачи и памяти: жёсткие рамки стоят выше всего,
+        # что модель могла бы принять за разрешение их обойти. Сообщение есть всегда.
+        messages.append(self._invariants_message())
         task = self._task_message()
         if task is not None:
             messages.append(task)
@@ -730,6 +814,11 @@ class TabletopAgent:
         if content is None:
             return None
         return {"role": "system", "content": content}
+
+    @staticmethod
+    def _invariants_message() -> Dict[str, str]:
+        """Системное сообщение инвариантов агента: таблица правил и инструкция об отказе."""
+        return {"role": "system", "content": invariants.invariants_message()}
 
     def _task_message(self) -> Optional[Dict[str, str]]:
         """Системное сообщение состояния задачи: пустая очередь — None.

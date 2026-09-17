@@ -14,6 +14,7 @@ from core import memory_layers
 from core.history_manager import HistoryManager
 from core.long_term_memory import LongTermMemory
 from core import task_state
+from core.invariants import INVARIANTS, REFUSAL_PREFIX, invariants_message
 from core.tabletop_agent import RequestPhase, TabletopAgent
 from core.task_state import Stage, TaskStore
 from core.user_profile import InterviewState, ProfileStore
@@ -97,6 +98,16 @@ def user_contents(messages) -> List[str]:
     return [m["content"] for m in messages if m["role"] == "user"]
 
 
+def sans_invariants(messages):
+    """Запрос без системного сообщения инвариантов.
+
+    Смена контракта (add-agent-invariants): сообщение инвариантов есть в каждом запросе к модели,
+    поэтому ожидания состава сообщений здесь проверяют форму запроса *помимо* него; место и
+    содержимое самого сообщения проверяют тесты раздела «инварианты» ниже.
+    """
+    return [m for m in messages if m["content"] != invariants_message()]
+
+
 # --- стек сообщений -------------------------------------------------------------------
 
 
@@ -104,7 +115,7 @@ def test_first_ask_sends_system_and_user_only():
     agent, client = make_agent()
     agent.ask("Первый вопрос")
 
-    messages = client.calls[0]["messages"]
+    messages = sans_invariants(client.calls[0]["messages"])
     assert [m["role"] for m in messages] == ["system", "user"]
     assert "Tabletop AI Assistant" in messages[0]["content"]
     assert "Первый вопрос" in messages[1]["content"]
@@ -115,7 +126,7 @@ def test_second_ask_carries_previous_exchange():
     agent.ask("Первый вопрос")
     agent.ask("Второй вопрос")
 
-    messages = client.calls[1]["messages"]
+    messages = sans_invariants(client.calls[1]["messages"])
     assert [m["role"] for m in messages] == ["system", "user", "assistant", "user"]
     assert "Первый вопрос" in messages[1]["content"]
     assert "Ответ по умолчанию" in messages[2]["content"]
@@ -131,8 +142,8 @@ def test_failed_exchange_is_not_remembered():
         agent.ask("Провальный вопрос")
     client.error = None
     agent.ask("Третий вопрос")
-    assert "Провальный вопрос" not in "".join(user_contents(client.calls[2]["messages"]))
-    assert [m["role"] for m in client.calls[2]["messages"]][1:] == ["user", "assistant", "user"]
+    assert "Провальный вопрос" not in "".join(user_contents(sans_invariants(client.calls[2]["messages"])))
+    assert [m["role"] for m in sans_invariants(client.calls[2]["messages"])][1:] == ["user", "assistant", "user"]
 
 
 def test_threshold_reached_collapses_stack_to_summary_and_tail():
@@ -146,17 +157,17 @@ def test_threshold_reached_collapses_stack_to_summary_and_tail():
 
     assert meta.content == "Ответ 6"
     summary_call, question_call = client.calls[5], client.calls[6]
-    assert summary_call["messages"][0]["content"] == context_compressor.summary_instruction()
-    summary_user = summary_call["messages"][1]["content"]
+    assert sans_invariants(summary_call["messages"])[0]["content"] == context_compressor.summary_instruction()
+    summary_user = sans_invariants(summary_call["messages"])[1]["content"]
     assert "Вопрос 1" in summary_user and "Ответ 4" in summary_user
     assert "Вопрос 5" not in summary_user and "Ответ 5" not in summary_user
-    assert [m["role"] for m in question_call["messages"]] == [
+    assert [m["role"] for m in sans_invariants(question_call["messages"])] == [
         "system", "system", "user", "assistant", "user",
     ]
-    assert "РЕЗЮМЕ 1" in question_call["messages"][1]["content"]
-    assert "Вопрос 5" in question_call["messages"][2]["content"]
-    assert question_call["messages"][3]["content"] == "Ответ 5"
-    assert "Вопрос 6" in question_call["messages"][4]["content"]
+    assert "РЕЗЮМЕ 1" in sans_invariants(question_call["messages"])[1]["content"]
+    assert "Вопрос 5" in sans_invariants(question_call["messages"])[2]["content"]
+    assert sans_invariants(question_call["messages"])[3]["content"] == "Ответ 5"
+    assert "Вопрос 6" in sans_invariants(question_call["messages"])[4]["content"]
     report = agent.context_report()
     assert report.summary_covers == 4
     assert report.log_exchanges == 6  # свёрнутые обмены остались в логе
@@ -198,7 +209,7 @@ def test_reset_clears_the_stack():
     agent.reset()
     agent.ask("Вопрос после очистки")
 
-    messages = client.calls[-1]["messages"]
+    messages = sans_invariants(client.calls[-1]["messages"])
     assert [m["role"] for m in messages] == ["system", "user"]
     assert "Вопрос до очистки" not in "".join(m["content"] for m in messages)
 
@@ -213,7 +224,7 @@ def test_agent_restores_its_own_history_on_construction():
     second, client = make_agent(history=first.history, answers=["Свежий ответ"])
     second.ask("Новый вопрос")
 
-    messages = client.calls[0]["messages"]
+    messages = sans_invariants(client.calls[0]["messages"])
     assert [m["role"] for m in messages] == ["system", "user", "assistant", "user"]
     assert "Вопрос из истории" in messages[1]["content"]
     assert messages[2]["content"] == "Ответ из истории"
@@ -229,7 +240,7 @@ def test_restored_user_turns_carry_current_settings_instructions():
     )
     second.ask("Новый вопрос")
 
-    restored_user = client.calls[0]["messages"][1]["content"]
+    restored_user = sans_invariants(client.calls[0]["messages"])[1]["content"]
     assert "Старый вопрос" in restored_user
     assert "не более 500 слов" in restored_user
     assert "не более 7 вариантов" in restored_user
@@ -246,7 +257,7 @@ def test_memory_is_unbounded_and_restore_seeds_summary_with_tail():
     second, client = make_agent(history=first.history, answers=["Ответ 7"])
     second.ask("Вопрос 7")
 
-    messages = client.calls[0]["messages"]
+    messages = sans_invariants(client.calls[0]["messages"])
     contents = "".join(m["content"] for m in messages)
     assert "Вопрос 1" not in contents and "Вопрос 4" not in contents  # под резюме
     assert "РЕЗЮМЕ 1" in contents
@@ -285,7 +296,7 @@ def test_reset_clears_stack_and_file():
     assert agent.history.dialogues == []
 
     agent.ask("Вопрос после очистки")
-    messages = client.calls[-1]["messages"]
+    messages = sans_invariants(client.calls[-1]["messages"])
     assert [m["role"] for m in messages] == ["system", "user"]
     assert "Вопрос до очистки" not in messages[1]["content"]
 
@@ -295,12 +306,12 @@ def test_stack_is_rebuilt_from_file_invariant():
     first, first_client = make_agent(answers=["Первый ответ", "Второй ответ"])
     first.ask("Первый вопрос")
     first.ask("Второй вопрос")
-    reference = first_client.calls[-1]["messages"]
+    reference = sans_invariants(first_client.calls[-1]["messages"])
 
     second, second_client = make_agent(history=first.history, answers=["Третий ответ"])
     second.ask("Третий вопрос")
 
-    restored = second_client.calls[0]["messages"]
+    restored = sans_invariants(second_client.calls[0]["messages"])
     # system + два восстановленных обмена (user/assistant) + новый user-ход
     assert [m["role"] for m in restored] == ["system", "user", "assistant", "user", "assistant", "user"]
     # восстановленный стек дословно совпадает со стеком первого агента на момент записи
@@ -318,8 +329,8 @@ def test_system_message_is_rebuilt_from_current_settings():
     agent.settings = agent.settings.with_format(AnswerFormat.JSON)
     agent.ask("Вопрос после смены формата")
 
-    assert "Формат ответа: JSON" in client.calls[1]["messages"][0]["content"]
-    assert "Формат ответа" not in client.calls[0]["messages"][0]["content"]
+    assert "Формат ответа: JSON" in sans_invariants(client.calls[1]["messages"])[0]["content"]
+    assert "Формат ответа" not in sans_invariants(client.calls[0]["messages"])[0]["content"]
 
 
 def test_past_user_turns_keep_their_own_word_limit():
@@ -328,7 +339,7 @@ def test_past_user_turns_keep_their_own_word_limit():
     agent.settings = agent.settings.with_max_words(500)
     agent.ask("Вопрос с лимитом 500")
 
-    messages = client.calls[1]["messages"]
+    messages = sans_invariants(client.calls[1]["messages"])
     assert "не более 200 слов" in messages[1]["content"]
     assert "не более 500 слов" in messages[3]["content"]
 
@@ -481,11 +492,11 @@ def test_summary_is_used_in_following_requests_without_resummarizing():
     # вызовы: 5 вопросов, суммаризатор, вопрос 6, вопрос 7 — второго суммаризатора нет
     assert len(client.calls) == 8
     question7 = client.calls[7]
-    assert [m["role"] for m in question7["messages"]] == [
+    assert [m["role"] for m in sans_invariants(question7["messages"])] == [
         "system", "system", "user", "assistant", "user", "assistant", "user",
     ]
-    assert "РЕЗЮМЕ 1" in question7["messages"][1]["content"]
-    contents = "".join(m["content"] for m in question7["messages"])
+    assert "РЕЗЮМЕ 1" in sans_invariants(question7["messages"])[1]["content"]
+    contents = "".join(m["content"] for m in sans_invariants(question7["messages"]))
     assert "Вопрос 1" not in contents and "Вопрос 4" not in contents  # под резюме
     assert "Вопрос 5" in contents and "Вопрос 6" in contents
 
@@ -493,15 +504,17 @@ def test_summary_is_used_in_following_requests_without_resummarizing():
 def test_ceiling_estimate_above_limit_triggers_early_compression(monkeypatch):
     """Потолок токенов: оценка выше потолка сжимает досрочно, независимо от порога.
 
-    EPT=1: система ~1650 ток.; 3 обмена с ответами ~700 симв. дают ~3225 ток. ходов —
-    при потолке 5000 сжатие срабатывает на четвёртом вопросе при raw=6 < порога.
+    EPT=1: система ~1650 ток. плюс сообщение инвариантов ~1500 ток.; 3 обмена с ответами
+    ~700 симв. дают ~3225 ток. ходов — при потолке 6000 сжатие срабатывает на четвёртом вопросе
+    при raw=6 < порога (потолок поднят с 5000 после add-agent-invariants: сообщение инвариантов
+    входит в оценку каждого запроса).
     """
     monkeypatch.setattr(config, "ESTIMATED_CHARS_PER_TOKEN", 1)
     agent, client = make_agent(
         answers=[f"Ответ {i} " + "х" * 700 for i in range(1, 4)]
         + ["РЕЗЮМЕ 1", "Ответ 4", "Ответ 5"]
     )
-    agent.settings = agent.settings.with_max_session_tokens(5000)
+    agent.settings = agent.settings.with_max_session_tokens(6000)
     for i in range(1, 4):
         agent.ask(f"Вопрос {i}")  # raw=6, оценка ещё под потолком
     agent.ask("Вопрос 4")  # оценка выше потолка: суммаризатор + вопрос
@@ -509,12 +522,12 @@ def test_ceiling_estimate_above_limit_triggers_early_compression(monkeypatch):
 
     assert len(client.calls) == 6
     summary_call, question_call = client.calls[3], client.calls[4]
-    assert summary_call["messages"][0]["content"] == context_compressor.summary_instruction()
-    assert [m["role"] for m in question_call["messages"]] == [
+    assert sans_invariants(summary_call["messages"])[0]["content"] == context_compressor.summary_instruction()
+    assert [m["role"] for m in sans_invariants(question_call["messages"])] == [
         "system", "system", "user", "assistant", "user",
     ]
-    assert "РЕЗЮМЕ 1" in question_call["messages"][1]["content"]
-    assert "Вопрос 3" in question_call["messages"][2]["content"]
+    assert "РЕЗЮМЕ 1" in sans_invariants(question_call["messages"])[1]["content"]
+    assert "Вопрос 3" in sans_invariants(question_call["messages"])[2]["content"]
 
 
 def test_context_tokens_estimate_collapses_after_digest():
@@ -542,7 +555,7 @@ def test_ceiling_unreachable_when_nothing_to_digest(monkeypatch):
     # нечего: в стеке только последний обмен — запрос уходит как есть, ходы целы
 
     assert len(client.calls) == 2  # суммаризатора не было
-    assert [m["role"] for m in client.calls[1]["messages"]][:2] == ["system", "user"]
+    assert [m["role"] for m in sans_invariants(client.calls[1]["messages"])][:2] == ["system", "user"]
 
 
 def test_summarizer_spend_is_counted_and_last_result_is_answers():
@@ -577,7 +590,7 @@ def test_restart_with_fresh_summary_needs_no_summarizer(history_path):
     second.ask("Вопрос 7")
 
     assert len(second_client.calls) == 1  # суммаризатор не потребовался
-    messages = second_client.calls[0]["messages"]
+    messages = sans_invariants(second_client.calls[0]["messages"])
     assert [m["role"] for m in messages] == ["system", "system", "user", "assistant", "user", "assistant", "user"]
     assert "РЕЗЮМЕ 1" in messages[1]["content"]
     contents = "".join(m["content"] for m in messages)
@@ -599,14 +612,14 @@ def test_restart_without_summary_catches_up_in_parts_at_first_question(history_p
 
     assert len(client.calls) == 2  # суммаризатор + вопрос
     summary_call, question_call = client.calls[0], client.calls[1]
-    summary_user = summary_call["messages"][1]["content"]
+    summary_user = sans_invariants(summary_call["messages"])[1]["content"]
     assert "Вопрос 1" in summary_user and "Вопрос 11" in summary_user
     assert "Вопрос 12" not in summary_user  # последний обмен остаётся дословным
-    assert [m["role"] for m in question_call["messages"]] == [
+    assert [m["role"] for m in sans_invariants(question_call["messages"])] == [
         "system", "system", "user", "assistant", "user",
     ]
-    assert "РЕЗЮМЕ ВСЕЙ ИСТОРИИ" in question_call["messages"][1]["content"]
-    assert "Вопрос 12" in question_call["messages"][2]["content"]
+    assert "РЕЗЮМЕ ВСЕЙ ИСТОРИИ" in sans_invariants(question_call["messages"])[1]["content"]
+    assert "Вопрос 12" in sans_invariants(question_call["messages"])[2]["content"]
 
 
 def test_reset_clears_stack_summary_and_file():
@@ -666,7 +679,7 @@ def test_phase_listener_signals_compression_then_request():
 
     assert phases.count(tabletop_agent.RequestPhase.REQUEST) == 6
     assert phases.count(tabletop_agent.RequestPhase.COMPRESSION) == 1
-    assert client.calls[5]["messages"][0]["content"] == context_compressor.summary_instruction()
+    assert sans_invariants(client.calls[5]["messages"])[0]["content"] == context_compressor.summary_instruction()
 
 
 def test_default_listener_is_silent():
@@ -775,7 +788,7 @@ def test_switching_to_window_brings_digested_turns_back():
     with_strategy(agent, ContextStrategy.SLIDING_WINDOW, compress_after=config.MAX_COMPRESS_AFTER)
     agent.ask("Вопрос 7")
 
-    messages = client.calls[-1]["messages"]
+    messages = sans_invariants(client.calls[-1]["messages"])
     contents = "".join(message["content"] for message in messages)
     assert roles(messages)[0] == "system"
     assert "РЕЗЮМЕ 1" not in contents  # окно на резюме не смотрит
@@ -791,7 +804,7 @@ def test_window_strategy_sends_only_the_last_messages_and_no_summarizer():
     for i in range(1, 7):
         agent.ask(f"Вопрос {i}")
 
-    messages = client.question_messages[-1]
+    messages = sans_invariants(client.question_messages[-1])
     # окно 5 сообщений — целыми обменами это последние два обмена плюс новый user-ход
     assert roles(messages) == ["system", "user", "assistant", "user", "assistant", "user"]
     contents = "".join(message["content"] for message in messages)
@@ -806,7 +819,7 @@ def test_window_over_the_ceiling_drops_oldest_exchanges_but_keeps_the_last():
     for i in range(1, 5):
         agent.ask(f"Вопрос {i}" if i < 4 else "Вопрос 4 " + "о" * 20000)
 
-    messages = client.question_messages[-1]
+    messages = sans_invariants(client.question_messages[-1])
     contents = "".join(message["content"] for message in messages)
     assert "Вопрос 1" not in contents and "Вопрос 2" not in contents
     assert "Вопрос 3" in contents
@@ -825,7 +838,7 @@ def test_facts_strategy_updates_the_block_before_the_question():
 
     assert len(client.facts_prompts) == 1
     assert "Помоги собрать ТЗ по Каркассону" in client.facts_prompts[0]
-    messages = client.question_messages[0]
+    messages = sans_invariants(client.question_messages[0])
     assert roles(messages) == ["system", "system", "system", "user"]
     assert "Рабочая память" in messages[1]["content"]  # слои памяти выше блока фактов
     assert "цель: собрать ТЗ по Каркассону" in messages[2]["content"]
@@ -842,7 +855,7 @@ def test_facts_block_replaces_the_value_of_a_known_key():
     agent.ask("Первый вопрос")
     agent.ask("Теперь конкретнее по игре")
 
-    block = client.question_messages[1][1]["content"]
+    block = sans_invariants(client.question_messages[1])[1]["content"]
     assert "цель: собираем ТЗ по игре" in block
     assert block.count("цель:") == 1
     assert "собираем ТЗ\n" not in block
@@ -896,7 +909,7 @@ def test_facts_extractor_non_json_is_a_failure_not_an_empty_block():
 
     assert agent.last_facts.updated is False
     assert agent.context_report().facts == {}
-    assert roles(client.question_messages[0]) == ["system", "user"]  # пустой блок не отправляется
+    assert roles(sans_invariants(client.question_messages[0])) == ["system", "user"]  # пустой блок не отправляется
 
 
 def test_facts_empty_object_clears_the_queue():
@@ -927,7 +940,7 @@ def test_facts_are_saved_to_history_and_restored():
     restored.settings = restored.settings.with_context_strategy(ContextStrategy.STICKY_FACTS)
     restored.ask("Второй вопрос")
 
-    messages = restored_client.calls[0]["messages"]
+    messages = sans_invariants(restored_client.calls[0]["messages"])
     assert "цель: ТЗ" in messages[1]["content"]
 
 
@@ -958,7 +971,7 @@ def test_branching_strategy_sends_only_the_active_branch():
 
     agent.ask("Вопрос ветки 2")
 
-    messages = client.question_messages[-1]
+    messages = sans_invariants(client.question_messages[-1])
     contents = "".join(message["content"] for message in messages)
     assert "Вопрос ветки 2" in contents
     assert "Вопрос ветки 1" in contents  # ветка скопировала ходы до чекпоинта
@@ -966,7 +979,7 @@ def test_branching_strategy_sends_only_the_active_branch():
 
     assert agent.switch_branch("ветка 1") is True
     agent.ask("Вопрос обратно в ветке 1")
-    contents = "".join(m["content"] for m in client.question_messages[-1])
+    contents = "".join(m["content"] for m in sans_invariants(client.question_messages[-1]))
     assert "Вопрос ветки 2" not in contents  # обмен второй ветки остался в ней
 
 
@@ -1068,8 +1081,8 @@ def test_empty_summarizer_answer_is_a_failure_not_an_empty_summary():
     meta = agent.ask("Вопрос 6 ещё раз")
     assert meta.content == "Ответ 6"
     question_call = client.calls[-1]
-    assert "РЕЗЮМЕ 1" in question_call["messages"][1]["content"]
-    contents = "".join(m["content"] for m in question_call["messages"])
+    assert "РЕЗЮМЕ 1" in sans_invariants(question_call["messages"])[1]["content"]
+    contents = "".join(m["content"] for m in sans_invariants(question_call["messages"]))
     assert "Вопрос 1" not in contents and "Вопрос 4" not in contents  # под резюме
     assert "Вопрос 5" in contents
 
@@ -1131,7 +1144,7 @@ def test_switching_to_facts_mid_dialog_feeds_the_earlier_messages():
     assert "6 страниц A5" in extractor_prompt
     block = next(
         message["content"]
-        for message in client.question_messages[-1]
+        for message in sans_invariants(client.question_messages[-1])
         if message["role"] == "system" and "Известные факты" in message["content"]
     )
     assert "бюджет: до 2500 рублей" in block
@@ -1186,13 +1199,13 @@ def test_restored_messages_are_not_fed_to_the_extractor(history_path):
     restored.ask("Вопрос после перезапуска")
 
     extractor, question = restored_client.calls[0], restored_client.calls[1]
-    assert extractor["messages"][0]["content"] == context_strategies.facts_instruction()
+    assert sans_invariants(extractor["messages"])[0]["content"] == context_strategies.facts_instruction()
     # извлекатель получает только новый вопрос: прошлые сообщения считаются переработанными
-    assert "Вопрос до перезапуска" not in extractor["messages"][1]["content"]
-    assert "Вопрос после перезапуска" in extractor["messages"][1]["content"]
-    assert "цель: ТЗ" in question["messages"][1]["content"]  # блок из файла
+    assert "Вопрос до перезапуска" not in sans_invariants(extractor["messages"])[1]["content"]
+    assert "Вопрос после перезапуска" in sans_invariants(extractor["messages"])[1]["content"]
+    assert "цель: ТЗ" in sans_invariants(question["messages"])[1]["content"]  # блок из файла
     # последние сообщения лога (в т.ч. восстановленные) в запросе законно остаются: это окно
-    assert "Вопрос до перезапуска" in "".join(m["content"] for m in question["messages"])
+    assert "Вопрос до перезапуска" in "".join(m["content"] for m in sans_invariants(question["messages"]))
 
 
 # --- день 11: слои памяти ---------------------------------------------------------------
@@ -1201,7 +1214,7 @@ def test_restored_messages_are_not_fed_to_the_extractor(history_path):
 def memory_messages(client, call_index=0) -> List[str]:
     return [
         message["content"]
-        for message in client.calls[call_index]["messages"]
+        for message in sans_invariants(client.calls[call_index]["messages"])
         if message["role"] == "system"
     ]
 
@@ -1244,7 +1257,7 @@ def test_layers_go_into_the_request_above_the_dialogue_turns():
     agent.ask("Я опытный игрок, у меня больше 300 партий.")
     agent.ask("Собери партию на вечер.")
 
-    messages = client.calls[1]["messages"]
+    messages = sans_invariants(client.calls[1]["messages"])
     memory = [message["content"] for message in messages if message["role"] == "system"][1]
     assert memory.index("опыт") < memory.index("цель")
     assert messages[-1]["role"] == "user"
@@ -1262,7 +1275,7 @@ def test_no_memory_message_while_the_layers_are_empty():
     agent, client = make_agent()
     agent.ask("Какие правила у Каркассона?")
 
-    roles = [message["role"] for message in client.calls[0]["messages"]]
+    roles = [message["role"] for message in sans_invariants(client.calls[0]["messages"])]
     assert roles == ["system", "user"]
 
 
@@ -1299,7 +1312,7 @@ def test_restore_puts_each_layer_back_from_its_own_store():
     assert restored.memory_report().short_term_exchanges == 1  # хвост диалога из конверта
     restored.ask("Что посоветуешь?")
 
-    memory = [message["content"] for message in restored_client.calls[0]["messages"] if message["role"] == "system"][1]
+    memory = [message["content"] for message in sans_invariants(restored_client.calls[0]["messages"]) if message["role"] == "system"][1]
     assert "опыт" in memory  # долговременный слой восстановлен из своего файла
     assert "цель" in memory  # рабочая память восстановлена из конверта истории
 
@@ -1407,7 +1420,7 @@ def test_profile_message_follows_the_system_prompt_and_precedes_memory():
 
     agent.ask("Что посоветуешь?")
 
-    messages = client.calls[0]["messages"]
+    messages = sans_invariants(client.calls[0]["messages"])
     assert [m["role"] for m in messages] == ["system", "system", "system", "user"]
     assert "Tabletop AI Assistant" in messages[0]["content"]
     assert "Профиль пользователя «новичок»" in messages[1]["content"]
@@ -1424,7 +1437,7 @@ def test_every_question_carries_the_profile():
     agent.ask("Второй вопрос")
 
     for call in client.calls:
-        profile = [m for m in call["messages"] if m["role"] == "system"][1]
+        profile = [m for m in sans_invariants(call["messages"]) if m["role"] == "system"][1]
         assert "Стиль: коротко и просто" in profile["content"]
 
 
@@ -1432,7 +1445,7 @@ def test_agent_without_profile_sends_no_profile_message():
     agent, client = make_agent()
     agent.ask("Что посоветуешь?")
 
-    messages = client.calls[0]["messages"]
+    messages = sans_invariants(client.calls[0]["messages"])
     assert [m["role"] for m in messages] == ["system", "user"]
     assert "Профиль пользователя" not in "".join(m["content"] for m in messages)
 
@@ -1445,7 +1458,7 @@ def test_profile_message_survives_the_token_ceiling():
     for index in range(6):
         agent.ask(f"Вопрос номер {index} " + "подробно " * 60)
 
-    messages = client.calls[-1]["messages"]
+    messages = sans_invariants(client.calls[-1]["messages"])
     profile = [m for m in messages if m["role"] == "system"][1]
     assert "Стиль: коротко и просто, без терминов" in profile["content"]
 
@@ -1489,7 +1502,7 @@ def test_use_profile_switches_the_profile_for_the_next_question():
     assert agent.use_profile("новичок") is not None
     agent.ask("Что посоветуешь?")
 
-    messages = client.calls[0]["messages"]
+    messages = sans_invariants(client.calls[0]["messages"])
     assert "Стиль: коротко" in messages[1]["content"]
 
 
@@ -1509,7 +1522,7 @@ def test_forget_profile_stops_sending_it():
     assert agent.forget_profile("новичок") is True
 
     agent.ask("Что посоветуешь?")
-    messages = client.calls[0]["messages"]
+    messages = sans_invariants(client.calls[0]["messages"])
     assert [m["role"] for m in messages] == ["system", "user"]
     assert agent.forget_profile("новичок") is False
 
@@ -1537,7 +1550,7 @@ def test_reset_keeps_the_profile_and_its_file():
 
     assert agent.profile_report().active_name == "новичок"
     agent.ask("Второй вопрос")
-    messages = client.calls[-1]["messages"]
+    messages = sans_invariants(client.calls[-1]["messages"])
     assert [m["role"] for m in messages] == ["system", "system", "user"]
     assert "Стиль: коротко и просто" in messages[1]["content"]
 
@@ -1628,7 +1641,7 @@ def test_task_state_message_goes_into_the_dialogue_request():
 
     agent.ask("что дальше?")
 
-    messages = agent.client.calls[0]["messages"]
+    messages = sans_invariants(agent.client.calls[0]["messages"])
     assert messages[0]["role"] == "system"
     assert "Тема" in messages[1]["content"]
     assert "Execution" in messages[1]["content"]
@@ -1640,7 +1653,7 @@ def test_request_shape_is_unchanged_without_a_task():
 
     agent.ask("Расскажи про Каркассон")
 
-    messages = agent.client.calls[0]["messages"]
+    messages = sans_invariants(agent.client.calls[0]["messages"])
     assert [message["role"] for message in messages] == ["system", "user"]
     assert all("Задача пользователя" not in message["content"] for message in messages)
 
@@ -1722,3 +1735,176 @@ def test_empty_goal_and_dropping_the_queue():
 
     assert agent.task.state.tasks == ()
     assert TaskStore(agent.task.path).state.tasks == ()
+
+
+# --- инварианты: сообщение в запросе, проверка ответа, повтор и отклонение ---
+
+
+
+def system_contents(messages) -> List[str]:
+    return [m["content"] for m in messages if m["role"] == "system"]
+
+
+def test_invariants_message_follows_the_profile_and_precedes_task_and_memory():
+    agent = _agent_with_tasks(client=FakeAgentClient(answers=["Ответ"]))
+    setup_profile(agent, style="коротко")
+    agent.remember_goal("Подобрать игру")
+    agent.task.save(
+        task_state.accept_plan(
+            task_state.plan_built(task_state.begin_task(agent.task.state), ("Тема", "Ход"))
+        )
+    )
+
+    agent.ask("Что посоветуешь?")
+
+    messages = agent.client.calls[0]["messages"]
+    assert roles(messages) == ["system", "system", "system", "system", "system", "user"]
+    assert "Профиль пользователя" in messages[1]["content"]
+    assert messages[2]["content"] == invariants_message()
+    assert "Задача пользователя" in messages[3]["content"]
+    assert "Рабочая память" in messages[4]["content"]
+    assert messages[-1]["role"] == "user"
+
+
+def test_invariants_message_is_second_when_there_is_no_profile():
+    agent, client = make_agent(answers=["Ответ"])
+
+    agent.ask("Расскажи про Каркассон")
+
+    messages = client.calls[0]["messages"]
+    assert roles(messages) == ["system", "system", "user"]
+    assert messages[1]["content"] == invariants_message()
+
+
+def test_reset_keeps_the_invariants_in_the_next_request():
+    agent, client = make_agent(answers=["Ответ"])
+    agent.ask("Первый вопрос")
+
+    agent.reset()
+    agent.ask("Второй вопрос")
+
+    assert invariants_message() in system_contents(client.calls[-1]["messages"])
+
+
+def test_pipeline_requests_carry_the_invariants_message_second():
+    client = FakeAgentClient(answers=[PLAN_JSON, "Раздел 1", "Раздел 2", "Раздел 3", OK_JSON])
+    agent = _agent_with_tasks(client=client)
+
+    agent.task_step()  # план
+    agent.task_answer_edits("")
+    agent.task_step()  # подзадача 1
+    for _ in range(4):
+        agent.task_step()
+
+    assert len(client.calls) >= 5
+    for call in client.calls:
+        assert roles(call["messages"])[:2] == ["system", "system"]
+        assert call["messages"][1]["content"] == invariants_message()
+        assert call["messages"][0]["content"] != invariants_message()
+
+
+def test_violation_is_retried_and_the_clean_retry_is_the_answer():
+    agent, client = make_agent(answers=["Берите Монополию!", "Берите Каркассон."])
+
+    meta = agent.ask("Что взять на вечер?")
+
+    assert meta.content == "Берите Каркассон."
+    assert len(client.calls) == 2
+    retry = client.calls[1]["messages"]
+    first = client.calls[0]["messages"]
+    assert retry[: len(first)] == first
+    assert roles(retry[len(first):]) == ["assistant", "user"]
+    assert retry[-2]["content"] == "Берите Монополию!"
+    assert "инвариант 3" in retry[-1]["content"] and "«монопол»" in retry[-1]["content"]
+    check = agent.last_invariants
+    assert [v.number for v in check.violations] == [3]
+    assert check.retried is True
+    assert check.rejected is False
+    # В стек и историю ложится то, что увидел пользователь.
+    assert agent.history.dialogues[-1]["answer"] == "Берите Каркассон."
+    agent.ask("Ещё вопрос")
+    assert "Берите Каркассон." in [m["content"] for m in client.calls[-1]["messages"]]
+    assert "Берите Монополию!" not in "".join(m["content"] for m in client.calls[-1]["messages"])
+
+
+def test_second_violation_rejects_the_answer_with_the_app_refusal():
+    agent, client = make_agent(
+        answers=["Берите Монополию!", "Ну возьмите монополию и приложение.", "Чистый ответ."]
+    )
+
+    meta = agent.ask("Что взять на вечер?")
+
+    assert meta.content.startswith(REFUSAL_PREFIX)
+    assert "инвариант 1" in meta.content and "инвариант 3" in meta.content
+    assert "«монопол»" in meta.content
+    assert len(client.calls) == 2
+    assert agent.history.dialogues[-1]["answer"] == meta.content
+    check = agent.last_invariants
+    assert check.retried is True
+    assert check.rejected is True
+    assert [v.number for v in check.violations] == [3]
+    assert [v.number for v in check.final_violations] == [1, 3]
+    agent.ask("Ещё вопрос")
+    contents = "".join(m["content"] for m in client.calls[-1]["messages"])
+    assert meta.content in contents
+    assert "Ну возьмите" not in contents
+
+
+def test_api_error_on_the_retry_leaves_stack_and_history_untouched():
+    class FailOnRetry(FakeAgentClient):
+        def ask_with_usage_messages(self, messages, **kwargs):
+            if len(self.calls) == 1:
+                self.calls.append({"messages": messages})
+                raise APIError("нет сети")
+            return super().ask_with_usage_messages(messages, **kwargs)
+
+    client = FailOnRetry(answers=["Берите Монополию!"])
+    agent, _ = make_agent(client=client)
+
+    with pytest.raises(APIError):
+        agent.ask("Что взять?")
+
+    assert agent.history.dialogues == []
+    assert agent.context_report().log_exchanges == 0
+
+
+def test_model_refusal_with_a_forbidden_word_is_not_retried():
+    answer = f"{REFUSAL_PREFIX}: инвариант 1 запрещает игры с приложением на смартфоне."
+    agent, client = make_agent(answers=[answer])
+
+    meta = agent.ask("Хочу игру с приложением")
+
+    assert meta.content == answer
+    assert len(client.calls) == 1
+    assert agent.last_invariants.violations == ()
+    assert agent.last_invariants.retried is False
+
+
+def test_both_requests_of_a_retry_are_counted_in_the_session_usage():
+    agent, _ = make_agent(
+        answers=["Берите Монополию!", "Берите Каркассон."],
+        usages=[(10, 20, 0.0001), (30, 40, 0.0002)],
+    )
+
+    agent.ask("Что взять?")
+
+    assert agent.session_usage.prompt_tokens == 40
+    assert agent.session_usage.completion_tokens == 60
+    assert agent.last_result.prompt_tokens == 30
+
+
+def test_last_invariants_is_none_before_any_question():
+    agent, _ = make_agent()
+    assert agent.last_invariants is None
+
+
+def test_invariants_report_describes_the_table_without_api_calls():
+    agent, client = make_agent()
+
+    report = agent.invariants_report()
+
+    assert [entry.number for entry in report.invariants] == [1, 2, 3, 4, 5, 6]
+    assert report.invariants[0].forbidden == ("приложени", "смартфон", "планшет")
+    assert report.invariants[1].forbidden == ()
+    assert report.invariants[2].rule == INVARIANTS[2].rule
+    assert client.calls == []

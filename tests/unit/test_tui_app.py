@@ -182,10 +182,11 @@ def test_first_question_after_restart_carries_restored_context(make_app, history
     client = FakeClient()
     make_app(["Новый вопрос", "/exit"], client).run()
 
+    # Смена контракта (add-agent-invariants): вторым идёт сообщение инвариантов.
     messages = client.calls[0]["messages"]
-    assert [m["role"] for m in messages] == ["system", "user", "assistant", "user"]
-    assert "Старый вопрос" in messages[1]["content"]
-    assert messages[2]["content"] == "Старый ответ"
+    assert [m["role"] for m in messages] == ["system", "system", "user", "assistant", "user"]
+    assert "Старый вопрос" in messages[2]["content"]
+    assert messages[3]["content"] == "Старый ответ"
 
 
 def test_clear_after_restart_resets_restored_context(make_app, history):
@@ -194,8 +195,8 @@ def test_clear_after_restart_resets_restored_context(make_app, history):
     make_app(["/clear", "Новый вопрос", "/exit"], client).run()
 
     messages = client.calls[0]["messages"]
-    assert [m["role"] for m in messages] == ["system", "user"]
-    assert "Старый вопрос" not in messages[1]["content"]
+    assert [m["role"] for m in messages] == ["system", "system", "user"]
+    assert "Старый вопрос" not in messages[2]["content"]
 
 
 def test_exit_command_says_goodbye(make_app, recording_console):
