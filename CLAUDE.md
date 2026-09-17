@@ -17,9 +17,9 @@ echo "OPENCODE_API_KEY=sk-ваш_ключ" > .env   # or set OPENCODE_API_KEY di
 python tabletop-ai-assistant.py
 
 pip install -r requirements-dev.txt
-pytest                      # everything except the `network` marker (645 selected)
+pytest                      # everything except the `network` marker (872 selected)
 pytest tests/unit -q        # fast layer, no subprocesses (~3s)
-pytest tests/e2e -q         # real app in a pty against a stub API (~95s)
+pytest tests/e2e -q         # real app in a pty against a stub API (~130s)
 pytest --snapshot-update    # rewrite the e2e screen snapshots after a deliberate layout change
 
 pytest tests/e2e/test_live_api.py -m network -q   # drive the app against the real OpenCode Zen
@@ -87,7 +87,8 @@ openspec archive <change-id> --yes        # non-interactive: without --yes the C
   from the existing code/tests) as a set of capabilities, each the target for future `MODIFIED`
   deltas: `agent`, `question-answering`, `answer-settings`, `api-integration`,
   `history-persistence`, `terminal-ui`, `settings-screen`, `configuration`, `context-strategies`,
-  `memory-model`, `user-profile`, `test-infrastructure`, `model-selection`.
+  `memory-model`, `user-profile`, `task-state`, `agent-invariants`, `test-infrastructure`,
+  `model-selection`.
   It records deliberate decisions worth knowing before touching related code: the JSON format's
   refusal reply is a machine-readable `{"error": ...}` object rather than the verbatim refusal
   phrase used by free/compact (not a bug to fix), and `AnswerSettings` is session-only by design —
@@ -150,8 +151,8 @@ than repeating it):
 ## Architecture
 
 Two packages: `core/` (agent, settings, prompts, API client, memory layers and stores, the user
-profile, the task state machine and its pipeline, context strategies and the compression logic — no
-`rich`/terminal dependency) and `ui/`
+profile, the invariants table and its answer check, the task state machine and its pipeline, context
+strategies and the compression logic — no `rich`/terminal dependency) and `ui/`
 (`tui_app.py`, `keyboard.py`, `commands_screen.py`, `settings_screen.py`, `branches_screen.py`,
 `models_screen.py` — everything that touches the terminal). Modules inside `core/`
 import each other with relative imports (`from . import config`, `from .answer_settings import
@@ -336,9 +337,9 @@ shape every answer, deliberately kept apart from the memory layers. Deliberate d
 - **Storage is JSON, not the markdown files the week-3 README suggests**: repo convention is state
   in JSON with tolerant reading (missing/corrupt file = no profiles, write errors never break the
   session), while `assets/*.md` is where model instructions live.
-- Request composition: system → **profile message** → memory layers → strategy memory → dialogue
-  turns → fresh user turn. The profile answers "how to answer", so it sits right after the system
-  prompt and above memory. `assets/profile_prompt.md` subordinates preferences to the app settings
+- Request composition: system → **profile message** → invariants message → task state → memory
+  layers → strategy memory → dialogue turns → fresh user turn. The profile answers "how to answer",
+  so it sits right after the system prompt and above memory. `assets/profile_prompt.md` subordinates preferences to the app settings
   (format, word limit, list limit) and to the fresh message — otherwise a profile could break the
   JSON/compact format contracts and the word ceilings the e2e tests assert.
 - An empty profile adds no message, so the request shape without personalization is unchanged
@@ -357,6 +358,55 @@ shape every answer, deliberately kept apart from the memory layers. Deliberate d
 - The dialogue is `/profile setup`; `/profile` prints the report, `use <name>` switches the active
   profile. Like `/memory`, the command has **meaningful arguments**, and it was deliberately kept
   out of the panel-reducer pattern because a question-answer dialogue is not a form.
+
+**Invariants (`core/invariants.py`, `assets/invariants_prompt.md`, `/invariants`):** rules the agent
+is never allowed to break (day 14). Deliberate decisions baked in:
+- **A fixed table in code, not a state file.** `invariants.INVARIANTS` is six `Invariant(number,
+  rule, forbidden)` records in the board-game domain (physical components only; a session no longer
+  than two hours; no «Монополия»; no gambling; no solo games; official rules only) — the same
+  device as `memory_layers.RULES`: one unit test per rule, no `TABLETOP_*` switch, no harness
+  pass-through, nothing in `history.json`, and `/clear` cannot touch it. There are **no** add/forget
+  commands (user's call); `/invariants` is a report only and ignores arguments. `forbidden` holds
+  lower-case word stems («монопол», «приложени») so cases match without morphology; an empty tuple
+  means the rule is model-only, and the report labels it so.
+- **Double protection, as in the week-3 README.** The prompt: `invariants_message()` (rules with
+  numbers + the asset's instruction) goes out as its own system message in **every** question —
+  right after the profile, above the task state and the memory layers — and `_ask_task` inserts it
+  as the *second* message of every pipeline request (the pipeline itself knows nothing about it).
+  The instruction: check the request against every rule before answering; on a conflict refuse with
+  the fixed opening «Не могу предложить», name the invariant, explain; alternatives only within the
+  rules; invariants outrank the profile, memory and the fresh message (the one exception to
+  "fresh message wins"). The forbidden words are deliberately **not** sent — a list would invite
+  synonyms instead of compliance. The code: `check_answer()` is a case-insensitive substring check
+  per rule (one `Violation(number, rule, term)` per rule, `term` is the table stem, not the answer
+  fragment).
+- **Refusal detection is a 200-char window, not a prefix.** `is_refusal()` looks for
+  `REFUSAL_PREFIX` in the first `REFUSAL_WINDOW` characters, because in JSON format the refusal
+  sits inside `{"error": "..."}` in a code block. A refusal is skipped by the word check: it names
+  the forbidden thing («игры с приложением») and proposes nothing. Known weakness: a solution
+  smuggled after the refusal phrase passes — no substring check can catch that; it is the same kind
+  of contract as the fixed off-topic refusal phrase.
+- **Violation → one retry → rejection.** `_enforce_invariants` resends the same messages plus the
+  offending answer as an `assistant` turn and `retry_prompt(violations)` as a `user` turn
+  (`config.INVARIANT_RETRIES = 1`). If the retry still violates, the answer is **replaced** by
+  `refusal_text(final_violations)` («Не могу предложить: ответ нарушает инвариант N «…» (в ответе:
+  «…»)»); the log and `history.json` get what the user saw, never the rejected text (otherwise the
+  next request would carry the violation as an example). An `APIError` on the retry propagates
+  like any request error — nothing is remembered. Both requests land in the ledger; `last_result`
+  is the last one (the `⏱` line shows it, `/usage` has the sum).
+- **Journal only on violation; status bar untouched** (user's call). `last_invariants` is an
+  `InvariantsCheck(violations, retried, rejected, final_violations)`; the TUI prints «⛔ Инвариант N
+  нарушен («слово») — повторный запрос» and «⛔ Ответ отклонён: …» and nothing at all when the
+  answer is clean. A rejected answer is app text, not model output, so the JSON-format «не вернула
+  валидный JSON» warning is suppressed for it. `invariants_report()` is the snapshot the report
+  renders — the same isolation boundary as the other reports.
+- **The message is always there, so the request shape changed for every test that asserts on
+  message roles.** Unit and e2e expectations go through `sans_invariants(messages)` (helper in
+  `tests/unit/test_tabletop_agent.py` and `tests/e2e/harness.py`) and `stub.user_messages()` now
+  picks the first `user` message by role instead of index 1; the token-ceiling unit test's ceiling
+  was raised because the ~1500-char message enters every estimate. Pipeline artifact sections are
+  **not** checked by code (finished work is never redone by day-13 rule, so an issue would only be
+  reported) — the pipeline gets the prompt-level protection only.
 
 **Task state machine (`core/task_state.py`, `core/task_pipeline.py`, `/task`):** a user goal enters
 as a *task* in a queue and is carried through four stages — `Planning` → `Execution` → `Validation`
@@ -694,7 +744,9 @@ saved: `dialogues` stays a flat list across branches.
 ## Test layout
 
 - `tests/unit/` — no subprocesses, ~3s for the whole layer. `core/` logic (including the memory
-  routing table, the long-term store, the profile store and the setup dialogue automaton, the task
+  routing table, the long-term store, the profile store and the setup dialogue automaton, the
+  invariants table with a positive and a negative example per rule plus the retry/rejection path
+  against a fake client, the task
   state machine with every transition branch and the task pipeline against a fake request), the
   `/commands`, `/settings`, `/branches` and `/models` reducers, and `TabletopAITUI` driven through
   injected dependencies:
@@ -737,6 +789,11 @@ saved: `dialogues` stays a flat list across branches.
   failed task keeping the queue moving, and the repo's real `task.json` staying untouched. The run is
   slowed down by the stub replies' `delay` so the panel states are observable: with instant replies a
   whole run finishes in milliseconds and the assertions race the app.
+- `tests/e2e/test_invariants.py` — the invariants in a real pty: the message after the profile
+  in every question and second in every pipeline request, a stub answer with «Монополия» producing
+  the retry line and the clean retry, two violating answers producing the rejection and the app
+  refusal in `history.json`, a stub refusal shown as is with one request, `/invariants` with zero
+  requests, `/clear` keeping the message.
 - `tests/e2e/test_profile.py` — the setup dialogue in a real pty: five questions answered line by
   line, the profile landing in the temp `profile.json`, the next question carrying the profile
   message, `/clear` and a restart keeping it, `Ctrl+C` cancelling without writing, and the repo's
