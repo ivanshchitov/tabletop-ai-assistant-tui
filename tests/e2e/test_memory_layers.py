@@ -25,7 +25,7 @@ def test_question_with_turns_lands_in_the_layers_with_a_journal_line(app, stub):
         session.wait_for("Память: долговременная (профиль: опыт)")
 
     payload = stub.last_payload()
-    memory = [m["content"] for m in payload["messages"] if m["role"] == "system"][1]
+    memory = [m["content"] for m in harness.sans_invariants(payload["messages"]) if m["role"] == "system"][1]
     assert "Рабочая память" in memory
     assert "Долговременная память" in memory
     assert "300 партий" in memory
@@ -85,7 +85,7 @@ def test_restart_restores_the_layers_from_their_own_files(app, stub, memory_file
         session.wait_for("Ответ первой сессии")
         session.ask("Что посоветуешь на вечер?", "Ответ второй сессии.")
 
-    memory = [m["content"] for m in stub.last_payload()["messages"] if m["role"] == "system"][1]
+    memory = [m["content"] for m in harness.sans_invariants(stub.last_payload()["messages"]) if m["role"] == "system"][1]
     assert "300 партий" in memory  # долговременный слой из своего файла
     assert "партию на вечер" in memory  # рабочая память из конверта истории
     assert _saved(memory_file)["entries"]["опыт"]["category"] == "профиль"

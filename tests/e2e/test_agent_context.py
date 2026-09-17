@@ -15,7 +15,11 @@ from .stub_api import Reply, answer
 pytestmark = [pytest.mark.e2e, pytest.mark.pty]
 
 def _roles(payload):
-    return [m["role"] for m in payload["messages"]]
+    return [m["role"] for m in harness.sans_invariants(payload["messages"])]
+
+
+def _messages(payload):
+    return harness.sans_invariants(payload["messages"])
 
 def test_second_question_carries_first_exchange(app, stub):
     stub.always(answer("Первый ответ stub-модели."))
@@ -26,9 +30,9 @@ def test_second_question_carries_first_exchange(app, stub):
 
     payload = stub.payload_at(1)
     assert _roles(payload) == ["system", "user", "assistant", "user"]
-    assert "Первый вопрос" in payload["messages"][1]["content"]
-    assert payload["messages"][2]["content"] == "Первый ответ stub-модели."
-    assert "Второй вопрос" in payload["messages"][3]["content"]
+    assert "Первый вопрос" in _messages(payload)[1]["content"]
+    assert _messages(payload)[2]["content"] == "Первый ответ stub-модели."
+    assert "Второй вопрос" in _messages(payload)[3]["content"]
 
 def test_first_question_has_no_context(app, stub):
     with app() as session:
@@ -45,7 +49,7 @@ def test_clear_resets_the_conversation_context(app, stub):
         session.ask("Вопрос после очистки", "Ответ, который сотрут.")
         harness.wait_for_answers(session, 2)
 
-    assert stub.last_payload()["messages"][1]["content"].startswith(
+    assert _messages(stub.last_payload())[1]["content"].startswith(
         "Вопрос пользователя: Вопрос после очистки"
     )
 
@@ -62,9 +66,9 @@ def test_restarted_session_carries_restored_context(app, stub, history_file):
     # контекст пережил перезапуск: запрос второй сессии несёт прошлый обмен
     payload = stub.payload_at(1)
     assert _roles(payload) == ["system", "user", "assistant", "user"]
-    assert "Вопрос в первой сессии" in payload["messages"][1]["content"]
-    assert payload["messages"][2]["content"] == "Ответ первой сессии."
-    assert "Вопрос во второй сессии" in payload["messages"][3]["content"]
+    assert "Вопрос в первой сессии" in _messages(payload)[1]["content"]
+    assert _messages(payload)[2]["content"] == "Ответ первой сессии."
+    assert "Вопрос во второй сессии" in _messages(payload)[3]["content"]
 
 def test_clear_after_restart_resets_restored_context(app, stub, history_file):
     stub.always(answer("Ответ первой сессии."))
@@ -150,8 +154,8 @@ def test_threshold_compression_reaches_the_model(app, stub, history_file):
     question_payload = stub.payload_at(4)
     roles = _roles(question_payload)
     assert roles == ["system", "system", "user", "assistant", "user"]
-    assert "РЕЗЮМЕ ДИАЛОГА." in question_payload["messages"][1]["content"]
-    assert "Вопрос три" in question_payload["messages"][2]["content"]
+    assert "РЕЗЮМЕ ДИАЛОГА." in _messages(question_payload)[1]["content"]
+    assert "Вопрос три" in _messages(question_payload)[2]["content"]
     assert "Вопрос один" not in "".join(m["content"] for m in question_payload["messages"])
     saved = json.loads(history_file.read_text(encoding="utf-8"))
     assert saved["summary"] == "РЕЗЮМЕ ДИАЛОГА."
@@ -196,7 +200,7 @@ def test_restart_reuses_summary_without_summarizer(app, stub, history_file):
     payload = stub.payload_at(0)
     roles = _roles(payload)
     assert roles[0] == "system" and roles[1] == "system"
-    assert "РЕЗЮМЕ ДИАЛОГА." in payload["messages"][1]["content"]
+    assert "РЕЗЮМЕ ДИАЛОГА." in _messages(payload)[1]["content"]
     contents = "".join(m["content"] for m in payload["messages"])
     assert "Вопрос один" not in contents and "Вопрос два" not in contents
     assert "Вопрос три" in contents and "Вопрос четыре" in contents

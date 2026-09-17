@@ -127,8 +127,9 @@ def test_full_settings_walkthrough_changes_the_next_request(app, stub):
 
     payload = stub.last_payload()
     assert "Формат ответа: JSON" in payload["messages"][0]["content"]
-    assert "не более 50 слов" in payload["messages"][1]["content"]
-    assert "не более 6 вариантов" in payload["messages"][1]["content"]
+    user_prompt = harness.sans_invariants(payload["messages"])[1]["content"]
+    assert "не более 50 слов" in user_prompt
+    assert "не более 6 вариантов" in user_prompt
     assert payload["max_tokens"] == 50 * 4 + 50
     assert "stop" not in payload
 

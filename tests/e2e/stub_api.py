@@ -102,7 +102,15 @@ class StubAPI:
         return [r["payload"]["messages"][0]["content"] for r in self.requests]
 
     def user_messages(self) -> List[str]:
-        return [r["payload"]["messages"][1]["content"] for r in self.requests]
+        """Первое user-сообщение каждого запроса.
+
+        Смена контракта (add-agent-invariants): вторым сообщением всегда идёт системное
+        сообщение инвариантов, поэтому индекс 1 больше не user-ход — ищем по роли.
+        """
+        return [
+            next(m["content"] for m in r["payload"]["messages"] if m["role"] == "user")
+            for r in self.requests
+        ]
 
     def reset(self) -> None:
         self.requests.clear()

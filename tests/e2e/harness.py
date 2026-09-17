@@ -372,3 +372,15 @@ def assert_snapshot(actual: str, path: Path, update: bool) -> None:
         f"Обновить: pytest --snapshot-update\n"
         f"--- ожидалось ---\n{expected}\n--- получено ---\n{actual}"
     )
+
+
+def sans_invariants(messages):
+    """Сообщения запроса без системного сообщения инвариантов.
+
+    Смена контракта (add-agent-invariants): сообщение инвариантов есть в каждом запросе к модели,
+    поэтому ожидания состава сообщений проверяют форму запроса *помимо* него; место и содержимое
+    самого сообщения проверяет `test_invariants.py`.
+    """
+    from core.invariants import invariants_message
+
+    return [m for m in messages if m["content"] != invariants_message()]

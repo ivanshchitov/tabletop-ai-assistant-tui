@@ -22,7 +22,7 @@ SETTINGS_MARKER = "↑/↓ — поле, ←/→ — формат и страт�
 
 
 def _roles(payload):
-    return [message["role"] for message in payload["messages"]]
+    return [message["role"] for message in harness.sans_invariants(payload["messages"])]
 
 
 def open_settings(session):
@@ -125,8 +125,8 @@ def test_facts_strategy_updates_the_block_before_answering(app, stub, history_fi
     # Запрос: system настроек, сообщение слоёв памяти (цель задачи из реплики), блок фактов,
     # новый user-ход. Слои памяти выше памяти стратегии.
     assert _roles(question) == ["system", "system", "system", "user"]
-    assert "Рабочая память" in question["messages"][1]["content"]
-    assert "цель: собрать ТЗ по Каркассону" in question["messages"][2]["content"]
+    assert "Рабочая память" in harness.sans_invariants(question["messages"])[1]["content"]
+    assert "цель: собрать ТЗ по Каркассону" in harness.sans_invariants(question["messages"])[2]["content"]
 
     saved = json.loads(history_file.read_text(encoding="utf-8"))
     assert saved["facts"] == {"цель": "собрать ТЗ по Каркассону"}
