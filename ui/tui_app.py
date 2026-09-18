@@ -91,8 +91,12 @@ PROFILE_ANSWER_PROMPT = "> "
 TASK_PAUSE_KEY = "p"
 TASK_HINT = (
     "Подкоманды: /task add <цель> — поставить задачу в очередь | /task run — запустить и "
-    "продолжить прогон | /task stop — снять очередь"
+    "продолжить прогон | /task stage <этап> — запросить переход | /task stop — снять очередь"
 )
+# Отказ шлюза печатается заметной строкой: попытка перейти в недопустимое состояние — это событие
+# жизненного цикла задачи, а не опечатка в команде.
+TASK_STAGE_REFUSAL = "⛔ Переход отклонён: {source} → {target} — {reason}"
+TASK_STAGE_DONE = "Переход выполнен: {source} → {target}"
 TASK_EMPTY_HINT = (
     "Очередь задач пуста — поставьте задачу: /task add <что нужно сделать>, затем /task run."
 )
@@ -892,6 +896,9 @@ class TabletopAITUI:
         if subcommand == "stop":
             self._stop_tasks()
             return
+        if subcommand == "stage":
+            self._request_stage(rest)
+            return
         self.console.print(f"[dim]{TASK_HINT}[/dim]")
 
     def _add_task(self, goal: str) -> None:
@@ -914,6 +921,42 @@ class TabletopAITUI:
         self.console.print(
             "[bold green]Очередь задач снята.[/bold green] Новую задачу ставит /task add."
         )
+
+    def _request_stage(self, name: str) -> None:
+        """Подкоманда /task stage: запрос перехода через агента, печать результата.
+
+        Правила автомата остаются в агенте: интерфейс печатает его ответ и ничего не решает сам.
+        Обращений к модели здесь нет — ни у принятого перехода, ни у отказа.
+        """
+        stages = ", ".join(self.agent.task_report().stages)
+        if not name.strip():
+            self.console.print(f"[dim]Этап не назван. Допустимые этапы: {stages}[/dim]")
+            return
+        result = self.agent.request_stage(name)
+        if not result.known:
+            self.console.print(
+                f"[bold yellow]{escape(result.reason)}[/bold yellow] "
+                f"[dim]Допустимые этапы: {stages}[/dim]"
+            )
+            return
+        if result.accepted:
+            self.console.print(
+                "[bold green]"
+                + TASK_STAGE_DONE.format(source=result.source, target=result.target)
+                + "[/bold green]"
+            )
+            return
+        self.console.print(
+            "[bold yellow]"
+            + escape(
+                TASK_STAGE_REFUSAL.format(
+                    source=result.source or "—", target=result.target, reason=result.reason
+                )
+            )
+            + "[/bold yellow]"
+        )
+        if result.allowed:
+            self.console.print(f"[dim]  Разрешены: {', '.join(result.allowed)}[/dim]")
 
     def _run_task_pipeline(self) -> None:
         """Прогон конвейера задачи: живая панель, шаги агента и пауза по клавише или Ctrl+C.
@@ -1135,9 +1178,23 @@ class TabletopAITUI:
         )
         issues = "; ".join(escape(issue) for issue in report.issues) if report.issues else "—"
         self.console.print(f"  Замечания проверки: {issues}")
+        self.console.print(
+            f"  Разрешённые переходы: {', '.join(report.allowed_transitions) or '—'}"
+        )
+        self._print_transition_journal(report)
         self.console.print(f"  Пауза: {'да' if report.paused else 'нет'}")
         self.console.print(f"  Состояние: {report.task_store}")
         self.console.print(f"[dim]{TASK_HINT}[/dim]")
+
+    def _print_transition_journal(self, report: TaskReport) -> None:
+        """Журнал переходов задачи: принятые и отклонённые попытки различимы отметкой."""
+        if not report.transitions:
+            return
+        self.console.print("  Журнал переходов:")
+        for entry in report.transitions:
+            mark = "✓" if entry.accepted else "✗"
+            reason = f" — {escape(entry.reason)}" if entry.reason else ""
+            self.console.print(f"    {mark} {entry.source} → {entry.target}{reason}")
 
     def _render_task_panel(
         self, report: TaskReport, busy: str = "", answer: Optional[str] = None
@@ -1173,6 +1230,11 @@ class TabletopAITUI:
                 f"Артефакт:           {plural_ru(len(report.artifact_sections), 'раздел', 'раздела', 'разделов')}, "
                 f"{plural_ru(report.artifact_chars, 'символ', 'символа', 'символов')}"
             )
+        if report.transitions:
+            # Каким переходом задача попала сюда: жизненный цикл виден там же, где этапы.
+            entry = report.transitions[-1]
+            mark = "✓" if entry.accepted else "✗"
+            lines.append(f"Последний переход:  {mark} {entry.source} → {entry.target}")
         if self._task_spend:
             label, meta = self._task_spend[-1]
             lines.append(f"Последний запрос:   {escape(label)} — {self._meta_summary(meta)}")

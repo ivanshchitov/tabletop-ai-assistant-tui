@@ -1839,3 +1839,75 @@ def test_rejected_answer_does_not_trigger_the_json_warning(make_app, recording_c
 
     assert recording_console.contains("⛔ Ответ отклонён")
     assert not recording_console.contains("Модель не вернула валидный JSON")
+
+
+# --- контролируемые переходы: /task stage и журнал в отчёте ---
+
+
+def _put_task_in_execution(app, goal: str = "Разработать игру") -> None:
+    """Задача с утверждённым планом на этапе Execution — исходное состояние для переходов."""
+    assert app.agent.add_task(goal) is True
+    app.agent.task.save(
+        task_state.accept_plan(
+            task_state.plan_built(task_state.begin_task(app.agent.task.state), ("Тема", "Ход"))
+        )
+    )
+
+
+def test_task_stage_prints_the_refusal(make_app, recording_console):
+    """Недопустимый переход отклонён: на экране причина и разрешённые переходы, запросов нет."""
+    client = FakeClient()
+    app = make_app(["/task stage done", "/exit"], client)
+    _put_task_in_execution(app)
+
+    app.run()
+
+    assert recording_console.contains("Переход отклонён")
+    assert recording_console.contains("Execution → Done")
+    assert recording_console.contains("Разрешены: Validation, Planning")
+    assert app.agent.task.state.active.stage is task_state.Stage.EXECUTION
+    assert client.calls == []
+
+
+def test_task_stage_performs_an_allowed_transition(make_app, recording_console):
+    app = make_app(["/task stage planning", "/exit"], FakeClient())
+    _put_task_in_execution(app)
+
+    app.run()
+
+    assert recording_console.contains("Переход выполнен: Execution → Planning")
+    assert app.agent.task.state.active.stage is task_state.Stage.PLANNING
+
+
+def test_task_stage_without_a_name_lists_the_stages(make_app, recording_console):
+    make_app(["/task add Игра", "/task stage", "/exit"], FakeClient()).run()
+
+    assert recording_console.contains("Planning, Execution, Validation, Done")
+
+
+def test_task_stage_without_a_task_says_so(make_app, recording_console):
+    make_app(["/task stage execution", "/exit"], FakeClient()).run()
+
+    assert recording_console.contains("незавершённой задачи нет")
+
+
+def test_task_report_prints_the_transition_journal(make_app, recording_console):
+    app = make_app(["/task stage done", "/task", "/exit"], FakeClient())
+    _put_task_in_execution(app)
+
+    app.run()
+
+    assert recording_console.contains("Разрешённые переходы: Validation, Planning")
+    assert recording_console.contains("Журнал переходов:")
+    assert recording_console.contains("✓ Planning → Execution")
+    assert recording_console.contains("✗ Execution → Done")
+
+
+def test_task_panel_shows_the_last_transition(make_app, recording_console):
+    """В панели прогона видно, каким переходом задача попала на текущий этап."""
+    app = make_app(["/exit"], FakeClient())
+    _put_task_in_execution(app)
+
+    recording_console.console.print(app._render_task_panel(app.agent.task_report()))
+
+    assert recording_console.contains("Planning → Execution")
