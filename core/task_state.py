@@ -38,6 +38,44 @@ STAGE_LABELS: Dict[Stage, str] = {
 }
 
 
+# Таблица допустимых переходов: единственный источник правды о жизненном цикле задачи. Планирование
+# открывает выполнение, выполнение уходит на проверку или возвращается к плану, проверка завершает задачу или
+# возвращает работу в выполнение; Done — терминальный этап. Правило живёт кодом, а не текстом промпта: текст
+# модель может нарушить, таблицу — нет.
+TRANSITIONS: Dict[Stage, Tuple[Stage, ...]] = {
+    Stage.PLANNING: (Stage.EXECUTION,),
+    Stage.EXECUTION: (Stage.VALIDATION, Stage.PLANNING),
+    Stage.VALIDATION: (Stage.DONE, Stage.EXECUTION),
+    Stage.DONE: (),
+}
+
+# Причины отказа шлюза: их печатает интерфейс и хранит журнал переходов, поэтому они — данные, а не текст в
+# месте вызова.
+REASON_NO_TASK = "незавершённой задачи нет — менять нечего"
+REASON_TERMINAL = "Done — терминальный этап, переходов из него нет"
+REASON_SAME_STAGE = "задача уже на этапе {stage}"
+REASON_NOT_ALLOWED = "переход {source} → {target} не разрешён таблицей"
+REASON_PLAN_NOT_APPROVED = "план не утверждён: реализация до утверждённого плана запрещена"
+REASON_NEEDS_VALIDATION = "финал без проверки: в Done можно только из Validation"
+
+
+class TransitionError(ValueError):
+    """Ошибка вызова шлюза: назван этап, которого нет в автомате."""
+
+
+@dataclass(frozen=True)
+class TransitionResult:
+    """Результат шлюза: новое состояние, признак принятия и причина.
+
+    Отказ — данные, а не исключение: он уходит и в журнал переходов, и на экран, а исключение пришлось бы
+    ловить в каждой точке конвейера.
+    """
+
+    state: "TaskState"
+    accepted: bool
+    reason: str = ""
+
+
 class TaskStatus(str, Enum):
     """Статус задачи в очереди; «открытые» статусы делают задачу активной."""
 
@@ -193,6 +231,66 @@ def _expected_action(task: TaskItem, awaiting_edits: bool) -> str:
     return "взять следующую задачу из очереди"
 
 
+# --- шлюз переходов ---
+
+
+def allowed_transitions(stage: Stage) -> Tuple[Stage, ...]:
+    """Разрешённые из этапа переходы: их называют отчёт, отказ шлюза и сообщение модели."""
+    return TRANSITIONS.get(stage, ())
+
+
+def parse_stage(name: str) -> Optional[Stage]:
+    """Этап по имени (любой регистр); None — такого этапа в автомате нет."""
+    try:
+        return Stage(str(name).strip().lower())
+    except ValueError:
+        return None
+
+
+def transition(state: TaskState, target: Stage, reason: str = "") -> TransitionResult:
+    """Единственный шлюз смены этапа: таблица переходов плюс предусловия целевого этапа.
+
+    Любая смена этапа — конвейером или по просьбе пользователя — проходит здесь, поэтому пропустить этап
+    нельзя ни одному вызывающему. Отказ не меняет состояние и возвращает причину; исключение поднимается
+    только на неизвестный этап — это ошибка вызова, а не решение автомата.
+    """
+    if not isinstance(target, Stage):
+        parsed = parse_stage(target)
+        if parsed is None:
+            raise TransitionError(f"этапа «{target}» в автомате нет")
+        target = parsed
+    task = state.active
+    if task is None:
+        return TransitionResult(state, False, REASON_NO_TASK)
+    source = task.stage
+    refusal = _refusal(state, task, source, target)
+    if refusal:
+        return TransitionResult(state, False, refusal)
+    return TransitionResult(_put_active(state, replace(task, stage=target)), True, reason)
+
+
+def _refusal(state: TaskState, task: "TaskItem", source: Stage, target: Stage) -> str:
+    """Причина отказа шлюза или пустая строка, когда переход разрешён."""
+    if source is target:
+        return REASON_SAME_STAGE.format(stage=STAGE_LABELS[source])
+    if source is Stage.DONE:
+        return REASON_TERMINAL
+    if target not in allowed_transitions(source):
+        if target is Stage.DONE:
+            return REASON_NEEDS_VALIDATION
+        return REASON_NOT_ALLOWED.format(
+            source=STAGE_LABELS[source], target=STAGE_LABELS[target]
+        )
+    if target is Stage.EXECUTION and not _plan_approved(state, task):
+        return REASON_PLAN_NOT_APPROVED
+    return ""
+
+
+def _plan_approved(state: TaskState, task: "TaskItem") -> bool:
+    """План утверждён: он построен, правки не ожидаются и перестроение не запрошено."""
+    return bool(task.plan) and not state.awaiting_edits and not task.replan
+
+
 # --- переходы автомата ---
 
 
@@ -236,7 +334,6 @@ def plan_built(state: TaskState, plan: Tuple[str, ...]) -> TaskState:
     updated = replace(
         task,
         status=TaskStatus.RUNNING,
-        stage=Stage.PLANNING,
         plan=items,
         plan_limit=limit,
         sections=(),
@@ -262,9 +359,8 @@ def edits_response(state: TaskState, text: str) -> TaskState:
         return _put_active(
             replace(state, awaiting_edits=False), replace(task, replan=True, edits=edits)
         )
-    return _put_active(
-        replace(state, awaiting_edits=False), replace(task, replan=False, stage=Stage.EXECUTION)
-    )
+    cleared = _put_active(replace(state, awaiting_edits=False), replace(task, replan=False))
+    return _advance(cleared, Stage.EXECUTION, "правок нет — план принят")
 
 
 def accept_plan(state: TaskState) -> TaskState:
@@ -272,9 +368,8 @@ def accept_plan(state: TaskState) -> TaskState:
     task = state.active
     if task is None:
         return state
-    return _put_active(
-        replace(state, awaiting_edits=False), replace(task, replan=False, stage=Stage.EXECUTION)
-    )
+    cleared = _put_active(replace(state, awaiting_edits=False), replace(task, replan=False))
+    return _advance(cleared, Stage.EXECUTION, "план принят")
 
 
 def add_section(state: TaskState, text: str, failed: str = "", truncated: bool = False) -> TaskState:
@@ -298,7 +393,7 @@ def add_section(state: TaskState, text: str, failed: str = "", truncated: bool =
 
 def start_validation(state: TaskState) -> TaskState:
     """Переводит задачу на этап проверки артефакта."""
-    return _replace_active(state, stage=Stage.VALIDATION)
+    return _advance(state, Stage.VALIDATION, "все подзадачи выполнены")
 
 
 def validation_verdict(
@@ -318,10 +413,10 @@ def validation_verdict(
     if task is None:
         return state
     if not issues and not new_items:
-        return _put_active(
-            replace(state, awaiting_edits=False),
-            replace(task, stage=Stage.DONE, status=TaskStatus.DONE, issues=(), fixing=()),
+        finished = _advance(
+            replace(state, awaiting_edits=False), Stage.DONE, "проверка без замечаний"
         )
+        return _replace_active(finished, status=TaskStatus.DONE, issues=(), fixing=())
     additions = tuple(
         item.strip()[: config.TASK_PLAN_ITEM_MAX_CHARS]
         for item in new_items
@@ -330,21 +425,24 @@ def validation_verdict(
     incomplete = {index for index in incomplete_indexes(task)}
     fixing = incomplete | set(range(len(task.plan), len(task.plan) + len(additions)))
     if fixing and task.attempt < config.MAX_VALIDATION_ATTEMPTS:
-        return _put_active(
+        fixed = _advance(
             replace(state, awaiting_edits=False),
-            replace(
-                task,
-                stage=Stage.EXECUTION,
-                plan=task.plan + additions,
-                plan_limit=max(task.plan_limit, len(task.plan) + len(additions)),
-                attempt=task.attempt + 1,
-                issues=tuple(issues),
-                fixing=tuple(sorted(fixing)),
-            ),
+            Stage.EXECUTION,
+            "замечания проверки — круг исправления",
         )
-    return _put_active(
-        replace(state, awaiting_edits=False),
-        replace(task, stage=Stage.DONE, status=TaskStatus.DONE, issues=tuple(issues), fixing=()),
+        return _replace_active(
+            fixed,
+            plan=task.plan + additions,
+            plan_limit=max(task.plan_limit, len(task.plan) + len(additions)),
+            attempt=task.attempt + 1,
+            issues=tuple(issues),
+            fixing=tuple(sorted(fixing)),
+        )
+    finished = _advance(
+        replace(state, awaiting_edits=False), Stage.DONE, "попытки проверки исчерпаны"
+    )
+    return _replace_active(
+        finished, status=TaskStatus.DONE, issues=tuple(issues), fixing=()
     )
 
 
@@ -384,6 +482,15 @@ def fail_task(state: TaskState, reason: str) -> TaskState:
     )
 
 
+def _advance(state: TaskState, target: Stage, reason: str) -> TaskState:
+    """Смена этапа конвейером: тот же шлюз, что и у запроса пользователя.
+
+    Отказ шлюза оставляет состояние прежним и не роняет прогон — попытка остаётся в журнале
+    переходов, а конвейер повторит операцию на следующем шаге.
+    """
+    return transition(state, target, reason).state
+
+
 def _replace_active(state: TaskState, **changes) -> TaskState:
     task = state.active
     if task is None:
@@ -407,6 +514,18 @@ def task_instruction() -> str:
     return (config.ASSETS_DIR / _TASK_PROMPT_ASSET).read_text(encoding="utf-8").strip()
 
 
+def _transitions_line(stage: Stage) -> str:
+    """Разрешённые из этапа переходы строкой для модели: запрещённые не перечисляем.
+
+    Список запрещённых переходов приглашал бы искать обход, как список запрещённых слов у
+    инвариантов; модели называют только то, что можно, а отказ всё равно за кодом.
+    """
+    targets = allowed_transitions(stage)
+    if not targets:
+        return "переходов нет, это последний этап"
+    return ", ".join(STAGE_LABELS[target] for target in targets)
+
+
 def task_message(state: TaskState) -> Optional[str]:
     """Системное сообщение состояния задачи для запроса к модели.
 
@@ -428,6 +547,7 @@ def task_message(state: TaskState) -> Optional[str]:
         f"Этап: {STAGE_LABELS[task.stage]}",
         f"Текущий шаг: {state.current_step}",
         f"Ожидаемое действие: {state.expected_action}",
+        f"Разрешённый переход с этого этапа: {_transitions_line(task.stage)}",
     ]
     if task.plan:
         lines.append(f"План: {len(task.plan)} подзадач, выполнено {done}")

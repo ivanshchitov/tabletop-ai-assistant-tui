@@ -256,6 +256,10 @@ def test_attempts_are_bounded_and_done_keeps_unresolved_issues():
     state = task_state.start_validation(_executing(sections=3))
     for _ in range(config.MAX_VALIDATION_ATTEMPTS):
         state = task_state.validation_verdict(state, issues, ("Дописать ход игрока",))
+        if state.tasks[0].stage is Stage.EXECUTION:
+            # Со дня 15 вердикт проходит через шлюз переходов: Done достижим только из Validation,
+            # поэтому круг исправления возвращается на проверку так же, как это делает конвейер.
+            state = task_state.start_validation(state)
 
     assert state.tasks[0].stage is Stage.DONE
     assert state.tasks[0].status is TaskStatus.DONE
@@ -585,3 +589,114 @@ def test_write_result_error_does_not_break_the_run(tmp_path):
     blocked.write_text("не каталог", encoding="utf-8")
 
     assert task_state.write_result(blocked / "tasks", 1, _done().tasks[0]) is None
+
+
+# --- таблица переходов, шлюз и предусловия ---
+
+
+def test_transition_table_lists_every_stage_and_its_targets():
+    """Таблица — единственный источник правды о жизненном цикле задачи (день 15)."""
+    assert set(task_state.TRANSITIONS) == set(Stage)
+    assert task_state.TRANSITIONS[Stage.PLANNING] == (Stage.EXECUTION,)
+    assert task_state.TRANSITIONS[Stage.EXECUTION] == (Stage.VALIDATION, Stage.PLANNING)
+    assert task_state.TRANSITIONS[Stage.VALIDATION] == (Stage.DONE, Stage.EXECUTION)
+    assert task_state.TRANSITIONS[Stage.DONE] == ()
+    assert task_state.allowed_transitions(Stage.EXECUTION) == (Stage.VALIDATION, Stage.PLANNING)
+    assert task_state.allowed_transitions(Stage.DONE) == ()
+
+
+def test_allowed_transition_changes_the_stage():
+    state = _executing(sections=3)
+
+    result = task_state.transition(state, Stage.VALIDATION, "все подзадачи выполнены")
+
+    assert result.accepted is True
+    assert result.state.active.stage is Stage.VALIDATION
+
+
+def test_transition_outside_the_table_is_rejected():
+    """«Перепрыгнуть» этап нельзя: Execution → Done таблицей не разрешён."""
+    state = _executing(sections=3)
+
+    result = task_state.transition(state, Stage.DONE, "хочу сразу итог")
+
+    assert result.accepted is False
+    assert result.reason
+    assert result.state.active.stage is Stage.EXECUTION
+
+
+def test_transition_out_of_done_is_rejected():
+    state = _done()
+
+    result = task_state.transition(
+        task_state.add_task(state, "Вторая задача"), Stage.PLANNING, "назад"
+    )
+
+    # Активной стала вторая задача — у первой (Done) этап неизменен.
+    assert result.state.tasks[0].stage is Stage.DONE
+
+
+def test_transition_into_the_same_stage_is_rejected():
+    state = _executing(sections=1)
+
+    result = task_state.transition(state, Stage.EXECUTION, "туда же")
+
+    assert result.accepted is False
+    assert "уже" in result.reason.lower()
+
+
+def test_transition_without_an_active_task_is_rejected():
+    result = task_state.transition(TaskState(), Stage.EXECUTION, "некуда")
+
+    assert result.accepted is False
+    assert result.state.tasks == ()
+
+
+def test_execution_needs_an_approved_plan():
+    """Нельзя делать реализацию до утверждённого плана — предусловие шлюза."""
+    empty_plan = task_state.begin_task(_state())
+
+    result = task_state.transition(empty_plan, Stage.EXECUTION, "вперёд")
+
+    assert result.accepted is False
+    assert "план" in result.reason.lower()
+    assert result.state.active.stage is Stage.PLANNING
+
+
+def test_execution_is_rejected_while_edits_are_awaited():
+    result = task_state.transition(_planned(), Stage.EXECUTION, "вперёд")
+
+    assert result.accepted is False
+    assert "план" in result.reason.lower()
+
+
+def test_execution_is_rejected_while_a_replan_is_requested():
+    state = task_state.edits_response(_planned(), "добавь подсчёт очков")
+
+    result = task_state.transition(state, Stage.EXECUTION, "вперёд")
+
+    assert result.accepted is False
+    assert result.state.active.stage is Stage.PLANNING
+
+
+def test_approved_plan_opens_execution():
+    state = task_state.edits_response(_planned(), "")
+
+    assert state.active.stage is Stage.EXECUTION
+
+
+def test_done_is_reachable_only_from_validation():
+    """Нельзя делать финал без валидации."""
+    assert task_state.transition(_planned(), Stage.DONE, "итог").accepted is False
+    assert task_state.transition(_executing(sections=3), Stage.DONE, "итог").accepted is False
+
+    from_validation = task_state.transition(
+        task_state.start_validation(_executing(sections=3)), Stage.DONE, "замечаний нет"
+    )
+    assert from_validation.accepted is True
+    assert from_validation.state.active.stage is Stage.DONE
+
+
+def test_unknown_stage_name_is_a_programming_error():
+    with pytest.raises(task_state.TransitionError):
+        task_state.transition(_executing(), "финиш", "не этап")
