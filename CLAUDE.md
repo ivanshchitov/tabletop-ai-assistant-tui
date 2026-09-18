@@ -416,6 +416,24 @@ is never allowed to break (day 14). Deliberate decisions baked in:
 as a *task* in a queue and is carried through four stages — `Planning` → `Execution` → `Validation`
 → `Done` — by the agent itself, without the user steering the transitions. Deliberate decisions
 baked in:
+- **Transitions are a table plus one gate (day 15).** `task_state.TRANSITIONS` fixes the lifecycle
+  (`PLANNING→(EXECUTION,)`, `EXECUTION→(VALIDATION, PLANNING)`, `VALIDATION→(DONE, EXECUTION)`, `DONE→()`)
+  and `transition(state, target, reason) -> TransitionResult` is the only way a stage ever changes — there is
+  no direct `replace(task, stage=...)` left in the module, which is what makes "skip a stage" unreachable for
+  the pipeline, for `/task stage` and for future code alike. Refusal is *data*, not an exception
+  (`TransitionError` is only for an unknown stage name): it goes into the journal and onto the screen, and an
+  exception would have to be caught at every call site. Preconditions live in the gate, not at the caller:
+  `→ EXECUTION` needs an approved plan (`plan` non-empty, `awaiting_edits` cleared, `replan` cleared) and
+  `→ DONE` only from `VALIDATION`. Every attempt, accepted or refused, is appended to `TaskItem.transitions`
+  (capped by `config.MAX_TRANSITION_LOG`, 20, serialized into `task.json`; a file without the key reads as an
+  empty journal). The journal lives on the *task*, not on the state, so it travels with the task and survives
+  a restart. `/task stage <этап>` goes through `agent.request_stage()` → the same gate; the TUI only prints
+  `StageRequestResult` (accepted line, or refusal with the reason and the allowed targets) and knows neither
+  the table nor the preconditions — the same isolation boundary as the reports. `task_message()` names only
+  the *allowed* transitions (never the forbidden ones — same reasoning as not sending the invariants' banned
+  words), and `assets/task_prompt.md` forbids the model to declare a stage done by itself. The report prints
+  the journal of the active task, and of the last task when the queue holds nothing unfinished — otherwise the
+  lifecycle would vanish from the screen exactly when it has been walked in full.
 - **The stage machine is code, not a model contract.** `task_state` holds the fields the day-13 task
   names (`этап`, `текущий шаг`, `ожидаемое действие`) and the transition table: Planning ends by
   asking the user for edits (non-empty answer → another Planning round, empty → Execution), Execution
@@ -444,7 +462,7 @@ baked in:
   names the task's current limit (`Число подзадач: от 3 до {plan_limit}`), so a grown ceiling is
   what the model is asked for on the next round.
 - **Bounded loops.** `MAX_PLAN_ROUNDS` (5) caps Planning rounds — on the last round the plan is taken
-  as is; `MAX_VALIDATION_ATTEMPTS` (2) caps the Validation→Execution fix loop — exhausted attempts
+  as is; `MAX_VALIDATION_ATTEMPTS` (3) caps the Validation→Execution fix loop — exhausted attempts
   finish the task `Done` *with* the unresolved issues listed, and a review issue that names no
   sub-task ends the task right away, because there would be nothing to fix.
 - **The result lands in its own file, and the review is deliberately lenient.** When a task reaches
@@ -526,6 +544,9 @@ baked in:
   the run moves to the next task — pipeline failures never raise into the UI.
 - **`tests/e2e/harness.AppSession` passes `TABLETOP_TASK_FILE`** like the other stores; without it an
   e2e run would read and write the real `task.json` in the repo root.
+
+**`/task` subcommands:** `add`, `run`, `stage <этап>`, `stop` — arguments are meaningful here, as for
+`/memory` and `/profile`; `stage` is the user's way into the transition gate (see the task-state block).
 
 **`/commands` (`ui/commands_screen.py`):** an interactive panel listing every command with a short
 description (↑/↓ move, Enter runs the selected command, Esc cancels with zero API calls).
@@ -751,7 +772,8 @@ saved: `dialogues` stays a flat list across branches.
   routing table, the long-term store, the profile store and the setup dialogue automaton, the
   invariants table with a positive and a negative example per rule plus the retry/rejection path
   against a fake client, the task
-  state machine with every transition branch and the task pipeline against a fake request), the
+  state machine with every transition branch, the transition table with its gate, preconditions and
+  journal, and the task pipeline against a fake request), the
   `/commands`, `/settings`, `/branches` and `/models` reducers, and `TabletopAITUI` driven through
   injected dependencies:
   `TabletopAITUI(console=, history=, client=)` takes a `rich` console writing to a buffer, a
@@ -790,7 +812,10 @@ saved: `dialogues` stays a flat list across branches.
   single keypress (the stub records the order and shape of the plan/execute/validate requests), the
   edits round rebuilding the plan, a pause pressed mid-Execution and the resume continuing from the
   saved step, a restart continuing the same task from `task.json`, `task.json` surviving `/clear`, a
-  failed task keeping the queue moving, and the repo's real `task.json` staying untouched. The run is
+  failed task keeping the queue moving, the repo's real `task.json` staying untouched, and the
+  controlled transitions: `/task stage execution` refused before the plan is approved, `/task stage
+  done` refused mid-run with the run then resuming from the saved step, and `/task stage planning`
+  sending the task back a stage. The run is
   slowed down by the stub replies' `delay` so the panel states are observable: with instant replies a
   whole run finishes in milliseconds and the assertions race the app.
 - `tests/e2e/test_invariants.py` — the invariants in a real pty: the message after the profile
