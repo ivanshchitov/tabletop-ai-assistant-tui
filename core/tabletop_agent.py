@@ -146,6 +146,28 @@ class TaskQueueEntry:
 
 
 @dataclass
+class TransitionEntry:
+    """Запись журнала переходов для отчёта: этапы ярлыками, исход и причина."""
+
+    source: str
+    target: str
+    accepted: bool
+    reason: str
+
+
+@dataclass
+class StageRequestResult:
+    """Итог запроса перехода пользователем: что просили, что вышло и что вообще разрешено."""
+
+    accepted: bool
+    source: str
+    target: str
+    reason: str
+    allowed: Tuple[str, ...]
+    known: bool = True
+
+
+@dataclass
 class TaskReport:
     """Снимок состояния задачи для интерфейса (без обращения к модели).
 
@@ -165,6 +187,8 @@ class TaskReport:
     issues: Tuple[str, ...]
     paused: bool
     task_store: str
+    allowed_transitions: Tuple[str, ...] = ()
+    transitions: Tuple[TransitionEntry, ...] = ()
 
 
 @dataclass
@@ -473,6 +497,45 @@ class TabletopAgent:
         """Стоит ли прогон на паузе (только чтение)."""
         return self.task.state.paused
 
+    def request_stage(self, name: str) -> StageRequestResult:
+        """Запрос перехода активной задачи в названный этап — через тот же шлюз, что и у конвейера.
+
+        Терминальный слой печатает результат и не знает ни таблицы переходов, ни предусловий: та же
+        граница изоляции, что у `context_report()` и `memory_report()`. Обращений к модели нет.
+        """
+        state = self.task.state
+        task = state.active
+        source = task_state.STAGE_LABELS[task.stage] if task is not None else ""
+        allowed = self._allowed_transitions(state)
+        target = task_state.parse_stage(name)
+        if target is None:
+            return StageRequestResult(
+                accepted=False,
+                source=source,
+                target=str(name).strip(),
+                reason=f"этапа «{str(name).strip()}» в автомате нет",
+                allowed=allowed,
+                known=False,
+            )
+        result = task_state.transition(state, target, "переход по просьбе пользователя")
+        self.task.save(result.state)
+        return StageRequestResult(
+            accepted=result.accepted,
+            source=source,
+            target=task_state.STAGE_LABELS[target],
+            reason=result.reason,
+            allowed=self._allowed_transitions(result.state) if result.accepted else allowed,
+        )
+
+    @staticmethod
+    def _allowed_transitions(state: TaskState) -> Tuple[str, ...]:
+        task = state.active
+        if task is None:
+            return ()
+        return tuple(
+            task_state.STAGE_LABELS[stage] for stage in task_state.allowed_transitions(task.stage)
+        )
+
     def task_step(self, on_phase: Optional[Callable[[RequestPhase], None]] = None) -> Optional[TaskStepReport]:
         """Одна операция конвейера задачи; None — незавершённых задач нет.
 
@@ -526,6 +589,8 @@ class TabletopAgent:
                 issues=(),
                 paused=state.paused,
                 task_store=str(self.task.path),
+                allowed_transitions=(),
+                transitions=(),
             )
         written = [section for section in task.sections if section.text.strip()]
         return TaskReport(
@@ -546,6 +611,16 @@ class TabletopAgent:
             ),
             paused=state.paused,
             task_store=str(self.task.path),
+            allowed_transitions=self._allowed_transitions(state),
+            transitions=tuple(
+                TransitionEntry(
+                    source=task_state.STAGE_LABELS[entry.source],
+                    target=task_state.STAGE_LABELS[entry.target],
+                    accepted=entry.accepted,
+                    reason=entry.reason,
+                )
+                for entry in task.transitions
+            ),
         )
 
     def _ask_task(

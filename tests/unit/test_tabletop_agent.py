@@ -1908,3 +1908,95 @@ def test_invariants_report_describes_the_table_without_api_calls():
     assert report.invariants[1].forbidden == ()
     assert report.invariants[2].rule == INVARIANTS[2].rule
     assert client.calls == []
+
+
+# --- контролируемые переходы: запрос пользователя и снимок ---
+
+
+def _agent_in_execution(client=None) -> TabletopAgent:
+    agent = _agent_with_tasks(client=client)
+    agent.task.save(
+        task_state.accept_plan(
+            task_state.plan_built(task_state.begin_task(agent.task.state), ("Тема", "Ход"))
+        )
+    )
+    return agent
+
+
+def test_request_stage_rejects_a_forbidden_transition():
+    client = FakeAgentClient()
+    agent = _agent_in_execution(client=client)
+
+    result = agent.request_stage("done")
+
+    assert result.accepted is False
+    assert result.source == "Execution"
+    assert result.target == "Done"
+    assert result.reason == task_state.REASON_NEEDS_VALIDATION
+    assert result.allowed == ("Validation", "Planning")
+    assert agent.task.state.active.stage is Stage.EXECUTION
+    assert client.calls == []
+
+
+def test_request_stage_performs_an_allowed_transition():
+    agent = _agent_in_execution()
+
+    result = agent.request_stage("Planning")
+
+    assert result.accepted is True
+    assert agent.task.state.active.stage is Stage.PLANNING
+    assert TaskStore(agent.task.path).state.active.stage is Stage.PLANNING
+    assert agent.task_report().transitions[-1].accepted is True
+
+
+def test_request_stage_rejects_execution_without_an_approved_plan():
+    agent = _agent_with_tasks()
+    agent.task.save(task_state.plan_built(task_state.begin_task(agent.task.state), ("Тема",)))
+
+    result = agent.request_stage("execution")
+
+    assert result.accepted is False
+    assert result.reason == task_state.REASON_PLAN_NOT_APPROVED
+    assert agent.task.state.active.stage is Stage.PLANNING
+
+
+def test_request_stage_reports_an_unknown_stage():
+    agent = _agent_in_execution()
+
+    result = agent.request_stage("финиш")
+
+    assert result.accepted is False
+    assert result.known is False
+    assert agent.task.state.active.stage is Stage.EXECUTION
+
+
+def test_request_stage_without_an_active_task():
+    agent = TabletopAgent(FakeAgentClient())
+
+    result = agent.request_stage("execution")
+
+    assert result.accepted is False
+    assert result.reason == task_state.REASON_NO_TASK
+
+
+def test_task_report_carries_the_transitions():
+    agent = _agent_in_execution()
+    agent.request_stage("done")
+
+    report = agent.task_report()
+
+    assert report.allowed_transitions == ("Validation", "Planning")
+    last = report.transitions[-1]
+    assert (last.source, last.target, last.accepted) == ("Execution", "Done", False)
+    assert last.reason == task_state.REASON_NEEDS_VALIDATION
+    assert report.transitions[0].source == "Planning"
+
+
+def test_task_message_names_the_allowed_transitions():
+    agent = _agent_in_execution()
+
+    message = task_state.task_message(agent.task.state)
+
+    assert "Validation" in message
+    assert "Planning" in message
+    assert "переход" in message.lower()
