@@ -536,3 +536,76 @@ def test_validation_can_ask_for_a_new_subtask_and_it_is_executed(tmp_path):
     done = _run_steps(pipeline, 2)[-1]
     assert done.finished_task is True
     assert len(pipeline.state.tasks[0].sections) == 4
+
+
+# --- переходы конвейера через шлюз ---
+
+
+def _accepted_path(task):
+    return [(entry.source, entry.target) for entry in task.transitions if entry.accepted]
+
+
+def test_full_run_walks_the_stages_in_order(tmp_path):
+    """Прогон идёт по таблице переходов: пропустить этап конвейер не может (день 15)."""
+    pipeline, _, _ = _pipeline(
+        tmp_path,
+        [_meta(PLAN_JSON), _meta("Раздел 1"), _meta("Раздел 2"), _meta("Раздел 3"), _meta(OK_JSON)],
+    )
+    pipeline.step()
+    pipeline.answer_edits("")
+    _run_until_finished(pipeline)
+
+    task = pipeline.state.tasks[0]
+    assert task.stage is Stage.DONE
+    assert _accepted_path(task) == [
+        (Stage.PLANNING, Stage.EXECUTION),
+        (Stage.EXECUTION, Stage.VALIDATION),
+        (Stage.VALIDATION, Stage.DONE),
+    ]
+    assert all(entry.reason for entry in task.transitions)
+
+
+def test_fix_round_returns_through_the_gate(tmp_path):
+    """Замечание проверки возвращает задачу в Execution — разрешённый таблицей переход."""
+    pipeline, _, _ = _pipeline(
+        tmp_path,
+        [
+            _meta(PLAN_JSON),
+            _meta("Раздел 1"),
+            _meta(""),
+            _meta(""),
+            _meta("Раздел 3"),
+            _meta('{"ok": false, "issues": ["второй раздел пуст"]}'),
+            _meta("Раздел 2"),
+            _meta(OK_JSON),
+        ],
+    )
+    pipeline.step()
+    pipeline.answer_edits("")
+    _run_until_finished(pipeline)
+
+    task = pipeline.state.tasks[0]
+    assert (Stage.VALIDATION, Stage.EXECUTION) in _accepted_path(task)
+    assert _accepted_path(task)[-1] == (Stage.VALIDATION, Stage.DONE)
+
+
+def test_replan_keeps_the_task_in_planning_without_a_transition(tmp_path):
+    """Новый круг плана — не смена этапа: задача остаётся на Planning, журнал пуст."""
+    pipeline, _, _ = _pipeline(tmp_path, [_meta(PLAN_JSON), _meta(SECOND_PLAN_JSON)])
+    pipeline.step()
+    pipeline.answer_edits("добавь подсчёт очков")
+    pipeline.step()
+
+    task = pipeline.state.tasks[0]
+    assert task.stage is Stage.PLANNING
+    assert task.transitions == ()
+
+
+def test_transitions_are_saved_before_the_next_operation(tmp_path):
+    pipeline, _, _ = _pipeline(tmp_path, [_meta(PLAN_JSON), _meta("Раздел 1")])
+    pipeline.step()
+    pipeline.answer_edits("")
+    pipeline.step()
+
+    stored = TaskStore(tmp_path / "task.json").state.tasks[0]
+    assert _accepted_path(stored) == [(Stage.PLANNING, Stage.EXECUTION)]

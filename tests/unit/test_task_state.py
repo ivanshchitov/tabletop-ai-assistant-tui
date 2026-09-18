@@ -700,3 +700,81 @@ def test_done_is_reachable_only_from_validation():
 def test_unknown_stage_name_is_a_programming_error():
     with pytest.raises(task_state.TransitionError):
         task_state.transition(_executing(), "финиш", "не этап")
+
+
+# --- журнал переходов ---
+
+
+def test_accepted_transition_is_recorded():
+    state = task_state.transition(
+        _executing(sections=3), Stage.VALIDATION, "все подзадачи выполнены"
+    ).state
+
+    entry = state.active.transitions[-1]
+    assert entry.source is Stage.EXECUTION
+    assert entry.target is Stage.VALIDATION
+    assert entry.accepted is True
+    assert entry.reason == "все подзадачи выполнены"
+
+
+def test_rejected_transition_is_recorded_without_changing_the_stage():
+    state = task_state.transition(_executing(sections=1), Stage.DONE, "хочу итог").state
+
+    entry = state.active.transitions[-1]
+    assert entry.source is Stage.EXECUTION
+    assert entry.target is Stage.DONE
+    assert entry.accepted is False
+    assert entry.reason == task_state.REASON_NEEDS_VALIDATION
+    assert state.active.stage is Stage.EXECUTION
+
+
+def test_pipeline_transitions_are_all_in_the_journal():
+    """Полный путь задачи виден журналом: Planning → Execution → Validation → Done."""
+    state = _done()
+
+    path = [
+        (entry.source, entry.target)
+        for entry in state.tasks[0].transitions
+        if entry.accepted
+    ]
+    assert path == [
+        (Stage.PLANNING, Stage.EXECUTION),
+        (Stage.EXECUTION, Stage.VALIDATION),
+        (Stage.VALIDATION, Stage.DONE),
+    ]
+
+
+def test_transition_journal_is_bounded():
+    state = _executing(sections=1)
+    for _ in range(config.MAX_TRANSITION_LOG + 5):
+        state = task_state.transition(state, Stage.DONE, "нельзя").state
+
+    assert len(state.active.transitions) == config.MAX_TRANSITION_LOG
+    assert 5 <= config.MAX_TRANSITION_LOG <= 100
+
+
+def test_transition_journal_survives_the_file(tmp_path):
+    store = _store(tmp_path)
+    store.save(task_state.transition(_executing(sections=1), Stage.DONE, "нельзя").state)
+
+    restored = TaskStore(path=tmp_path / "task.json")
+    entry = restored.state.active.transitions[-1]
+    assert (entry.source, entry.target, entry.accepted) == (Stage.EXECUTION, Stage.DONE, False)
+    assert entry.reason == task_state.REASON_NEEDS_VALIDATION
+
+
+def test_file_without_a_journal_reads_as_an_empty_one(tmp_path):
+    """Файл прежней формы читается без ошибки: журнала в нём нет, задача есть."""
+    path = tmp_path / "task.json"
+    path.write_text(
+        json.dumps({"version": 1, "tasks": [{"goal": "Старая задача", "stage": "execution"}]}),
+        encoding="utf-8",
+    )
+
+    assert TaskStore(path=path).state.active.transitions == ()
+
+
+def test_transition_without_a_task_records_nothing():
+    result = task_state.transition(TaskState(), Stage.EXECUTION, "некуда")
+
+    assert result.state.tasks == ()

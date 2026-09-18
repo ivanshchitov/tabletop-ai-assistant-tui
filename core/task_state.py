@@ -64,6 +64,16 @@ class TransitionError(ValueError):
 
 
 @dataclass(frozen=True)
+class Transition:
+    """Запись журнала переходов: попытка смены этапа с её исходом и причиной."""
+
+    source: Stage
+    target: Stage
+    accepted: bool
+    reason: str = ""
+
+
+@dataclass(frozen=True)
 class TransitionResult:
     """Результат шлюза: новое состояние, признак принятия и причина.
 
@@ -134,6 +144,9 @@ class TaskItem:
     edits: str = ""
     attempt: int = 1
     error: str = ""
+    # Журнал переходов задачи: принятые и отклонённые попытки смены этапа. Живёт на задаче, а не на
+    # состоянии, потому что жизненный цикл принадлежит задаче и уезжает в файл вместе с ней.
+    transitions: Tuple[Transition, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -264,9 +277,22 @@ def transition(state: TaskState, target: Stage, reason: str = "") -> TransitionR
         return TransitionResult(state, False, REASON_NO_TASK)
     source = task.stage
     refusal = _refusal(state, task, source, target)
-    if refusal:
-        return TransitionResult(state, False, refusal)
-    return TransitionResult(_put_active(state, replace(task, stage=target)), True, reason)
+    accepted = not refusal
+    updated = replace(
+        task,
+        stage=target if accepted else source,
+        transitions=_log_transition(
+            task.transitions, Transition(source, target, accepted, refusal or reason)
+        ),
+    )
+    return TransitionResult(_put_active(state, updated), accepted, refusal or reason)
+
+
+def _log_transition(
+    journal: Tuple[Transition, ...], entry: Transition
+) -> Tuple[Transition, ...]:
+    """Дописывает запись в журнал, вытесняя самые старые сверх предела."""
+    return (journal + (entry,))[-config.MAX_TRANSITION_LOG :]
 
 
 def _refusal(state: TaskState, task: "TaskItem", source: Stage, target: Stage) -> str:
@@ -721,6 +747,15 @@ def _task_to_dict(task: TaskItem) -> Dict[str, object]:
         "edits": task.edits,
         "attempt": task.attempt,
         "error": task.error,
+        "transitions": [
+            {
+                "source": entry.source.value,
+                "target": entry.target.value,
+                "accepted": entry.accepted,
+                "reason": entry.reason,
+            }
+            for entry in task.transitions
+        ],
     }
 
 
@@ -740,6 +775,17 @@ def _task_from_dict(raw: Dict[str, object]) -> TaskItem:
     for entry in raw.get("issues") or []:
         if isinstance(entry, dict):
             issues.append(TaskIssue(item=_as_int(entry.get("item")), text=str(entry.get("text", ""))))
+    transitions: List[Transition] = []
+    for entry in raw.get("transitions") or []:
+        if isinstance(entry, dict):
+            transitions.append(
+                Transition(
+                    source=_stage(entry.get("source")),
+                    target=_stage(entry.get("target")),
+                    accepted=bool(entry.get("accepted")),
+                    reason=str(entry.get("reason", "")),
+                )
+            )
     plan = tuple(str(item) for item in raw.get("plan") or [])
     fixing = tuple(_as_int(index) for index in raw.get("fixing") or [])
     return TaskItem(
@@ -756,6 +802,7 @@ def _task_from_dict(raw: Dict[str, object]) -> TaskItem:
         edits=str(raw.get("edits", "")),
         attempt=max(1, _as_int(raw.get("attempt"), 1)),
         error=str(raw.get("error", "")),
+        transitions=tuple(transitions),
     )
 
 
