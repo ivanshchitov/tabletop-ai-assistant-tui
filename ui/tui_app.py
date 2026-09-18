@@ -1155,6 +1155,7 @@ class TabletopAITUI:
         if report.active_number == 0:
             # Все задачи очереди завершены: активной нет, и полей этапа у отчёта тоже нет.
             self.console.print("Незавершённых задач нет — прогон остановлен.")
+            self._print_transition_journal(report)
             self.console.print(f"  Состояние: {report.task_store}")
             self.console.print(f"[dim]{TASK_HINT}[/dim]")
             return

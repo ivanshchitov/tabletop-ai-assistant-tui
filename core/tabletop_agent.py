@@ -590,7 +590,9 @@ class TabletopAgent:
                 paused=state.paused,
                 task_store=str(self.task.path),
                 allowed_transitions=(),
-                transitions=(),
+                # Незавершённых задач нет: показываем путь последней — иначе жизненный цикл
+                # задачи исчезал бы с экрана ровно тогда, когда он пройден целиком.
+                transitions=_transition_entries(state.tasks[-1]) if state.tasks else (),
             )
         written = [section for section in task.sections if section.text.strip()]
         return TaskReport(
@@ -612,15 +614,7 @@ class TabletopAgent:
             paused=state.paused,
             task_store=str(self.task.path),
             allowed_transitions=self._allowed_transitions(state),
-            transitions=tuple(
-                TransitionEntry(
-                    source=task_state.STAGE_LABELS[entry.source],
-                    target=task_state.STAGE_LABELS[entry.target],
-                    accepted=entry.accepted,
-                    reason=entry.reason,
-                )
-                for entry in task.transitions
-            ),
+            transitions=_transition_entries(task),
         )
 
     def _ask_task(
@@ -1115,6 +1109,19 @@ class TabletopAgent:
             "total_tokens": meta.total_tokens,
             "cost_usd": meta.cost_usd,
         }
+
+
+def _transition_entries(task: TaskItem) -> Tuple[TransitionEntry, ...]:
+    """Журнал переходов задачи в ярлыках этапов — снимок для интерфейса."""
+    return tuple(
+        TransitionEntry(
+            source=task_state.STAGE_LABELS[entry.source],
+            target=task_state.STAGE_LABELS[entry.target],
+            accepted=entry.accepted,
+            reason=entry.reason,
+        )
+        for entry in task.transitions
+    )
 
 
 def _plan_mark(task: TaskItem, index: int) -> str:

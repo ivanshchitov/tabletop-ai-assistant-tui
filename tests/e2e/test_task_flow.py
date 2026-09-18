@@ -446,3 +446,102 @@ def test_metrics_lines_are_not_printed_during_a_task_run(app, stub, task_file):
         after = session.scrollback()
 
     assert "⏱" not in after
+
+
+def test_stage_request_is_refused_before_the_plan_is_approved(app, stub, task_file):
+    """Реализацию до утверждённого плана шлюз не пускает — отказ виден на экране (день 15)."""
+    stub.sequence(answer(PLAN_JSON))
+    with app() as session:
+        session.wait_for_prompt()
+        session.send_line(f"/task add {FIRST_TASK}")
+        session.wait_for("Задача в очереди")
+        session.send_line("/task stage execution")
+        session.wait_for("Переход отклонён")
+        session.wait_for("план не утверждён")
+        session.send_line("/task")
+        session.wait_for("Этап: Planning")
+        report = session.scrollback()
+
+    assert stub.call_count == 0  # запрос перехода к модели не ходит
+    assert "Разрешённые переходы: Execution" in report
+    assert "✗ Planning → Execution" in report
+    assert _saved(task_file)["tasks"][0]["stage"] == "planning"
+
+
+def test_stage_request_is_refused_mid_run_and_the_run_continues(app, stub, task_file):
+    """Финал без валидации запрещён; после отказа прогон продолжается с сохранённого шага."""
+    stub.sequence(
+        answer(PLAN_JSON),
+        _execute("Раздел 1", delay=SLOW),
+        _execute("Раздел 2", delay=SLOW),
+        _execute("Раздел 3", delay=SLOW),
+        answer(OK_JSON),
+    )
+    with app() as session:
+        session.wait_for_prompt()
+        session.send_line(f"/task add {FIRST_TASK}")
+        session.wait_for("Задача в очереди")
+        session.send_line("/task run")
+        session.wait_for("Правки к плану")
+        session.send_line("")
+        session.wait_for("2/3", timeout=15)
+        session.send_key(b"p")
+        session.wait_for("⏸ Пауза")
+        session.wait_for_prompt()
+        session.send_line("/task stage done")
+        session.wait_for("Переход отклонён")
+        session.wait_for("Разрешены: Validation, Planning")
+        refusal = session.scrollback()
+        session.send_line("/task run")
+        session.wait_for("Пауза снята — продолжаю с сохранённого шага")
+        session.wait_for("Итог: ")
+        session.send_line("/task")
+        session.wait_for("Очередь (1)")
+        journal = session.scrollback()
+
+    assert "Execution → Done" in refusal
+    assert _saved(task_file)["tasks"][0]["status"] == "решена"
+    # Отклонённая попытка осталась в журнале рядом с принятыми переходами прогона.
+    accepted = [
+        (entry["source"], entry["target"])
+        for entry in _saved(task_file)["tasks"][0]["transitions"]
+        if entry["accepted"]
+    ]
+    assert accepted == [
+        ("planning", "execution"),
+        ("execution", "validation"),
+        ("validation", "done"),
+    ]
+    assert any(
+        not entry["accepted"] and entry["target"] == "done"
+        for entry in _saved(task_file)["tasks"][0]["transitions"]
+    )
+    assert "✗ Execution → Done" in journal
+
+
+def test_stage_request_can_send_the_task_back_to_planning(app, stub, task_file):
+    """Разрешённый таблицей переход выполняется: Execution → Planning по просьбе пользователя."""
+    stub.sequence(
+        answer(PLAN_JSON),
+        _execute("Раздел 1", delay=SLOW),
+        _execute("Раздел 2", delay=SLOW),
+    )
+    with app() as session:
+        session.wait_for_prompt()
+        session.send_line(f"/task add {FIRST_TASK}")
+        session.wait_for("Задача в очереди")
+        session.send_line("/task run")
+        session.wait_for("Правки к плану")
+        session.send_line("")
+        session.wait_for("2/3", timeout=15)
+        session.send_key(b"p")
+        session.wait_for("⏸ Пауза")
+        session.wait_for_prompt()
+        session.send_line("/task stage planning")
+        session.wait_for("Переход выполнен: Execution → Planning")
+        session.send_line("/task")
+        session.wait_for("Этап: Planning")
+        report = session.scrollback()
+
+    assert "✓ Execution → Planning" in report
+    assert _saved(task_file)["tasks"][0]["stage"] == "planning"
