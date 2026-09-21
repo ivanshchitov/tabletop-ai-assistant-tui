@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from .harness import AppSession
+from .harness import AppSession, FAKE_MCP_SERVER
 from .stub_api import StubAPI
 
 SNAPSHOT_DIR = Path(__file__).parent / "snapshots"
@@ -104,6 +104,10 @@ def app(stub, history_file, memory_file, profile_file, task_file, tasks_dir, tui
 
     def factory(**kwargs) -> AppSession:
         kwargs.setdefault("mirror", mirror)
+        # MCP-сервер прогона — фейковый и локальный: без этого любой e2e-прогон команды /mcp
+        # поднимал бы настоящий сервер из реестра, то есть ходил бы в сеть за npx.
+        kwargs.setdefault("mcp_command", sys.executable)
+        kwargs.setdefault("mcp_args", str(FAKE_MCP_SERVER))
         session = AppSession(
             api_url=stub.url,
             history_file=history_file,

@@ -28,6 +28,7 @@ import pyte
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 ENTRY_POINT = REPO_ROOT / "tabletop-ai-assistant.py"
+FAKE_MCP_SERVER = REPO_ROOT / "tests" / "fake_mcp_server.py"
 
 PROMPT = "Введите вопрос"
 DEFAULT_TIMEOUT = 10.0
@@ -59,6 +60,8 @@ class AppSession:
         profile_file: Optional[Path] = None,
         task_file: Optional[Path] = None,
         tasks_dir: Optional[Path] = None,
+        mcp_command: Optional[str] = None,
+        mcp_args: Optional[str] = None,
         api_url: Optional[str] = None,
         cols: int = 100,
         rows: int = 40,
@@ -116,6 +119,11 @@ class AppSession:
         if tasks_dir is not None:
             # Результаты задач — свой каталог: прогон не должен писать файлы в реальный tasks/.
             env["TABLETOP_TASKS_DIR"] = str(tasks_dir)
+        if mcp_command is not None:
+            # MCP-сервер — на фейковом сервере прогона: без переопределения команда /mcp
+            # поднимала бы настоящий сервер из реестра, то есть лезла бы в сеть за npx.
+            env["TABLETOP_MCP_COMMAND"] = mcp_command
+            env["TABLETOP_MCP_ARGS"] = mcp_args or ""
         if api_url is not None:
             env["OPENCODE_API_URL"] = api_url
             env["TABLETOP_REQUEST_TIMEOUT"] = "1"
