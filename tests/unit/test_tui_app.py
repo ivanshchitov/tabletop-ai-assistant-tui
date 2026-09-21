@@ -1911,3 +1911,83 @@ def test_task_panel_shows_the_last_transition(make_app, recording_console):
     recording_console.console.print(app._render_task_panel(app.agent.task_report()))
 
     assert recording_console.contains("Planning → Execution")
+
+
+# --- день 16: /mcp ----------------------------------------------------------------------
+
+
+FAKE_MCP_SERVER = Path(__file__).resolve().parent.parent / "fake_mcp_server.py"
+
+
+@pytest.fixture
+def fake_mcp(monkeypatch):
+    """Подключение в тестах идёт к фейковому серверу прогона, а не к серверу из реестра."""
+
+    import sys
+
+    def use(*flags: str) -> None:
+        monkeypatch.setenv("TABLETOP_MCP_COMMAND", sys.executable)
+        monkeypatch.setenv("TABLETOP_MCP_ARGS", " ".join([str(FAKE_MCP_SERVER), *flags]))
+
+    return use
+
+
+def test_mcp_report_prints_server_and_tools(make_app, recording_console, fake_mcp):
+    fake_mcp()
+    client = FakeClient(["Ответ"])
+    make_app(["/mcp", "/exit"], client).run()
+
+    assert client.calls == []
+    assert recording_console.contains("фейковый-сервер")
+    assert recording_console.contains("9.9.9")
+    assert recording_console.contains("2025-06-18")
+    assert recording_console.contains("fake_mcp_server.py")
+    assert recording_console.contains("fake_search")
+    assert recording_console.contains("Поиск по фейковому каталогу")
+    assert recording_console.contains("fake_details")
+
+
+def test_mcp_arguments_are_ignored(make_app, recording_console, fake_mcp):
+    fake_mcp()
+    client = FakeClient(["Ответ"])
+    make_app(["/mcp tools", "/exit"], client).run()
+
+    assert client.calls == []
+    assert recording_console.contains("fake_search")
+
+
+def test_mcp_is_offered_by_completion_and_panel():
+    from ui import commands_screen
+
+    assert "/mcp" in tui_app.COMMANDS
+    assert "/mcp" in [command for command, _ in commands_screen.COMMAND_OPTIONS]
+
+
+def test_mcp_failure_prints_reason_and_session_continues(make_app, recording_console, fake_mcp):
+    fake_mcp()
+    import os
+
+    os.environ["TABLETOP_MCP_COMMAND"] = "нет-такой-команды-на-диске"
+    client = FakeClient(["Ответ про настолки"])
+    make_app(["/mcp", "Вопрос про настолки", "/exit"], client).run()
+
+    assert recording_console.contains("Не удалось подключиться")
+    # Сессия продолжается: следующий ввод обработан как обычный вопрос.
+    assert len(client.calls) == 1
+
+
+def test_mcp_report_escapes_server_text(make_app, recording_console, fake_mcp):
+    """Имена и описания приходят от чужого процесса: rich принял бы [x] за разметку."""
+    fake_mcp("--markup")
+    make_app(["/mcp", "/exit"], FakeClient()).run()
+
+    assert recording_console.contains("fake_[x]_tool")
+    assert recording_console.contains("[/dim]")
+
+
+def test_mcp_report_without_tools(make_app, recording_console, fake_mcp):
+    fake_mcp("--empty")
+    make_app(["/mcp", "/exit"], FakeClient()).run()
+
+    assert recording_console.contains("фейковый-сервер")
+    assert recording_console.contains("инструментов не объявлено")

@@ -349,6 +349,9 @@ class TabletopAITUI:
         if command == "/invariants":
             self._print_invariants_report()
             return True
+        if command == "/mcp":
+            self._print_mcp_report()
+            return True
         return False
 
     def _open_commands_screen(self) -> None:
@@ -1360,6 +1363,39 @@ class TabletopAITUI:
             "[dim]  Отказ модели по инварианту начинается со слов «Не могу предложить» и "
             "называет инвариант.[/dim]"
         )
+
+    def _print_mcp_report(self) -> None:
+        """Отчёт /mcp: соединение с MCP-сервером и его инструменты, без запросов к модели.
+
+        Аргументов у команды нет — подкоманд `/mcp` не имеет. Весь текст (имя сервера, описания
+        инструментов, текст ошибки) приходит от чужого процесса, поэтому печатается через
+        escape(): строка вроде `[x]` иначе принимается rich за разметку и пропадает из вывода.
+        """
+        with self.console.status("[bold yellow]● Подключение к MCP...[/bold yellow]", spinner="dots"):
+            report = self.agent.mcp_report()
+
+        if report.error:
+            self.console.print(
+                f"[bold red]Не удалось подключиться к MCP-серверу: {escape(report.error)}[/bold red]"
+            )
+            self.console.print(f"[dim]  Команда запуска: {escape(report.command)}[/dim]")
+            return
+
+        self.console.print("[bold cyan]Подключение MCP (без обращения к модели):[/bold cyan]")
+        self.console.print(
+            f"[dim]  Сервер: {escape(report.server_name)} {escape(report.server_version)}[/dim]"
+        )
+        self.console.print(f"[dim]  Протокол: {escape(report.protocol_version)}[/dim]")
+        self.console.print(f"[dim]  Описание: {escape(report.spec_name)}[/dim]")
+        self.console.print(f"[dim]  Команда запуска: {escape(report.command)}[/dim]")
+        if not report.tools:
+            self.console.print("[dim]  Инструменты: инструментов не объявлено[/dim]")
+            return
+        self.console.print(
+            f"[dim]  Инструменты ({len(report.tools)}):[/dim]"
+        )
+        for tool in report.tools:
+            self.console.print(f"[dim]    {escape(tool.name)} — {escape(tool.description)}[/dim]")
 
     def _print_facts_line(self) -> None:
         """Строка о блоке фактов: печатается один раз на изменение отчёта агента.
