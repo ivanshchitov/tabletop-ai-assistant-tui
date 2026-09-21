@@ -14,8 +14,18 @@ from .stub_api import answer
 pytestmark = [pytest.mark.e2e, pytest.mark.pty]
 
 
+def test_startup_connects_and_prints_the_summary(app, stub):
+    """Смена контракта (add-mcp-startup-connections): подключение идёт при запуске."""
+    with app() as session:
+        text = session.wait_for("MCP: 1/1")
+
+    assert "2 инструмента" in text
+    assert stub.call_count == 0
+
+
 def test_mcp_report_shows_server_protocol_and_tools(app, stub):
     with app() as session:
+        session.wait_for("MCP: 1/1")
         session.wait_for_prompt()
         session.send_line("/mcp")
         text = session.wait_for("fake_details")
@@ -29,8 +39,20 @@ def test_mcp_report_shows_server_protocol_and_tools(app, stub):
     assert stub.call_count == 0
 
 
+def test_mcp_refresh_reconnects_and_prints_the_report(app, stub):
+    with app() as session:
+        session.wait_for("MCP: 1/1")
+        session.wait_for_prompt()
+        session.send_line("/mcp refresh")
+        text = session.wait_for("fake_details")
+
+    assert "фейковый-сервер" in text
+    assert stub.call_count == 0
+
+
 def test_mcp_is_listed_in_the_commands_panel(app, stub):
     with app() as session:
+        session.wait_for("MCP: 1/1")
         session.wait_for_prompt()
         session.send_line("/commands")
         text = session.wait_on_screen("подключение к MCP-серверу")
@@ -56,6 +78,8 @@ def test_mcp_spends_no_tokens(app, stub):
 def test_unavailable_server_prints_the_reason_and_session_continues(app, stub):
     stub.always(answer("Берите Каркассон."))
     with app(mcp_command="нет-такой-команды-на-диске", mcp_args="") as session:
+        # Строка итога называет недоступный сервер уже при запуске.
+        session.wait_for("MCP: 0/1")
         session.wait_for_prompt()
         session.send_line("/mcp")
         session.wait_for("Не удалось подключиться")
