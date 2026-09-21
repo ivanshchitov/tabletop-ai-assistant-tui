@@ -18,7 +18,7 @@ echo "OPENCODE_API_KEY=sk-ваш_ключ" > .env   # or set OPENCODE_API_KEY di
 ./tabletop-ai-assistant.py                   # re-execs itself into .venv when one is next to it
 
 .venv/bin/pip install -r requirements-dev.txt
-pytest                      # everything except the `network` marker (947 selected)
+pytest                      # everything except the `network` marker (966 selected)
 pytest tests/unit -q        # fast layer, no subprocesses (~3s)
 pytest tests/e2e -q         # real app in a pty against a stub API (~130s)
 pytest --snapshot-update    # rewrite the e2e screen snapshots after a deliberate layout change
@@ -176,10 +176,12 @@ parents up (`Path(__file__).resolve().parent.parent`) rather than one — it has
 `TABLETOP_TYPING_DELAY` (the last one read in `ui/tui_app.py`), `TABLETOP_COMPRESS_AFTER` (the
 session setting's default, messages, default 10), `TABLETOP_MAX_SESSION_TOKENS` (the session
 setting's default, tokens, default 20000) and `TABLETOP_MCP_COMMAND`/`TABLETOP_MCP_ARGS` (the MCP
-server's launch command and its space-separated arguments, overriding the registry entry whole)
+server's launch command and its space-separated arguments, replacing the whole registry with
+that single entry)
 override the corresponding defaults. They exist so the
 e2e layer can point the app at a local stub server, keep history, long-term memory and the user
-profile in temp files, collapse the typing animation, run `/mcp` against a local fake server
+profile in temp files, collapse the typing animation, run the startup MCP sweep against a local
+fake server
 instead of the real one — or exercise compression and the token
 ceiling in seconds. `HISTORY_FILE`/`MEMORY_FILE`/`PROFILE_FILE`/`TASK_FILE` especially: their paths derive
 from `__file__`, not the working directory, so without the override *any* run — a test run
@@ -618,9 +620,9 @@ baked in:
   holds three entries, all verified against their real servers by the `network` contract test:
   `rulebooks` (`npx -y boardgame-rules-mcp`, rulebook search and full rules text from 1jour-1jeu,
   no key) and `rule-disputes` (`npx -y @mohitagw15856/rulebook mcp`, offline, official rule vs.
-  house rule, no key) sit beside the default. **Only `DEFAULT_MCP_SERVER` is ever connected** —
-  there is no per-server choice in `/mcp` yet, so the other two are data waiting for one; switching
-  the default is a one-line change. The default entry
+  house rule, no key) sit beside the default. **The app connects to every entry at startup**
+  (`config.mcp_servers()` resolves the registry, `agent.connect_mcp_servers()` walks it), so
+  `DEFAULT_MCP_SERVER` now only names the entry an override is built from. The default entry
   is `bgg-mcp -mode stdio` ([kkjdaniel/bgg-mcp](https://github.com/kkjdaniel/bgg-mcp), 10
   BoardGameGeek tools incl. rules search and recommendations), which reads `BGG_API_KEY`,
   `BGG_COOKIE` and `BGG_USERNAME` — that is what `env_keys` carries. It is a Go binary with no
@@ -638,9 +640,17 @@ baked in:
   matrix is 3.11/3.12/3.13 — running the app with a 3.9 interpreter leaves everything else working
   and fails only `/mcp`, with `_require_sdk()` naming the interpreter and the missing package rather
   than leaking a bare `ModuleNotFoundError` that reads like a server fault.
-- **Connection is per call.** `connect()` starts the process, handshakes, lists tools and closes;
-  keeping the server alive for the session would mean a background thread with its own event loop
-  and a shutdown path on `/exit`. Revisit when tool calls arrive. `mcp 2.x` fields are snake_case
+- **Startup sweep, blocking, sequential — and no connection outlives it.** `ui/tui_app` connects to
+  the whole registry before the title panel (user's call), behind the same spinner as a model
+  request, and prints one summary line (`MCP: 3/3 сервера, 19 инструментов — подробности: /mcp`);
+  a failed entry is counted (`, 1 недоступно`) and never blocks startup. Servers are walked in
+  registry order because that order is the order of report sections. `connect()` starts the
+  process, handshakes, lists tools and closes it — what survives is the snapshot tuple on the
+  agent (`mcp_reports()`), not a live connection, so `/mcp` prints instantly and starts nothing;
+  `/mcp refresh` re-walks the registry (arguments are meaningful here, as for `/memory`,
+  `/profile` and `/task` — only `refresh` is). Keeping servers alive for the session would mean a
+  background thread with its own event loop and a shutdown path on `/exit`; revisit when tool calls
+  arrive, since each call would otherwise pay the launch cost. `mcp 2.x` fields are snake_case
   (`server_info`, `protocol_version`), and the SDK wraps task failures in an `ExceptionGroup`, so
   `_describe()` unwraps it to the first real cause.
 - **A failure is data, not an exception.** `agent.mcp_report()` returns an `MCPReport` snapshot
@@ -652,7 +662,10 @@ baked in:
 - **Tests never start the real server.** `tests/fake_mcp_server.py` is a stdio server run by the
   test interpreter (modes: normal, `--empty`, `--garbage`, `--markup`), pointed at through
   `TABLETOP_MCP_COMMAND`/`TABLETOP_MCP_ARGS`, which `tests/e2e/harness.AppSession` and the `app`
-  fixture pass by default. The only test that touches the real registry is
+  fixture pass by default; that override replaces the **whole** registry with one entry, because a
+  startup sweep would otherwise launch every real server in every e2e run. Unit tests of the TUI
+  need the same guard for the same reason: the autouse `no_mcp_servers` fixture leaves the registry
+  empty unless a test sets it (without it the layer went from ~5s to minutes, hitting the network). The only test that touches the real registry is
   `tests/e2e/test_mcp_registry.py` under the `network` marker, so a server disappearing from the
   package registry cannot redden the default suite.
 
@@ -888,10 +901,11 @@ saved: `dialogues` stays a flat list across branches.
   the retry line and the clean retry, two violating answers producing the rejection and the app
   refusal in `history.json`, a stub refusal shown as is with one request, `/invariants` with zero
   requests, `/clear` keeping the message.
-- `tests/e2e/test_mcp_flow.py` — `/mcp` in a real pty against the fake server: the report with
-  server, protocol and tools, `/mcp` listed in the `/commands` panel, `/usage` confirming zero model
-  requests, an unavailable server printing the reason with the session continuing, and the real
-  registry server never being started. `tests/e2e/test_mcp_registry.py` is the opposite side: under
+- `tests/e2e/test_mcp_flow.py` — the startup sweep and `/mcp` in a real pty against the fake
+  server: the summary line before the prompt, the report with server, protocol and tools,
+  `/mcp refresh` re-walking the registry, `/mcp` listed in the `/commands` panel, `/usage`
+  confirming zero model requests, an unavailable server counted in the summary and printing its
+  reason with the session continuing, and the real registry server never being started. `tests/e2e/test_mcp_registry.py` is the opposite side: under
   the `network` marker it connects to every registry entry for real.
 - `tests/e2e/test_profile.py` — the setup dialogue in a real pty: five questions answered line by
   line, the profile landing in the temp `profile.json`, the next question carrying the profile
