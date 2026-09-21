@@ -283,6 +283,9 @@ class TabletopAgent:
         # Рабочий слой — данные текущей задачи (цель и ограничения): его место в конверте
         # истории, потому что жизнь слоя равна жизни диалога.
         self._working: Dict[str, str] = {}
+        # Снимки подключения к MCP: заполняются обходом реестра при запуске приложения и
+        # отдаются отчёту как есть — повторный отчёт не поднимает серверные процессы заново.
+        self._mcp_reports: Tuple[MCPReport, ...] = ()
         # Решение маршрута последней реплики — для журнальной строки интерфейса.
         self._last_routing: Tuple[memory_layers.MemoryRecord, ...] = ()
         # Лог ходов сессии: пары user/assistant успешных обменов, append-only. system в логе
@@ -499,7 +502,7 @@ class TabletopAgent:
         spec: Optional[config.MCPServerSpec] = None,
         on_phase: Optional[Callable[["RequestPhase"], None]] = None,
     ) -> MCPReport:
-        """Подключиться к MCP-серверу и отдать снимок: сервер, протокол и его инструменты.
+        """Подключиться к одному MCP-серверу и отдать снимок: сервер, протокол, инструменты.
 
         Ни одного запроса к модели: счётчики сессии после вызова не меняются. Описание сервера
         берётся из конфигурации (реестр или переопределение окружением), если не передано явно —
@@ -523,6 +526,25 @@ class TabletopAgent:
             protocol_version=connection.protocol_version,
             tools=tuple(connection.tools),
         )
+
+    def connect_mcp_servers(
+        self, on_phase: Optional[Callable[["RequestPhase"], None]] = None
+    ) -> Tuple[MCPReport, ...]:
+        """Обойти весь разрешённый реестр и запомнить снимок по каждой записи.
+
+        Серверы опрашиваются последовательно, в порядке реестра: порядок снимков — это порядок
+        разделов отчёта, и он должен быть одинаковым от запуска к запуску. Сбой записи остаётся
+        внутри её снимка (`mcp_report` не поднимает исключений наружу), поэтому один недоступный
+        сервер не мешает ни остальным, ни запуску приложения.
+        """
+        self._mcp_reports = tuple(
+            self.mcp_report(spec, on_phase=on_phase) for spec in config.mcp_servers()
+        )
+        return self._mcp_reports
+
+    def mcp_reports(self) -> Tuple[MCPReport, ...]:
+        """Снимки подключения, снятые последним обходом реестра; процессов не запускает."""
+        return self._mcp_reports
 
     def add_task(self, goal: str) -> bool:
         """Ставит задачу в очередь; False — цель пуста, задача не заведена."""

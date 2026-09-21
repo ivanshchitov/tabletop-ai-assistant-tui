@@ -2060,3 +2060,73 @@ def test_mcp_report_signals_connection_phase():
     agent.mcp_report(spec=fake_mcp_spec(), on_phase=phases.append)
 
     assert RequestPhase.MCP_CONNECT in phases
+
+
+def two_fake_specs(monkeypatch) -> tuple:
+    """Реестр из двух фейковых серверов: обычного и с пустым списком инструментов."""
+    first = fake_mcp_spec()._replace(name="первый")
+    second = fake_mcp_spec("--empty")._replace(name="второй")
+    monkeypatch.setattr(config, "mcp_servers", lambda: (first, second))
+    return first, second
+
+
+def test_connect_mcp_servers_covers_the_whole_registry(monkeypatch):
+    first, second = two_fake_specs(monkeypatch)
+    agent, _ = make_agent()
+
+    reports = agent.connect_mcp_servers()
+
+    assert [r.spec_name for r in reports] == [first.name, second.name]
+    assert reports[0].server_name == "фейковый-сервер"
+    assert [t.name for t in reports[0].tools] == ["fake_search", "fake_details"]
+    assert reports[1].tools == ()
+    assert all(r.error == "" for r in reports)
+
+
+def test_failed_server_does_not_block_the_others(monkeypatch):
+    working = fake_mcp_spec()._replace(name="рабочий")
+    broken = fake_mcp_spec()._replace(name="сломанный", command="нет-такой-команды")
+    monkeypatch.setattr(config, "mcp_servers", lambda: (broken, working))
+    agent, _ = make_agent()
+
+    reports = agent.connect_mcp_servers()
+
+    assert reports[0].error
+    assert reports[0].tools == ()
+    assert reports[1].error == ""
+    assert reports[1].tools
+
+
+def test_mcp_reports_returns_the_snapshot_without_new_processes(monkeypatch):
+    two_fake_specs(monkeypatch)
+    agent, _ = make_agent()
+    connected = agent.connect_mcp_servers()
+
+    calls = []
+    monkeypatch.setattr(config, "mcp_servers", lambda: calls.append(1) or ())
+
+    assert agent.mcp_reports() == connected
+    assert calls == []
+
+
+def test_connect_mcp_servers_replaces_the_snapshot(monkeypatch):
+    two_fake_specs(monkeypatch)
+    agent, _ = make_agent()
+    agent.connect_mcp_servers()
+
+    single = fake_mcp_spec()._replace(name="единственный")
+    monkeypatch.setattr(config, "mcp_servers", lambda: (single,))
+    refreshed = agent.connect_mcp_servers()
+
+    assert [r.spec_name for r in refreshed] == ["единственный"]
+    assert agent.mcp_reports() == refreshed
+
+
+def test_connect_mcp_servers_does_not_touch_the_model(monkeypatch):
+    two_fake_specs(monkeypatch)
+    agent, client = make_agent()
+
+    agent.connect_mcp_servers()
+
+    assert client.calls == []
+    assert agent.session_usage.requests == 0
