@@ -28,6 +28,7 @@ from .answer_settings import AnswerFormat, AnswerSettings, ContextStrategy
 from .api_client import APIClient, AnswerMeta, APIError
 from .history_manager import HistoryManager
 from .long_term_memory import LongTermMemory
+from .mcp_client import MCPClient, MCPError, MCPTool
 from .task_pipeline import TaskStepReport
 from .task_state import Stage, TaskItem, TaskState, TaskStore
 from .user_profile import InterviewState, ProfileStore, UserProfile, clip_value, profile_message
@@ -48,6 +49,9 @@ class RequestPhase(Enum):
     TASK_PLAN = task_pipeline.PHASE_PLAN
     TASK_EXECUTE = task_pipeline.PHASE_EXECUTE
     TASK_VALIDATE = task_pipeline.PHASE_VALIDATE
+    # Подключение к MCP-серверу: запроса к модели нет, но ожидание для пользователя такое же,
+    # как у запроса — индикатору нужна своя подпись.
+    MCP_CONNECT = "mcp_connect"
 
 
 @dataclass
@@ -132,6 +136,24 @@ class InvariantsReport:
     """Снимок таблицы инвариантов для отчёта интерфейса (без обращения к модели)."""
 
     invariants: Tuple[invariants.Invariant, ...]
+
+
+@dataclass(frozen=True)
+class MCPReport:
+    """Снимок подключения к MCP-серверу для отчёта интерфейса.
+
+    Держит то, что видел пользователь: какое описание сервера использовалось, чем сервер
+    запускался, что он о себе сообщил и какие инструменты объявил. Неудача — это `error`,
+    а не исключение: интерфейс печатает причину, а сессия продолжается.
+    """
+
+    spec_name: str
+    command: str
+    server_name: str = ""
+    server_version: str = ""
+    protocol_version: str = ""
+    tools: Tuple[MCPTool, ...] = ()
+    error: str = ""
 
 
 @dataclass
@@ -471,6 +493,36 @@ class TabletopAgent:
     def invariants_report(self) -> InvariantsReport:
         """Снимок таблицы инвариантов для отчёта интерфейса; запросов к модели не делает."""
         return InvariantsReport(invariants=invariants.INVARIANTS)
+
+    def mcp_report(
+        self,
+        spec: Optional[config.MCPServerSpec] = None,
+        on_phase: Optional[Callable[["RequestPhase"], None]] = None,
+    ) -> MCPReport:
+        """Подключиться к MCP-серверу и отдать снимок: сервер, протокол и его инструменты.
+
+        Ни одного запроса к модели: счётчики сессии после вызова не меняются. Описание сервера
+        берётся из конфигурации (реестр или переопределение окружением), если не передано явно —
+        агент не знает имён инструментов, их объявляет сервер.
+        """
+        client = MCPClient(spec)
+        self._signal(on_phase, RequestPhase.MCP_CONNECT)
+        try:
+            connection = client.connect()
+        except MCPError as error:
+            return MCPReport(
+                spec_name=client.spec.name,
+                command=client.command_line,
+                error=str(error),
+            )
+        return MCPReport(
+            spec_name=client.spec.name,
+            command=client.command_line,
+            server_name=connection.server_name,
+            server_version=connection.server_version,
+            protocol_version=connection.protocol_version,
+            tools=tuple(connection.tools),
+        )
 
     def add_task(self, goal: str) -> bool:
         """Ставит задачу в очередь; False — цель пуста, задача не заведена."""

@@ -2000,3 +2000,63 @@ def test_task_message_names_the_allowed_transitions():
     assert "Validation" in message
     assert "Planning" in message
     assert "переход" in message.lower()
+
+
+# --- подключение MCP ------------------------------------------------------------------
+
+
+FAKE_MCP_SERVER = Path(__file__).resolve().parent.parent / "fake_mcp_server.py"
+
+
+def fake_mcp_spec(*flags: str) -> config.MCPServerSpec:
+    import sys
+
+    return config.MCPServerSpec(
+        name="фейковый",
+        transport="stdio",
+        command=sys.executable,
+        args=(str(FAKE_MCP_SERVER),) + flags,
+        env_keys=(),
+        description="фейковый сервер прогона",
+    )
+
+
+def test_mcp_report_after_successful_connection():
+    agent, _ = make_agent()
+    report = agent.mcp_report(spec=fake_mcp_spec())
+
+    assert report.spec_name == "фейковый"
+    assert report.command.endswith("fake_mcp_server.py")
+    assert report.server_name == "фейковый-сервер"
+    assert report.server_version == "9.9.9"
+    assert report.protocol_version == "2025-06-18"
+    assert [tool.name for tool in report.tools] == ["fake_search", "fake_details"]
+    assert report.error == ""
+
+
+def test_mcp_report_keeps_failure_as_data():
+    """Сбой подключения — данные отчёта, а не исключение наружу: сессия продолжается."""
+    agent, _ = make_agent()
+    report = agent.mcp_report(spec=fake_mcp_spec()._replace(command="нет-такой-команды"))
+
+    assert report.error
+    assert report.tools == ()
+    assert report.server_name == ""
+    assert report.spec_name == "фейковый"
+
+
+def test_mcp_report_does_not_touch_the_model():
+    agent, client = make_agent()
+    agent.mcp_report(spec=fake_mcp_spec())
+
+    assert client.calls == []
+    assert agent.session_usage.requests == 0
+    assert agent.last_result is None
+
+
+def test_mcp_report_signals_connection_phase():
+    agent, _ = make_agent()
+    phases = []
+    agent.mcp_report(spec=fake_mcp_spec(), on_phase=phases.append)
+
+    assert RequestPhase.MCP_CONNECT in phases
