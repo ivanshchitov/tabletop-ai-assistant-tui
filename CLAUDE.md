@@ -615,10 +615,16 @@ baked in:
   test asserts that): names, descriptions and schemas all come from the server and are rendered as
   they arrive. `env_keys` names the environment variables holding that server's secrets; the client
   reads them and passes them to the process, and a missing one is simply not passed. The current
-  entry is `npx -y @unclick/bgg-mcp` (BoardGameGeek). Its data source now requires registration and
-  answers `HTTP 401` to anonymous clients, so `tools/call` would fail — out of scope for day 16,
-  which needs the connection and the tool list only, and the package accepts no key at all
-  (checked: no `process.env` in its bundle), so a real call later means swapping the registry entry.
+  entry is `bgg-mcp -mode stdio` ([kkjdaniel/bgg-mcp](https://github.com/kkjdaniel/bgg-mcp), 10
+  BoardGameGeek tools incl. rules search and recommendations), which reads `BGG_API_KEY`,
+  `BGG_COOKIE` and `BGG_USERNAME` — that is what `env_keys` carries. It is a Go binary with no
+  prebuilt release, so it is built from source (`git clone` + `make build`) and put on PATH; the app
+  only ever names the command. The handshake and `tools/list` work anonymously, but BGG's XML API
+  has required registration since October 2025 and answers `HTTP 401` to anonymous clients, so
+  `tools/call` needs a key from BGG's application form — out of scope for day 16, which needs the
+  connection and the tool list only. It replaced `npx -y @unclick/bgg-mcp` (the swap was one registry
+  entry, which is the point of the design; that package could take no key at all — no `process.env`
+  in its bundle).
 - **Synchronous wrapper over the async SDK.** The official `mcp` package is asyncio-based while the
   app's main loop is a plain `input()`; `MCPClient` hides `asyncio.run` inside and exposes ordinary
   methods. Making the app async would have touched all of `ui/` and the task pipeline for one

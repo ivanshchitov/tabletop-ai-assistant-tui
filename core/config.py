@@ -190,10 +190,10 @@ MCP_SERVERS = {
     "boardgamegeek": MCPServerSpec(
         name="boardgamegeek",
         transport="stdio",
-        command="npx",
-        args=("-y", "@unclick/bgg-mcp"),
-        env_keys=(),
-        description="BoardGameGeek: поиск игр, детали, рейтинги и коллекции",
+        command="bgg-mcp",
+        args=("-mode", "stdio"),
+        env_keys=("BGG_API_KEY", "BGG_COOKIE", "BGG_USERNAME"),
+        description="BoardGameGeek: поиск, детали, правила, рекомендации, коллекции, цены",
     ),
 }
 DEFAULT_MCP_SERVER = "boardgamegeek"
