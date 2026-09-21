@@ -12,12 +12,13 @@ Off-topic questions get a fixed refusal phrase instead of being answered.
 ## Commands
 
 ```bash
-pip install -r requirements.txt
+python3.13 -m venv .venv                     # Python 3.10+ only: the `mcp` package needs it
+.venv/bin/pip install -r requirements.txt
 echo "OPENCODE_API_KEY=sk-ваш_ключ" > .env   # or set OPENCODE_API_KEY directly
-python tabletop-ai-assistant.py
+./tabletop-ai-assistant.py                   # re-execs itself into .venv when one is next to it
 
-pip install -r requirements-dev.txt
-pytest                      # everything except the `network` marker (872 selected)
+.venv/bin/pip install -r requirements-dev.txt
+pytest                      # everything except the `network` marker (947 selected)
 pytest tests/unit -q        # fast layer, no subprocesses (~3s)
 pytest tests/e2e -q         # real app in a pty against a stub API (~130s)
 pytest --snapshot-update    # rewrite the e2e screen snapshots after a deliberate layout change
@@ -88,7 +89,7 @@ openspec archive <change-id> --yes        # non-interactive: without --yes the C
   deltas: `agent`, `question-answering`, `answer-settings`, `api-integration`,
   `history-persistence`, `terminal-ui`, `settings-screen`, `configuration`, `context-strategies`,
   `memory-model`, `user-profile`, `task-state`, `agent-invariants`, `test-infrastructure`,
-  `model-selection`.
+  `model-selection`, `mcp-integration`.
   It records deliberate decisions worth knowing before touching related code: the JSON format's
   refusal reply is a machine-readable `{"error": ...}` object rather than the verbatim refusal
   phrase used by free/compact (not a bug to fix), and `AnswerSettings` is session-only by design —
@@ -160,18 +161,26 @@ AnswerFormat`); `ui/` imports from `core` with absolute imports (`from core impo
 prompts`) since they're sibling packages, and imports its own sibling module with a relative
 import (`from . import keyboard`). The entry point is `tabletop-ai-assistant.py` at the repo root
 (hyphenated, so it's not importable as a module — it's only ever run directly:
-`from ui.tui_app import TabletopAITUI`), which is why `core/config.py`'s `BASE_DIR` resolves two
+`from ui.tui_app import TabletopAITUI`; before that import it `os.execv`s itself into
+`.venv/bin/python` when that exists and isn't already the running interpreter, so
+`./tabletop-ai-assistant.py` works without activating anything — the shebang's `env python3` is
+the system interpreter, which has neither the project's dependencies nor, on 3.9, any way to get
+`mcp` at all), which is why `core/config.py`'s `BASE_DIR` resolves two
 parents up (`Path(__file__).resolve().parent.parent`) rather than one — it has to reach back past
 `core/` to the repo root where `.env`, `assets/`, `history.json`, `memory.json` and
 `profile.json` actually live.
 
 **Environment switches (`core/config.py`):** `OPENCODE_API_URL`, `TABLETOP_HISTORY_FILE`,
-`TABLETOP_MEMORY_FILE`, `TABLETOP_PROFILE_FILE`, `TABLETOP_TASK_FILE`, `TABLETOP_REQUEST_TIMEOUT`,
+`TABLETOP_MEMORY_FILE`, `TABLETOP_PROFILE_FILE`, `TABLETOP_TASK_FILE`, `TABLETOP_TASKS_DIR`,
+`TABLETOP_REQUEST_TIMEOUT`,
 `TABLETOP_TYPING_DELAY` (the last one read in `ui/tui_app.py`), `TABLETOP_COMPRESS_AFTER` (the
-session setting's default, messages, default 10) and `TABLETOP_MAX_SESSION_TOKENS` (the session
-setting's default, tokens, default 20000) override the corresponding defaults. They exist so the
+session setting's default, messages, default 10), `TABLETOP_MAX_SESSION_TOKENS` (the session
+setting's default, tokens, default 20000) and `TABLETOP_MCP_COMMAND`/`TABLETOP_MCP_ARGS` (the MCP
+server's launch command and its space-separated arguments, overriding the registry entry whole)
+override the corresponding defaults. They exist so the
 e2e layer can point the app at a local stub server, keep history, long-term memory and the user
-profile in temp files, collapse the typing animation — or exercise compression and the token
+profile in temp files, collapse the typing animation, run `/mcp` against a local fake server
+instead of the real one — or exercise compression and the token
 ceiling in seconds. `HISTORY_FILE`/`MEMORY_FILE`/`PROFILE_FILE`/`TASK_FILE` especially: their paths derive
 from `__file__`, not the working directory, so without the override *any* run — a test run
 included — would write to the single real `history.json`/`memory.json`/`profile.json`/`task.json`
@@ -596,6 +605,45 @@ session. Deliberate decisions baked in:
   never written to `history.json` and never replayed on restart — it exists only at the moment of
   the answer.
 
+**MCP (`core/mcp_client.py`, `core/config.MCP_SERVERS`, `/mcp`):** the agent connects to an
+external MCP server over stdio and reports what tools it offers (day 16). Deliberate decisions
+baked in:
+- **The server is a data record, not code.** `config.MCPServerSpec(name, transport, command, args,
+  env_keys, description)` plus the `MCP_SERVERS` registry and `DEFAULT_MCP_SERVER` — the same
+  device as `AVAILABLE_MODELS`/`MODEL_PRICING`. The user's standing requirement is that swapping
+  the server stays cheap, so **no tool name of any server appears in `core/` or `ui/`** (a unit
+  test asserts that): names, descriptions and schemas all come from the server and are rendered as
+  they arrive. `env_keys` names the environment variables holding that server's secrets; the client
+  reads them and passes them to the process, and a missing one is simply not passed. The current
+  entry is `npx -y @unclick/bgg-mcp` (BoardGameGeek). Its data source now requires registration and
+  answers `HTTP 401` to anonymous clients, so `tools/call` would fail — out of scope for day 16,
+  which needs the connection and the tool list only, and the package accepts no key at all
+  (checked: no `process.env` in its bundle), so a real call later means swapping the registry entry.
+- **Synchronous wrapper over the async SDK.** The official `mcp` package is asyncio-based while the
+  app's main loop is a plain `input()`; `MCPClient` hides `asyncio.run` inside and exposes ordinary
+  methods. Making the app async would have touched all of `ui/` and the task pipeline for one
+  command. The SDK needs **Python 3.10+**, which is why the project's floor moved off 3.9 and the CI
+  matrix is 3.11/3.12/3.13 — running the app with a 3.9 interpreter leaves everything else working
+  and fails only `/mcp`, with `_require_sdk()` naming the interpreter and the missing package rather
+  than leaking a bare `ModuleNotFoundError` that reads like a server fault.
+- **Connection is per call.** `connect()` starts the process, handshakes, lists tools and closes;
+  keeping the server alive for the session would mean a background thread with its own event loop
+  and a shutdown path on `/exit`. Revisit when tool calls arrive. `mcp 2.x` fields are snake_case
+  (`server_info`, `protocol_version`), and the SDK wraps task failures in an `ExceptionGroup`, so
+  `_describe()` unwraps it to the first real cause.
+- **A failure is data, not an exception.** `agent.mcp_report()` returns an `MCPReport` snapshot
+  (spec name, launch command, server name/version, protocol version, tools, error text); the TUI
+  renders it and never touches the client — the same isolation boundary as `context_report()`.
+  Everything printed from the report goes through `rich.markup.escape`: it is text from someone
+  else's process. `/mcp` makes zero model requests and shows the `RequestPhase.MCP_CONNECT` spinner
+  while it waits.
+- **Tests never start the real server.** `tests/fake_mcp_server.py` is a stdio server run by the
+  test interpreter (modes: normal, `--empty`, `--garbage`, `--markup`), pointed at through
+  `TABLETOP_MCP_COMMAND`/`TABLETOP_MCP_ARGS`, which `tests/e2e/harness.AppSession` and the `app`
+  fixture pass by default. The only test that touches the real registry is
+  `tests/e2e/test_mcp_registry.py` under the `network` marker, so a server disappearing from the
+  package registry cannot redden the default suite.
+
 **Prompt assembly (`core/prompts.py` + `assets/*.md`):**
 - `assets/system_prompt.md` is the base system prompt; `assets/answer_format_compact.md` and
   `assets/answer_format_json.md` are per-format instructions appended to it. `AnswerFormat.FREE`
@@ -785,6 +833,11 @@ saved: `dialogues` stays a flat list across branches.
   app's own question is on screen — the echoed answer appears before the next question is ready, so
   waiting on the echo loses an answer.
 - `tests/unit/test_keyboard.py` — the only unit file that needs a pty (see above).
+- `tests/unit/test_mcp_client.py` and `tests/fake_mcp_server.py` — the MCP client against a local
+  stdio server run by the test interpreter: handshake, tool list, an empty list (success, not a
+  failure), a missing launch command, a process that does not speak the protocol, a missing `mcp`
+  package (the environment, not the server) and the invariant that no server's tool names appear in
+  `core/`/`ui/`.
 - `tests/e2e/` — the real `tabletop-ai-assistant.py` running in `pty.fork()`, with output fed
   through `pyte` so assertions read the *rendered* screen rather than a stream of cursor codes.
   `harness.AppSession` is the driver (`wait_for` searches the scrollback, `wait_on_screen` and
@@ -823,6 +876,11 @@ saved: `dialogues` stays a flat list across branches.
   the retry line and the clean retry, two violating answers producing the rejection and the app
   refusal in `history.json`, a stub refusal shown as is with one request, `/invariants` with zero
   requests, `/clear` keeping the message.
+- `tests/e2e/test_mcp_flow.py` — `/mcp` in a real pty against the fake server: the report with
+  server, protocol and tools, `/mcp` listed in the `/commands` panel, `/usage` confirming zero model
+  requests, an unavailable server printing the reason with the session continuing, and the real
+  registry server never being started. `tests/e2e/test_mcp_registry.py` is the opposite side: under
+  the `network` marker it connects to every registry entry for real.
 - `tests/e2e/test_profile.py` — the setup dialogue in a real pty: five questions answered line by
   line, the profile landing in the temp `profile.json`, the next question carrying the profile
   message, `/clear` and a restart keeping it, `Ctrl+C` cancelling without writing, and the repo's
