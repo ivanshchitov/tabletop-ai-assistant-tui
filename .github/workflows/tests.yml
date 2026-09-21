@@ -15,7 +15,7 @@ jobs:
         # macOS включён намеренно: ui/keyboard.py завязан на termios и поведение
         # псевдотерминала, которое на BSD отличается от Linux.
         os: [ubuntu-latest, macos-latest]
-        python-version: ["3.9", "3.11", "3.12"]
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
