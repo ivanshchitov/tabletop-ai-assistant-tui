@@ -227,3 +227,43 @@ def test_facts_limits_bound_the_extractor_output():
 def test_invariant_retries_is_a_single_repeat():
     """Нарушивший инварианты ответ переспрашивается ровно один раз, затем отклоняется."""
     assert config.INVARIANT_RETRIES == 1
+
+
+def test_mcp_registry_is_not_empty():
+    assert config.MCP_SERVERS
+    assert config.DEFAULT_MCP_SERVER in config.MCP_SERVERS
+
+
+def test_mcp_specs_are_complete():
+    """Описание сервера — данные: замена сервера должна стоить одну запись реестра."""
+    for name, spec in config.MCP_SERVERS.items():
+        assert spec.name == name
+        assert spec.transport == "stdio"
+        assert spec.command
+        assert isinstance(spec.args, tuple)
+        assert isinstance(spec.env_keys, tuple)
+        assert spec.description
+
+
+def test_mcp_spec_defaults_to_registry_entry(monkeypatch):
+    monkeypatch.delenv("TABLETOP_MCP_COMMAND", raising=False)
+    monkeypatch.delenv("TABLETOP_MCP_ARGS", raising=False)
+    assert config.mcp_server_spec() == config.MCP_SERVERS[config.DEFAULT_MCP_SERVER]
+
+
+def test_mcp_spec_overridden_by_environment(monkeypatch):
+    """Переопределение перекрывает запись реестра целиком: e2e и демо подменяют сервер без правки кода."""
+    monkeypatch.setenv("TABLETOP_MCP_COMMAND", "python3")
+    monkeypatch.setenv("TABLETOP_MCP_ARGS", "-u fake_server.py --quiet")
+    spec = config.mcp_server_spec()
+    assert spec.command == "python3"
+    assert spec.args == ("-u", "fake_server.py", "--quiet")
+    assert spec.name != config.DEFAULT_MCP_SERVER
+
+
+def test_mcp_spec_override_without_args(monkeypatch):
+    monkeypatch.setenv("TABLETOP_MCP_COMMAND", "some-server")
+    monkeypatch.delenv("TABLETOP_MCP_ARGS", raising=False)
+    spec = config.mcp_server_spec()
+    assert spec.command == "some-server"
+    assert spec.args == ()

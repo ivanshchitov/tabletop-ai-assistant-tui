@@ -2,7 +2,7 @@
 
 import os
 from pathlib import Path
-from typing import Optional
+from typing import NamedTuple, Optional, Tuple
 
 from dotenv import load_dotenv
 
@@ -172,6 +172,56 @@ HISTORY_FILE = Path(os.getenv("TABLETOP_HISTORY_FILE", str(DEFAULT_HISTORY_FILE)
 # сдавался за доли секунды, а не ждал полминуты на каждый намеренно зависший ответ.
 REQUEST_TIMEOUT = int(os.getenv("TABLETOP_REQUEST_TIMEOUT", "90"))
 MAX_RETRIES = 3
+
+# Описания MCP-серверов. Сервер задаётся данными, а не кодом: имя, транспорт, команда запуска,
+# её аргументы, имена переменных окружения с секретами сервера и описание. Замена сервера — одна
+# запись реестра; ни имена инструментов, ни адрес источника данных нигде в коде не зашиты.
+# Тот же приём, что у AVAILABLE_MODELS и MODEL_PRICING.
+class MCPServerSpec(NamedTuple):
+    name: str
+    transport: str
+    command: str
+    args: Tuple[str, ...]
+    env_keys: Tuple[str, ...]
+    description: str
+
+
+MCP_SERVERS = {
+    "boardgamegeek": MCPServerSpec(
+        name="boardgamegeek",
+        transport="stdio",
+        command="npx",
+        args=("-y", "@unclick/bgg-mcp"),
+        env_keys=(),
+        description="BoardGameGeek: поиск игр, детали, рейтинги и коллекции",
+    ),
+}
+DEFAULT_MCP_SERVER = "boardgamegeek"
+
+# Имя описания, подставляемое при переопределении команды через окружение: сервер подменён
+# целиком, поэтому и имя записи реестра к нему уже не относится.
+MCP_OVERRIDE_NAME = "переопределён окружением"
+
+
+def mcp_server_spec() -> MCPServerSpec:
+    """Описание сервера для подключения.
+
+    Переменные TABLETOP_MCP_COMMAND/TABLETOP_MCP_ARGS перекрывают запись реестра целиком: без
+    такого переключателя e2e-прогон поднимал бы настоящий сервер из сети, как без
+    TABLETOP_HISTORY_FILE он писал бы в реальный history.json.
+    """
+    default = MCP_SERVERS[DEFAULT_MCP_SERVER]
+    command = os.getenv("TABLETOP_MCP_COMMAND")
+    if not command:
+        return default
+    args = tuple(os.getenv("TABLETOP_MCP_ARGS", "").split())
+    return default._replace(
+        name=MCP_OVERRIDE_NAME,
+        command=command,
+        args=args,
+        description="сервер задан переменными окружения",
+    )
+
 
 MAX_INPUT_LENGTH = 2000
 
