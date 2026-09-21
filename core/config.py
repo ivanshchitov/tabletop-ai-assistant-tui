@@ -195,6 +195,22 @@ MCP_SERVERS = {
         env_keys=("BGG_API_KEY", "BGG_COOKIE", "BGG_USERNAME"),
         description="BoardGameGeek: поиск, детали, правила, рекомендации, коллекции, цены",
     ),
+    "rulebooks": MCPServerSpec(
+        name="rulebooks",
+        transport="stdio",
+        command="npx",
+        args=("-y", "boardgame-rules-mcp"),
+        env_keys=(),
+        description="Рулбуки 1jour-1jeu: поиск правил игры, текст рулбука, структурированная сводка",
+    ),
+    "rule-disputes": MCPServerSpec(
+        name="rule-disputes",
+        transport="stdio",
+        command="npx",
+        args=("-y", "@mohitagw15856/rulebook", "mcp"),
+        env_keys=(),
+        description="Спорные правила офлайн: официальное против домашнего, факты об играх, план вечера",
+    ),
 }
 DEFAULT_MCP_SERVER = "boardgamegeek"
 

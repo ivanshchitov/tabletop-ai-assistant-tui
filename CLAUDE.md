@@ -614,8 +614,14 @@ baked in:
   the server stays cheap, so **no tool name of any server appears in `core/` or `ui/`** (a unit
   test asserts that): names, descriptions and schemas all come from the server and are rendered as
   they arrive. `env_keys` names the environment variables holding that server's secrets; the client
-  reads them and passes them to the process, and a missing one is simply not passed. The current
-  entry is `bgg-mcp -mode stdio` ([kkjdaniel/bgg-mcp](https://github.com/kkjdaniel/bgg-mcp), 10
+  reads them and passes them to the process, and a missing one is simply not passed. The registry
+  holds three entries, all verified against their real servers by the `network` contract test:
+  `rulebooks` (`npx -y boardgame-rules-mcp`, rulebook search and full rules text from 1jour-1jeu,
+  no key) and `rule-disputes` (`npx -y @mohitagw15856/rulebook mcp`, offline, official rule vs.
+  house rule, no key) sit beside the default. **Only `DEFAULT_MCP_SERVER` is ever connected** —
+  there is no per-server choice in `/mcp` yet, so the other two are data waiting for one; switching
+  the default is a one-line change. The default entry
+  is `bgg-mcp -mode stdio` ([kkjdaniel/bgg-mcp](https://github.com/kkjdaniel/bgg-mcp), 10
   BoardGameGeek tools incl. rules search and recommendations), which reads `BGG_API_KEY`,
   `BGG_COOKIE` and `BGG_USERNAME` — that is what `env_keys` carries. It is a Go binary with no
   prebuilt release, so it is built from source (`git clone` + `make build`) and put on PATH; the app
