@@ -219,24 +219,31 @@ DEFAULT_MCP_SERVER = "boardgamegeek"
 MCP_OVERRIDE_NAME = "переопределён окружением"
 
 
-def mcp_server_spec() -> MCPServerSpec:
-    """Описание сервера для подключения.
+def mcp_servers() -> Tuple[MCPServerSpec, ...]:
+    """Серверы, к которым подключается сессия, в порядке реестра.
 
-    Переменные TABLETOP_MCP_COMMAND/TABLETOP_MCP_ARGS перекрывают запись реестра целиком: без
-    такого переключателя e2e-прогон поднимал бы настоящий сервер из сети, как без
-    TABLETOP_HISTORY_FILE он писал бы в реальный history.json.
+    Переменные TABLETOP_MCP_COMMAND/TABLETOP_MCP_ARGS заменяют **весь** реестр единственной
+    записью: приложение обходит реестр при запуске, поэтому без такой замены e2e-прогон поднимал
+    бы все настоящие серверы из сети — как без TABLETOP_HISTORY_FILE он писал бы в реальный
+    history.json.
     """
-    default = MCP_SERVERS[DEFAULT_MCP_SERVER]
     command = os.getenv("TABLETOP_MCP_COMMAND")
     if not command:
-        return default
+        return tuple(MCP_SERVERS[name] for name in MCP_SERVERS)
     args = tuple(os.getenv("TABLETOP_MCP_ARGS", "").split())
-    return default._replace(
+    override = MCP_SERVERS[DEFAULT_MCP_SERVER]._replace(
         name=MCP_OVERRIDE_NAME,
         command=command,
         args=args,
+        env_keys=(),
         description="сервер задан переменными окружения",
     )
+    return (override,)
+
+
+def mcp_server_spec() -> MCPServerSpec:
+    """Первый сервер разрешённого реестра — одиночный случай `mcp_servers()`."""
+    return mcp_servers()[0]
 
 
 MAX_INPUT_LENGTH = 2000

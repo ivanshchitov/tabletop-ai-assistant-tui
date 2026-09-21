@@ -267,3 +267,22 @@ def test_mcp_spec_override_without_args(monkeypatch):
     spec = config.mcp_server_spec()
     assert spec.command == "some-server"
     assert spec.args == ()
+
+
+def test_mcp_servers_returns_whole_registry(monkeypatch):
+    monkeypatch.delenv("TABLETOP_MCP_COMMAND", raising=False)
+    monkeypatch.delenv("TABLETOP_MCP_ARGS", raising=False)
+    servers = config.mcp_servers()
+    assert [spec.name for spec in servers] == list(config.MCP_SERVERS)
+    assert config.MCP_SERVERS[config.DEFAULT_MCP_SERVER] in servers
+
+
+def test_mcp_servers_override_replaces_the_whole_registry(monkeypatch):
+    """Переопределение заменяет реестр целиком: иначе прогон поднял бы настоящие серверы."""
+    monkeypatch.setenv("TABLETOP_MCP_COMMAND", "python3")
+    monkeypatch.setenv("TABLETOP_MCP_ARGS", "-u fake_server.py")
+    servers = config.mcp_servers()
+    assert len(servers) == 1
+    assert servers[0].command == "python3"
+    assert servers[0].args == ("-u", "fake_server.py")
+    assert servers[0].name == config.MCP_OVERRIDE_NAME
