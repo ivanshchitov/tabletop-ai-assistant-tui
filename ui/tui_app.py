@@ -120,20 +120,25 @@ TASK_PHASE_LABELS = {
 TASK_MARK_LABELS = {"✓": "[x]", "✗": "[!]", "◦": "[ ]"}
 
 
+def plural_word_ru(count: int, one: str, few: str, many: str) -> str:
+    """Форма слова без числа: нужна там, где число уже напечатано отдельно («1/2 сервера»).
+
+    Русское согласование: единственное число — только при остатке 1, кроме 11; форма «двух-четырёх»
+    — при остатке 2..4, кроме 12..14; остальное — множественная.
+    """
+    if count % 10 == 1 and count % 100 != 11:
+        return one
+    if count % 10 in (2, 3, 4) and count % 100 not in (12, 13, 14):
+        return few
+    return many
+
+
 def plural_ru(count: int, one: str, few: str, many: str) -> str:
     """«1 обмен», «2 обмена», «5 обменов»: число отчёта вместе с верной формой слова.
 
-    Русское согласование: единственное число — только при остатке 1, кроме 11; форма «двух-четырёх»
-    — при остатке 2..4, кроме 12..14; остальное — множественная. Числа в отчётах маленькие, но
-    «1 записей» в кадре демо выглядит неряшливо.
+    Числа в отчётах маленькие, но «1 записей» в кадре демо выглядит неряшливо.
     """
-    if count % 10 == 1 and count % 100 != 11:
-        word = one
-    elif count % 10 in (2, 3, 4) and count % 100 not in (12, 13, 14):
-        word = few
-    else:
-        word = many
-    return f"{count} {word}"
+    return f"{count} {plural_word_ru(count, one, few, many)}"
 
 
 class TabletopAITUI:
@@ -215,6 +220,8 @@ class TabletopAITUI:
                 return
             self.client = APIClient(api_key)
             self.agent.client = self.client
+
+        self._connect_mcp_servers()
 
         self.console.print(Panel(APP_TITLE, style="bold cyan"))
         if self.history.dialogues:
@@ -350,7 +357,7 @@ class TabletopAITUI:
             self._print_invariants_report()
             return True
         if command == "/mcp":
-            self._print_mcp_report()
+            self._print_mcp_report(user_input)
             return True
         return False
 
@@ -1364,38 +1371,80 @@ class TabletopAITUI:
             "называет инвариант.[/dim]"
         )
 
-    def _print_mcp_report(self) -> None:
-        """Отчёт /mcp: соединение с MCP-сервером и его инструменты, без запросов к модели.
+    def _connect_mcp_servers(self) -> None:
+        """Подключиться ко всем серверам реестра и напечатать строку итога.
 
-        Аргументов у команды нет — подкоманд `/mcp` не имеет. Весь текст (имя сервера, описания
-        инструментов, текст ошибки) приходит от чужого процесса, поэтому печатается через
-        escape(): строка вроде `[x]` иначе принимается rich за разметку и пропадает из вывода.
+        Шаг блокирующий и идёт до первого приглашения ввода (решение пользователя): набор
+        инструментов известен с первой секунды сессии, а `/mcp` потом печатает снимок мгновенно.
+        Недоступный сервер запуску не мешает — он просто попадает в число недоступных.
         """
         with self.console.status("[bold yellow]● Подключение к MCP...[/bold yellow]", spinner="dots"):
-            report = self.agent.mcp_report()
+            reports = self.agent.connect_mcp_servers()
 
-        if report.error:
+        if not reports:
+            return
+        alive = [report for report in reports if not report.error]
+        tools = sum(len(report.tools) for report in alive)
+        line = (
+            f"MCP: {len(alive)}/{len(reports)} "
+            f"{plural_word_ru(len(reports), 'сервер', 'сервера', 'серверов')}, "
+            f"{plural_ru(tools, 'инструмент', 'инструмента', 'инструментов')}"
+        )
+        failed = len(reports) - len(alive)
+        if failed:
+            line += f", {failed} недоступно"
+        self.console.print(f"[dim]{line} — подробности: /mcp[/dim]")
+
+    def _print_mcp_report(self, user_input: str = "") -> None:
+        """Отчёт /mcp: разделы по всем серверам реестра, без запросов к модели.
+
+        По умолчанию печатается снимок, снятый при запуске, — ни одного нового процесса.
+        Значим единственный аргумент `refresh`: он переподключается ко всем серверам заново.
+        Весь текст (имена серверов, описания инструментов, причины отказа) приходит от чужих
+        процессов, поэтому печатается через escape(): строка вроде `[x]` иначе принимается rich
+        за разметку и пропадает из вывода.
+        """
+        if user_input.split()[1:2] == ["refresh"]:
+            with self.console.status(
+                "[bold yellow]● Подключение к MCP...[/bold yellow]", spinner="dots"
+            ):
+                reports = self.agent.connect_mcp_servers()
+        else:
+            reports = self.agent.mcp_reports()
+
+        if not reports:
+            self.console.print("[dim]Серверы MCP не настроены.[/dim]")
+            return
+
+        alive = [report for report in reports if not report.error]
+        tools = sum(len(report.tools) for report in alive)
+        self.console.print(
+            f"[bold cyan]Подключение MCP (без обращения к модели): "
+            f"{len(alive)}/{len(reports)} "
+            f"{plural_word_ru(len(reports), 'сервер', 'сервера', 'серверов')}, "
+            f"{plural_ru(tools, 'инструмент', 'инструмента', 'инструментов')}[/bold cyan]"
+        )
+        for report in reports:
+            self.console.print(f"[bold]  {escape(report.spec_name)}[/bold]")
+            if report.error:
+                self.console.print(
+                    f"[bold red]    Не удалось подключиться: {escape(report.error)}[/bold red]"
+                )
+                self.console.print(f"[dim]    Команда запуска: {escape(report.command)}[/dim]")
+                continue
             self.console.print(
-                f"[bold red]Не удалось подключиться к MCP-серверу: {escape(report.error)}[/bold red]"
+                f"[dim]    Сервер: {escape(report.server_name)} {escape(report.server_version)}"
+                f"  |  Протокол: {escape(report.protocol_version)}[/dim]"
             )
-            self.console.print(f"[dim]  Команда запуска: {escape(report.command)}[/dim]")
-            return
-
-        self.console.print("[bold cyan]Подключение MCP (без обращения к модели):[/bold cyan]")
-        self.console.print(
-            f"[dim]  Сервер: {escape(report.server_name)} {escape(report.server_version)}[/dim]"
-        )
-        self.console.print(f"[dim]  Протокол: {escape(report.protocol_version)}[/dim]")
-        self.console.print(f"[dim]  Описание: {escape(report.spec_name)}[/dim]")
-        self.console.print(f"[dim]  Команда запуска: {escape(report.command)}[/dim]")
-        if not report.tools:
-            self.console.print("[dim]  Инструменты: инструментов не объявлено[/dim]")
-            return
-        self.console.print(
-            f"[dim]  Инструменты ({len(report.tools)}):[/dim]"
-        )
-        for tool in report.tools:
-            self.console.print(f"[dim]    {escape(tool.name)} — {escape(tool.description)}[/dim]")
+            self.console.print(f"[dim]    Команда запуска: {escape(report.command)}[/dim]")
+            if not report.tools:
+                self.console.print("[dim]    Инструменты: инструментов не объявлено[/dim]")
+                continue
+            self.console.print(f"[dim]    Инструменты ({len(report.tools)}):[/dim]")
+            for tool in report.tools:
+                self.console.print(
+                    f"[dim]      {escape(tool.name)} — {escape(tool.description)}[/dim]"
+                )
 
     def _print_facts_line(self) -> None:
         """Строка о блоке фактов: печатается один раз на изменение отчёта агента.

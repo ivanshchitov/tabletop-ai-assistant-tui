@@ -135,6 +135,15 @@ def make_app(recording_console, history):
 
 
 @pytest.fixture(autouse=True)
+def no_mcp_servers(monkeypatch):
+    """По умолчанию реестр MCP пуст: приложение подключается к серверам при запуске, и без
+    этой заглушки каждый тест интерфейса поднимал бы настоящие серверы реестра — то есть лез
+    бы в сеть. Тест, которому серверы нужны, задаёт их сам через `fake_registry`.
+    """
+    monkeypatch.setattr(config, "mcp_servers", tuple)
+
+
+@pytest.fixture(autouse=True)
 def scripted_input(monkeypatch):
     """Подменяет input() на чтение из заранее заданного списка строк.
 
@@ -938,7 +947,9 @@ def test_spinner_label_shows_summarization_during_compression(make_app, monkeypa
     app.run()
 
     assert labels.count("● Суммаризация...") == 1
-    assert "● Отправка..." in labels[0]
+    # Смена контракта (add-mcp-startup-connections): первая подпись индикатора — подключение к
+    # MCP при запуске, поэтому подпись запроса ищется по всему списку, а не в labels[0].
+    assert any("● Отправка..." in label for label in labels)
 
 
 
@@ -1921,13 +1932,14 @@ FAKE_MCP_SERVER = Path(__file__).resolve().parent.parent / "fake_mcp_server.py"
 
 @pytest.fixture
 def fake_mcp(monkeypatch):
-    """Подключение в тестах идёт к фейковому серверу прогона, а не к серверу из реестра."""
+    """Реестр прогона — один фейковый сервер.
 
-    import sys
+    Смена контракта (add-mcp-startup-connections): приложение подключается ко всем записям
+    реестра при запуске, поэтому тесты задают реестр, а не команду запуска одного сервера.
+    """
 
-    def use(*flags: str) -> None:
-        monkeypatch.setenv("TABLETOP_MCP_COMMAND", sys.executable)
-        monkeypatch.setenv("TABLETOP_MCP_ARGS", " ".join([str(FAKE_MCP_SERVER), *flags]))
+    def use(*flags: str, name: str = "фейковый") -> None:
+        fake_registry(monkeypatch, fake_spec(name, *flags))
 
     return use
 
@@ -1963,11 +1975,10 @@ def test_mcp_is_offered_by_completion_and_panel():
     assert "/mcp" in [command for command, _ in commands_screen.COMMAND_OPTIONS]
 
 
-def test_mcp_failure_prints_reason_and_session_continues(make_app, recording_console, fake_mcp):
-    fake_mcp()
-    import os
-
-    os.environ["TABLETOP_MCP_COMMAND"] = "нет-такой-команды-на-диске"
+def test_mcp_failure_prints_reason_and_session_continues(
+    make_app, recording_console, monkeypatch
+):
+    fake_registry(monkeypatch, fake_spec("фейковый", command="нет-такой-команды-на-диске"))
     client = FakeClient(["Ответ про настолки"])
     make_app(["/mcp", "Вопрос про настолки", "/exit"], client).run()
 
@@ -1991,3 +2002,130 @@ def test_mcp_report_without_tools(make_app, recording_console, fake_mcp):
 
     assert recording_console.contains("фейковый-сервер")
     assert recording_console.contains("инструментов не объявлено")
+
+
+def fake_registry(monkeypatch, *specs) -> None:
+    from core import config as core_config
+
+    monkeypatch.setattr(core_config, "mcp_servers", lambda: specs)
+
+
+def fake_spec(name: str, *flags: str, command: Optional[str] = None):
+    import sys
+
+    from core import config as core_config
+
+    return core_config.MCPServerSpec(
+        name=name,
+        transport="stdio",
+        command=command or sys.executable,
+        args=(str(FAKE_MCP_SERVER),) + flags,
+        env_keys=(),
+        description=f"фейковый сервер {name}",
+    )
+
+
+def test_startup_connects_to_every_server_and_prints_the_summary(
+    make_app, recording_console, monkeypatch
+):
+    fake_registry(monkeypatch, fake_spec("первый"), fake_spec("второй"))
+    make_app(["/exit"], FakeClient()).run()
+
+    assert recording_console.contains("MCP: 2/2")
+    # Два сервера по два инструмента: строка итога говорит про инструменты, а не про серверы одни.
+    assert recording_console.contains("4")
+
+
+def test_startup_survives_an_unavailable_server(make_app, recording_console, monkeypatch):
+    fake_registry(
+        monkeypatch,
+        fake_spec("рабочий"),
+        fake_spec("сломанный", command="нет-такой-команды-на-диске"),
+    )
+    client = FakeClient(["Ответ про настолки"])
+    make_app(["Вопрос про настолки", "/exit"], client).run()
+
+    assert recording_console.contains("MCP: 1/2")
+    assert recording_console.contains("1 недоступно")
+    # Сессия работает: вопрос после старта ушёл модели.
+    assert len(client.calls) == 1
+
+
+def test_mcp_report_covers_every_server(make_app, recording_console, monkeypatch):
+    fake_registry(monkeypatch, fake_spec("первый"), fake_spec("второй", "--empty"))
+    make_app(["/mcp", "/exit"], FakeClient()).run()
+
+    assert recording_console.contains("первый")
+    assert recording_console.contains("второй")
+    assert recording_console.contains("fake_search")
+    assert recording_console.contains("инструментов не объявлено")
+
+
+def test_mcp_report_uses_the_startup_snapshot(make_app, recording_console, monkeypatch):
+    """Отчёт печатается по снимку запуска: процессы серверов заново не поднимаются."""
+    fake_registry(monkeypatch, fake_spec("первый"))
+    app = make_app(["/mcp", "/exit"], FakeClient())
+
+    connects = []
+    original = app.agent.connect_mcp_servers
+
+    def counting(*args, **kwargs):
+        connects.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(app.agent, "connect_mcp_servers", counting)
+    app.run()
+
+    # Ровно один обход — стартовый; команда сходила в снимок.
+    assert len(connects) == 1
+    assert recording_console.contains("fake_search")
+
+
+def test_mcp_refresh_reconnects(make_app, recording_console, monkeypatch):
+    fake_registry(monkeypatch, fake_spec("первый"))
+    app = make_app(["/mcp refresh", "/exit"], FakeClient())
+
+    connects = []
+    original = app.agent.connect_mcp_servers
+
+    def counting(*args, **kwargs):
+        connects.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(app.agent, "connect_mcp_servers", counting)
+    app.run()
+
+    # Стартовый обход плюс обход по refresh.
+    assert len(connects) == 2
+    assert recording_console.contains("fake_search")
+
+
+def test_mcp_other_arguments_print_the_snapshot(make_app, recording_console, monkeypatch):
+    """Смена контракта (add-mcp-startup-connections): значим только аргумент refresh."""
+    fake_registry(monkeypatch, fake_spec("первый"))
+    app = make_app(["/mcp tools", "/exit"], FakeClient())
+
+    connects = []
+    original = app.agent.connect_mcp_servers
+    monkeypatch.setattr(
+        app.agent, "connect_mcp_servers", lambda *a, **k: connects.append(1) or original(*a, **k)
+    )
+    app.run()
+
+    assert len(connects) == 1
+    assert recording_console.contains("fake_search")
+
+
+def test_mcp_report_shows_the_reason_for_a_failed_server(make_app, recording_console, monkeypatch):
+    fake_registry(
+        monkeypatch,
+        fake_spec("рабочий"),
+        fake_spec("сломанный", command="нет-такой-команды-на-диске"),
+    )
+    client = FakeClient(["Ответ"])
+    make_app(["/mcp", "Вопрос про настолки", "/exit"], client).run()
+
+    assert recording_console.contains("сломанный")
+    assert recording_console.contains("Не удалось подключиться")
+    assert recording_console.contains("fake_search")
+    assert len(client.calls) == 1
