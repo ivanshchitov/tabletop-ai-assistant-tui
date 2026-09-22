@@ -23,6 +23,7 @@ def test_panel_lists_all_commands_with_descriptions():
         # Смена контракта (add-mcp-connection): список команд пополнился /mcp — отчётом
         # о подключении к MCP-серверу и его инструментах.
         "/mcp",
+        "/tool",
     ]
     for command, description in commands_screen.COMMAND_OPTIONS:
         assert command.startswith("/")

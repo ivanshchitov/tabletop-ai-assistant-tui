@@ -19,7 +19,7 @@ from rich.panel import Panel
 from rich.rule import Rule
 from rich.text import Text
 
-from core import config, memory_layers, user_profile
+from core import config, mcp_tools, memory_layers, user_profile
 from core.answer_settings import AnswerFormat, AnswerSettings, ContextStrategy
 from core.api_client import (
     API_KEY_CHARSET_ERROR,
@@ -359,6 +359,9 @@ class TabletopAITUI:
         if command == "/mcp":
             self._print_mcp_report(user_input)
             return True
+        if command == "/tool":
+            self._handle_tool(user_input)
+            return True
         return False
 
     def _open_commands_screen(self) -> None:
@@ -562,6 +565,10 @@ class TabletopAITUI:
                     status.update("● Суммаризация...")
                 elif phase is RequestPhase.FACTS_UPDATE:
                     status.update("● Обновление фактов...")
+                elif phase is RequestPhase.TOOL_CHOICE:
+                    status.update("● Выбор инструмента...")
+                elif phase is RequestPhase.MCP_TOOL:
+                    status.update("● Вызов инструмента...")
                 elif phase is RequestPhase.REQUEST:
                     status.update("● Отправка...")
 
@@ -569,6 +576,7 @@ class TabletopAITUI:
                 meta = self.agent.ask(question, on_phase=report_phase)
             except APIError as exc:
                 self.last_error = str(exc)
+                self._print_tool_line()
                 self._print_memory_line()
                 self._print_compression_line()
                 self._print_facts_line()
@@ -577,6 +585,7 @@ class TabletopAITUI:
                 self.console.rule(style="dim")
                 return
 
+        self._print_tool_line()
         self._print_memory_line()
         self._print_compression_line()
         self._print_facts_line()
@@ -1445,6 +1454,141 @@ class TabletopAITUI:
                 self.console.print(
                     f"[dim]      {escape(tool.name)} — {escape(tool.description)}[/dim]"
                 )
+
+    @staticmethod
+    def _parameter_line(parameter) -> str:
+        """Строка параметра инструмента для отчёта: имя, тип, обязательность, значения."""
+        parts = [parameter.name]
+        if parameter.type:
+            parts.append(f"({parameter.type})")
+        parts.append("обязательный" if parameter.required else "необязательный")
+        if parameter.description:
+            parts.append(f"— {parameter.description}")
+        if parameter.allowed:
+            parts.append("возможные значения: " + ", ".join(parameter.allowed))
+        if parameter.default is not None:
+            parts.append(f"по умолчанию {parameter.default}")
+        return " ".join(parts)
+
+    def _handle_tool(self, user_input: str) -> None:
+        """Команда /tool: перечень инструментов, ручной вызов, переключение автовызова.
+
+        Аргументы здесь значимы — как у `/memory`, `/profile`, `/task` и `/mcp`. Панелью это
+        не сделано по той же причине, что и там: вызов принимает произвольные пары
+        «ключ=значение», а это ещё один режим ввода в `keyboard.py`.
+        """
+        parts = user_input.split()
+        subcommand = parts[1].lower() if len(parts) > 1 else "list"
+        if subcommand == "list":
+            self._print_tool_list()
+            return
+        if subcommand == "auto":
+            self._switch_auto_tools(parts[2:])
+            return
+        if subcommand == "call":
+            self._call_tool_manually(parts[2:])
+            return
+        self._print_tool_usage()
+
+    def _print_tool_usage(self) -> None:
+        self.console.print(
+            "[bold yellow]Формат: /tool list — перечень инструментов, "
+            "/tool call <сервер>.<инструмент> ключ=значение — вызов, "
+            "/tool auto on|off — автовызов.[/bold yellow]"
+        )
+
+    def _print_tool_list(self) -> None:
+        """Перечень инструментов с их входными параметрами — по снимкам запуска, без процессов."""
+        reports = self.agent.mcp_reports()
+        if not reports:
+            self.console.print("[dim]Серверы MCP не настроены.[/dim]")
+            return
+        state = "включён" if self.agent.auto_tools else "выключен"
+        self.console.print(
+            f"[bold cyan]Инструменты MCP (автовызов {state}; вызов: "
+            f"/tool call <сервер>.<инструмент> ключ=значение)[/bold cyan]"
+        )
+        for report in reports:
+            self.console.print(f"[bold]  {escape(report.spec_name)}[/bold]")
+            if report.error:
+                self.console.print(
+                    f"[bold red]    Недоступен: {escape(report.error)}[/bold red]"
+                )
+                continue
+            if not report.tools:
+                self.console.print("[dim]    Инструментов не объявлено[/dim]")
+                continue
+            for tool in report.tools:
+                self.console.print(
+                    f"[dim]    {escape(tool.name)} — {escape(tool.description)}[/dim]"
+                )
+                for parameter in tool.parameters():
+                    self.console.print(f"[dim]      {escape(self._parameter_line(parameter))}[/dim]")
+
+    def _switch_auto_tools(self, arguments: List[str]) -> None:
+        value = arguments[0].lower() if arguments else ""
+        if value not in {"on", "off"}:
+            self.console.print("[bold yellow]Формат: /tool auto on|off[/bold yellow]")
+            return
+        self.agent.auto_tools = value == "on"
+        state = "включён" if self.agent.auto_tools else "выключен"
+        self.console.print(f"[bold green]Автовызов инструмента {state}.[/bold green]")
+
+    def _call_tool_manually(self, arguments: List[str]) -> None:
+        """Ручной вызов: `<сервер>.<инструмент>` и пары `ключ=значение`; к модели не обращается."""
+        if not arguments:
+            self._print_tool_usage()
+            return
+        target = arguments[0]
+        if "." not in target:
+            self._print_tool_usage()
+            return
+        server, _, tool = target.partition(".")
+        if not server or not tool:
+            self._print_tool_usage()
+            return
+        values: Dict[str, str] = {}
+        for pair in arguments[1:]:
+            if "=" not in pair:
+                self.console.print(
+                    "[bold yellow]Аргументы задаются парами ключ=значение.[/bold yellow]"
+                )
+                return
+            key, _, value = pair.partition("=")
+            values[key] = value
+        with self.console.status(
+            "[bold yellow]● Вызов инструмента...[/bold yellow]", spinner="dots"
+        ):
+            result = self.agent.call_mcp_tool(server, tool, values)
+        self._print_tool_result(result)
+
+    def _print_tool_result(self, result) -> None:
+        """Результат вызова: текст чужого процесса печатается с экранированием разметки."""
+        head = f"{result.server}.{result.tool} ({mcp_tools.render_arguments(result.arguments)})"
+        if result.error:
+            self.console.print(
+                f"[bold red]Вызов не удался: {escape(head)} — {escape(result.error)}[/bold red]"
+            )
+            return
+        self.console.print(f"[bold cyan]Результат {escape(head)}:[/bold cyan]")
+        self.console.print(f"[dim]{escape(result.text)}[/dim]")
+
+    def _print_tool_line(self) -> None:
+        """Строка журнала о вызове инструмента: успех, неудача, тишина — когда он не нужен.
+
+        В файл истории не пишется, как строки сжатия, фактов и маршрутизации памяти: это
+        событие текущего обмена, а не часть диалога.
+        """
+        result = self.agent.last_tool
+        if result is None:
+            return
+        if result.error:
+            self.console.print(
+                f"[bold yellow]🔧 Инструмент не вызван: {escape(result.error)}[/bold yellow]"
+            )
+            return
+        head = f"{result.server}.{result.tool} ({mcp_tools.render_arguments(result.arguments)})"
+        self.console.print(f"[dim]🔧 Инструмент {escape(head)}[/dim]")
 
     def _print_facts_line(self) -> None:
         """Строка о блоке фактов: печатается один раз на изменение отчёта агента.

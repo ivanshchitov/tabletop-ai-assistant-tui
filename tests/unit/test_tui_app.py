@@ -2047,8 +2047,10 @@ def test_startup_survives_an_unavailable_server(make_app, recording_console, mon
 
     assert recording_console.contains("MCP: 1/2")
     assert recording_console.contains("1 недоступно")
-    # Сессия работает: вопрос после старта ушёл модели.
-    assert len(client.calls) == 1
+    # Сессия работает: вопрос после старта ушёл модели. Запросов два: смена контракта
+    # (add-mcp-tool-calls) — при доступных инструментах вопросу предшествует запрос выбора
+    # инструмента. Отключается `/tool auto off`.
+    assert len(client.calls) == 2
 
 
 def test_mcp_report_covers_every_server(make_app, recording_console, monkeypatch):
@@ -2128,4 +2130,120 @@ def test_mcp_report_shows_the_reason_for_a_failed_server(make_app, recording_con
     assert recording_console.contains("сломанный")
     assert recording_console.contains("Не удалось подключиться")
     assert recording_console.contains("fake_search")
+    # Два запроса вместо одного — выбор инструмента перед вопросом (add-mcp-tool-calls).
+    assert len(client.calls) == 2
+
+
+# --- команда /tool -----------------------------------------------------------------------
+
+TOOL_CHOICE_ANSWER = '{"server": "рабочий", "tool": "fake_echo", "arguments": {"first": "раз"}}'
+NO_TOOL_ANSWER = '{"tool": null}'
+
+
+def test_tool_command_is_listed_and_completed(make_app):
+    from ui.commands_screen import COMMAND_OPTIONS
+
+    from ui.tui_app import COMMANDS
+
+    assert any(command == "/tool" for command, _ in COMMAND_OPTIONS)
+    assert "/tool" in COMMANDS
+
+
+def test_tool_list_prints_tools_with_parameters(make_app, recording_console, monkeypatch):
+    fake_registry(monkeypatch, fake_spec("рабочий"))
+    client = FakeClient()
+    make_app(["/tool list", "/exit"], client).run()
+
+    assert recording_console.contains("fake_echo")
+    assert recording_console.contains("first")
+    assert recording_console.contains("обязательный")
+    assert client.calls == []
+
+
+def test_tool_without_arguments_prints_the_same_list(make_app, recording_console, monkeypatch):
+    fake_registry(monkeypatch, fake_spec("рабочий"))
+    make_app(["/tool", "/exit"], FakeClient()).run()
+
+    assert recording_console.contains("fake_echo")
+
+
+def test_tool_call_prints_the_result(make_app, recording_console, monkeypatch):
+    fake_registry(monkeypatch, fake_spec("рабочий"))
+    client = FakeClient()
+    make_app(["/tool call рабочий.fake_echo first=раз second=два", "/exit"], client).run()
+
+    assert recording_console.contains("раз")
+    assert recording_console.contains("два")
+    assert client.calls == []
+
+
+def test_tool_call_prints_the_reason_of_a_failure(make_app, recording_console, monkeypatch):
+    fake_registry(monkeypatch, fake_spec("рабочий"))
+    make_app(["/tool call рабочий.нет-такого", "/exit"], FakeClient()).run()
+
+    assert recording_console.contains("Вызов не удался")
+
+
+def test_tool_call_without_tool_name_prints_the_format(make_app, recording_console, monkeypatch):
+    fake_registry(monkeypatch, fake_spec("рабочий"))
+    make_app(["/tool call", "/exit"], FakeClient()).run()
+
+    assert recording_console.contains("/tool call")
+
+
+def test_tool_call_with_broken_argument_prints_the_format(make_app, recording_console, monkeypatch):
+    fake_registry(monkeypatch, fake_spec("рабочий"))
+    make_app(["/tool call рабочий.fake_echo просто-слово", "/exit"], FakeClient()).run()
+
+    assert recording_console.contains("ключ=значение")
+
+
+def test_unknown_subcommand_prints_the_format(make_app, recording_console, monkeypatch):
+    fake_registry(monkeypatch, fake_spec("рабочий"))
+    make_app(["/tool нет-такой-подкоманды", "/exit"], FakeClient()).run()
+
+    assert recording_console.contains("/tool call")
+
+
+def test_tool_auto_toggles_and_prints_state(make_app, recording_console, monkeypatch):
+    fake_registry(monkeypatch, fake_spec("рабочий"))
+    app = make_app(["/tool auto off", "/tool auto on", "/exit"], FakeClient())
+    app.run()
+
+    assert recording_console.contains("выключен")
+    assert recording_console.contains("включён")
+    assert app.agent.auto_tools is True
+
+
+def test_tool_auto_off_stops_the_choice_request(make_app, monkeypatch):
+    fake_registry(monkeypatch, fake_spec("рабочий"))
+    client = FakeClient(["Ответ про настолки"])
+    make_app(["/tool auto off", "Вопрос про настолки", "/exit"], client).run()
+
     assert len(client.calls) == 1
+
+
+def test_journal_line_after_an_automatic_call(make_app, recording_console, monkeypatch):
+    fake_registry(monkeypatch, fake_spec("рабочий"))
+    client = FakeClient([TOOL_CHOICE_ANSWER, "Ответ про настолки"])
+    make_app(["Вопрос про настолки", "/exit"], client).run()
+
+    assert recording_console.contains("fake_echo")
+    assert recording_console.contains("first=раз")
+
+
+def test_no_journal_line_when_no_tool_is_needed(make_app, recording_console, monkeypatch):
+    fake_registry(monkeypatch, fake_spec("рабочий"))
+    client = FakeClient([NO_TOOL_ANSWER, "Ответ про настолки"])
+    make_app(["Вопрос про настолки", "/exit"], client).run()
+
+    assert not recording_console.contains("fake_echo —")
+
+
+def test_journal_line_after_a_failed_call(make_app, recording_console, monkeypatch):
+    fake_registry(monkeypatch, fake_spec("рабочий"))
+    client = FakeClient(["совершенно не JSON", "Ответ про настолки"])
+    make_app(["Вопрос про настолки", "/exit"], client).run()
+
+    assert recording_console.contains("Инструмент не вызван")
+    assert recording_console.contains("Ответ про настолки")
