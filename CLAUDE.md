@@ -18,7 +18,7 @@ echo "OPENCODE_API_KEY=sk-ваш_ключ" > .env   # or set OPENCODE_API_KEY di
 ./tabletop-ai-assistant.py                   # re-execs itself into .venv when one is next to it
 
 .venv/bin/pip install -r requirements-dev.txt
-pytest                      # everything except the `network` marker (966 selected)
+pytest                      # everything except the `network` marker (1063 selected)
 pytest tests/unit -q        # fast layer, no subprocesses (~3s)
 pytest tests/e2e -q         # real app in a pty against a stub API (~130s)
 pytest --snapshot-update    # rewrite the e2e screen snapshots after a deliberate layout change
@@ -151,9 +151,11 @@ than repeating it):
 
 ## Architecture
 
-Two packages: `core/` (agent, settings, prompts, API client, memory layers and stores, the user
+Three packages: `core/` (agent, settings, prompts, API client, memory layers and stores, the user
 profile, the invariants table and its answer check, the task state machine and its pipeline, context
-strategies and the compression logic — no `rich`/terminal dependency) and `ui/`
+strategies and the compression logic, the MCP client and the pure part of the tool choice — no
+`rich`/terminal dependency), `mcp_server/` (the project's **own** MCP server — a separate process,
+outside `core/` and `ui/`, see the MCP block below) and `ui/`
 (`tui_app.py`, `keyboard.py`, `commands_screen.py`, `settings_screen.py`, `branches_screen.py`,
 `models_screen.py` — everything that touches the terminal). Modules inside `core/`
 import each other with relative imports (`from . import config`, `from .answer_settings import
@@ -175,14 +177,18 @@ parents up (`Path(__file__).resolve().parent.parent`) rather than one — it has
 `TABLETOP_REQUEST_TIMEOUT`,
 `TABLETOP_TYPING_DELAY` (the last one read in `ui/tui_app.py`), `TABLETOP_COMPRESS_AFTER` (the
 session setting's default, messages, default 10), `TABLETOP_MAX_SESSION_TOKENS` (the session
-setting's default, tokens, default 20000) and `TABLETOP_MCP_COMMAND`/`TABLETOP_MCP_ARGS` (the MCP
+setting's default, tokens, default 20000), `TABLETOP_MCP_COMMAND`/`TABLETOP_MCP_ARGS` (the MCP
 server's launch command and its space-separated arguments, replacing the whole registry with
-that single entry)
+that single entry), `TABLETOP_DND_API_URL` (the base address of the external API the project's own
+MCP server talks to, read by `mcp_server/dnd_api.py` in that separate process) and
+`TABLETOP_AUTO_TOOLS` (the session's starting state of the automatic tool call, `0` turns it off)
 override the corresponding defaults. They exist so the
 e2e layer can point the app at a local stub server, keep history, long-term memory and the user
 profile in temp files, collapse the typing animation, run the startup MCP sweep against a local
 fake server
-instead of the real one — or exercise compression and the token
+instead of the real one, point the own MCP server at a local HTTP stub instead of the public API,
+switch the automatic tool call off so a test that counts model requests still counts what it
+meant to — or exercise compression and the token
 ceiling in seconds. `HISTORY_FILE`/`MEMORY_FILE`/`PROFILE_FILE`/`TASK_FILE` especially: their paths derive
 from `__file__`, not the working directory, so without the override *any* run — a test run
 included — would write to the single real `history.json`/`memory.json`/`profile.json`/`task.json`
@@ -608,7 +614,8 @@ session. Deliberate decisions baked in:
   the answer.
 
 **MCP (`core/mcp_client.py`, `core/config.MCP_SERVERS`, `/mcp`):** the agent connects to an
-external MCP server over stdio and reports what tools it offers (day 16). Deliberate decisions
+external MCP server over stdio and reports what tools it offers (day 16); day 17 added the
+project's own server and the actual tool calls — see the block after this one. Deliberate decisions
 baked in:
 - **The server is a data record, not code.** `config.MCPServerSpec(name, transport, command, args,
   env_keys, description)` plus the `MCP_SERVERS` registry and `DEFAULT_MCP_SERVER` — the same
@@ -668,6 +675,60 @@ baked in:
   empty unless a test sets it (without it the layer went from ~5s to minutes, hitting the network). The only test that touches the real registry is
   `tests/e2e/test_mcp_registry.py` under the `network` marker, so a server disappearing from the
   package registry cannot redden the default suite.
+
+**Own MCP server and tool calls (`mcp_server/`, `core/mcp_tools.py`, `MCPClient.call_tool`,
+`/tool`):** the project ships its own MCP server over the public D&D 5e rules API
+([dnd5eapi.co](https://www.dnd5eapi.co)) and calls tools from the app — by hand and by the model's
+own choice (day 17). Deliberate decisions baked in:
+- **Three generic tools, not one per section.** The API has ~20 sections of the same shape (list a
+  section, fetch an entry), so `mcp_server/dnd_tools.py` declares `dnd_sections`, `dnd_search` and
+  `dnd_entry`, with the section passed as a parameter and an optional `ruleset` (`2014` default,
+  `2024`). A tool per section would mean twenty near-identical schemas loaded into *every* choice
+  request — the week-4 README's own point about MCP token cost — and a harder choice for the model.
+  The section list comes from the API's index, not from a list in the code, so a new section on the
+  service's side needs no edit here.
+- **The server is a separate process outside `core/` and `ui/`,** registered like any foreign entry
+  (`MCP_SERVERS["dnd-rules"]`, launched with `sys.executable` because `mcp` lives only in the
+  project interpreter). The existing "no tool name in `core`/`ui`" test now also covers `dnd_*`:
+  the app knows the launch command, nothing else. `mcp_server/dnd_api.py` reads
+  `TABLETOP_DND_API_URL` at call time — without it the unit tests would hit the public service.
+- **Arguments are validated before HTTP, and a failure is text.** Missing/empty required parameter,
+  a bad ruleset and an out-of-range limit are rejected with a message naming the allowed values —
+  the *model* reads that message, so it can fix the next choice; an unknown section is checked
+  against the (cached) section index, so the entry itself is never requested. Ordering matters in
+  `_search_tool`/`_entry_tool`: local checks run first, because the section check costs an index
+  request on a cold cache.
+- **`call_tool` repeats `connect`'s one-shot shape** (launch, handshake, `tools/call`, close) and
+  raises `MCPError`, which the agent turns into an `MCPToolResult` snapshot (server, tool,
+  arguments, text, error) — same isolation boundary as `MCPReport`. `MCPTool` now carries
+  `input_schema` and `parameters()`; mcp 2.x exposes it as `input_schema`, snake_case like
+  `server_info`.
+- **The automatic call is a separate auxiliary request, parsed client-side** (`core/mcp_tools.py`,
+  `assets/tool_choice_prompt.md`) — the facts-extractor pattern, no `response_format`. `{"tool":
+  null}` is a normal outcome, not a failure; unparsable output is a failure (`mcp_tools.UNPARSED`),
+  and either way the question still goes out. One call per question: chained calls would need a
+  depth and budget loop. The model may name the tool only — the server is then resolved from the
+  snapshots, and `/tool call` accepts the bare tool name for the same reason (a registry name may
+  contain a space, and the command is split on whitespace).
+- **The result is one system message above the dialogue turns** (`assets/tool_result_prompt.md`),
+  under the memory messages and never written to `history.json` or the session log: reference data
+  goes stale, and on restore it would be false context. Without a call the request shape is
+  unchanged — several tests depend on that.
+- **Auto-call is on by default and costs one request per question.** `config.AUTO_TOOLS` reads
+  `TABLETOP_AUTO_TOOLS`; `/tool auto off` switches it for the session. The e2e harness passes `0`
+  by default (like the collapsed typing animation) — otherwise every test that counts model
+  requests or reads the *first* recorded request would measure the choice request instead; 30 tests
+  said so. `tests/e2e/test_tool_flow.py` turns it on explicitly.
+- **The journal line is the only visible trace** (`🔧 Инструмент …`, or `🔧 Инструмент не вызван: …`
+  on failure, nothing at all when the model declined a tool); the spinner gets
+  `RequestPhase.TOOL_CHOICE` and `RequestPhase.MCP_TOOL`. Tool output is someone else's text, so
+  every printed line goes through `rich.markup.escape`.
+- **Tests:** `tests/dnd_api_stub.py` (a local HTTP stub of the external API) backs
+  `tests/unit/test_dnd_api.py` and `tests/unit/test_dnd_tools.py`; `tests/unit/test_dnd_server.py`
+  runs the server as a real process through `MCPClient`; `tests/fake_mcp_server.py` gained a third
+  tool (`fake_echo`, several parameters) and answers `tools/call`, which is why expectations of its
+  tool list grew by one and the startup-line snapshots went from "2 инструмента" to "3".
+  `tests/e2e/test_dnd_server_live.py` is the `network`-marked contract against the live API.
 
 **Prompt assembly (`core/prompts.py` + `assets/*.md`):**
 - `assets/system_prompt.md` is the base system prompt; `assets/answer_format_compact.md` and
@@ -859,10 +920,15 @@ saved: `dialogues` stays a flat list across branches.
   waiting on the echo loses an answer.
 - `tests/unit/test_keyboard.py` — the only unit file that needs a pty (see above).
 - `tests/unit/test_mcp_client.py` and `tests/fake_mcp_server.py` — the MCP client against a local
-  stdio server run by the test interpreter: handshake, tool list, an empty list (success, not a
-  failure), a missing launch command, a process that does not speak the protocol, a missing `mcp`
+  stdio server run by the test interpreter: handshake, tool list with input schemas, an empty list
+  (success, not a failure), a tool call with arguments, an unknown tool, a missing launch command, a
+  process that does not speak the protocol, a missing `mcp`
   package (the environment, not the server) and the invariant that no server's tool names appear in
   `core/`/`ui/`.
+- `tests/unit/test_dnd_api.py`, `test_dnd_tools.py`, `test_dnd_server.py` and `tests/dnd_api_stub.py`
+  — the project's own MCP server: the HTTP layer against a local stub of the external API, the three
+  tools with their schemas and argument validation, and the server itself as a real process.
+  `tests/unit/test_mcp_tools.py` covers the tool catalog, the choice parsing and the result message.
 - `tests/e2e/` — the real `tabletop-ai-assistant.py` running in `pty.fork()`, with output fed
   through `pyte` so assertions read the *rendered* screen rather than a stream of cursor codes.
   `harness.AppSession` is the driver (`wait_for` searches the scrollback, `wait_on_screen` and
@@ -901,6 +967,11 @@ saved: `dialogues` stays a flat list across branches.
   the retry line and the clean retry, two violating answers producing the rejection and the app
   refusal in `history.json`, a stub refusal shown as is with one request, `/invariants` with zero
   requests, `/clear` keeping the message.
+- `tests/e2e/test_tool_flow.py` — `/tool` in a real pty against the fake server: the tool list with
+  parameters and zero model requests, a manual call printing the result, an unknown tool keeping the
+  session, the automatic call putting the result into the question's request, "no tool needed",
+  `/tool auto off` removing the auxiliary request, an unparsable choice not blocking the answer, an
+  unavailable server, and the tool lines staying out of `history.json`.
 - `tests/e2e/test_mcp_flow.py` — the startup sweep and `/mcp` in a real pty against the fake
   server: the summary line before the prompt, the report with server, protocol and tools,
   `/mcp refresh` re-walking the registry, `/mcp` listed in the `/commands` panel, `/usage`
