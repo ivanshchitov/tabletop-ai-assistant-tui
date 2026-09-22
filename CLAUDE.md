@@ -707,7 +707,11 @@ own choice (day 17). Deliberate decisions baked in:
   `assets/tool_choice_prompt.md`) — the facts-extractor pattern, no `response_format`. `{"tool":
   null}` is a normal outcome, not a failure; unparsable output is a failure (`mcp_tools.UNPARSED`),
   and either way the question still goes out. One call per question: chained calls would need a
-  depth and budget loop. The model may name the tool only — the server is then resolved from the
+  depth and budget loop. `config.TOOL_CHOICE_MAX_WORDS` is 400, not the 80 the short JSON answer
+  suggests: the pool's reasoning models spend 818–1601 output tokens on the choice (measured live
+  against a 22-tool catalog), and a tighter budget returned empty content — the same failure mode
+  as `MAX_MAX_WORDS`. The catalog itself costs ~3200 prompt tokens with four servers connected,
+  which is the MCP overhead the week-4 README describes. The model may name the tool only — the server is then resolved from the
   snapshots, and `/tool call` accepts the bare tool name for the same reason (a registry name may
   contain a space, and the command is split on whitespace).
 - **The result is one system message above the dialogue turns** (`assets/tool_result_prompt.md`),
