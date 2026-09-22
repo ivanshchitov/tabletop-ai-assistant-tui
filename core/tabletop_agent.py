@@ -18,6 +18,7 @@ from . import (
     context_compressor,
     context_strategies,
     invariants,
+    mcp_tools,
     memory_layers,
     prompts,
     task_pipeline,
@@ -52,6 +53,10 @@ class RequestPhase(Enum):
     # Подключение к MCP-серверу: запроса к модели нет, но ожидание для пользователя такое же,
     # как у запроса — индикатору нужна своя подпись.
     MCP_CONNECT = "mcp_connect"
+    # Выбор инструмента моделью и сам вызов инструмента: первое — вспомогательный запрос,
+    # второе — чужой процесс; ждать приходится и там, и там, подписи разные.
+    TOOL_CHOICE = "tool_choice"
+    MCP_TOOL = "mcp_tool"
 
 
 @dataclass
@@ -157,6 +162,21 @@ class MCPReport:
 
 
 @dataclass
+class MCPToolResult:
+    """Снимок вызова инструмента: что вызвали, с чем, что вернулось.
+
+    Как и `MCPReport`, неудача здесь — поле `error`, а не исключение: терминальный слой
+    печатает причину и продолжает сессию, а автоматический вызов не отменяет ответ на вопрос.
+    """
+
+    server: str
+    tool: str
+    arguments: Dict[str, Any] = field(default_factory=dict)
+    text: str = ""
+    error: str = ""
+
+
+@dataclass
 class TaskQueueEntry:
     """Строка очереди задач для отчёта: цель, статус, место в работе и объём артефакта."""
 
@@ -219,6 +239,9 @@ class AgentConfig:
 
     settings: AnswerSettings = field(default_factory=AnswerSettings)
     model: str = config.DEFAULT_MODEL
+    # Автовыбор инструмента — решение сессии, как модель и настройки ответа: между запусками
+    # не сохраняется, выключается командой `/tool auto off`.
+    auto_tools: bool = True
 
     # Плоский доступ на чтение к параметрам настроек ответа.
     @property
@@ -286,6 +309,9 @@ class TabletopAgent:
         # Снимки подключения к MCP: заполняются обходом реестра при запуске приложения и
         # отдаются отчёту как есть — повторный отчёт не поднимает серверные процессы заново.
         self._mcp_reports: Tuple[MCPReport, ...] = ()
+        # Результат последнего вызова инструмента MCP — для журнальной строки интерфейса и
+        # отчётов; живёт один обмен, в лог и в историю не попадает.
+        self._last_tool: Optional[MCPToolResult] = None
         # Решение маршрута последней реплики — для журнальной строки интерфейса.
         self._last_routing: Tuple[memory_layers.MemoryRecord, ...] = ()
         # Лог ходов сессии: пары user/assistant успешных обменов, append-only. system в логе
@@ -349,6 +375,20 @@ class TabletopAgent:
         return self._last_facts
 
     @property
+    def last_tool(self) -> Optional[MCPToolResult]:
+        """Снимок последнего вызова инструмента MCP: None — инструмент не вызывался."""
+        return self._last_tool
+
+    @property
+    def auto_tools(self) -> bool:
+        """Включён ли автоматический выбор инструмента перед вопросом (в пределах сессии)."""
+        return self.config.auto_tools
+
+    @auto_tools.setter
+    def auto_tools(self, value: bool) -> None:
+        self.config.auto_tools = bool(value)
+
+    @property
     def last_invariants(self) -> Optional[InvariantsCheck]:
         """Результат проверки последнего ответа на инварианты — для строк журнала интерфейса."""
         return self._last_invariants
@@ -398,6 +438,11 @@ class TabletopAgent:
         # Маршрут слоёв считается до сборки запроса: запись, сделанная текущей репликой, должна
         # быть видна модели уже в этом запросе. Запросов к модели маршрут не делает.
         self._route_memory(question)
+        # Инструмент выбирается и вызывается до сборки запроса: его результат — данные
+        # текущего вопроса, поэтому он должен попасть в этот же запрос.
+        self._last_tool = (
+            self._choose_and_call_tool(question, on_phase) if self.config.auto_tools else None
+        )
         skip = self._prepare_context(question, user_prompt, on_phase)
         self._signal(on_phase, RequestPhase.REQUEST)
         messages = self._build_messages(user_prompt, skip)
@@ -541,6 +586,88 @@ class TabletopAgent:
             self.mcp_report(spec, on_phase=on_phase) for spec in config.mcp_servers()
         )
         return self._mcp_reports
+
+    def call_mcp_tool(
+        self,
+        server: str,
+        tool: str,
+        arguments: Optional[Dict[str, Any]] = None,
+        on_phase: Optional[Callable[["RequestPhase"], None]] = None,
+    ) -> MCPToolResult:
+        """Вызвать инструмент названного сервера реестра и отдать снимок результата.
+
+        К модели не обращается: это чужой процесс, а не запрос. Неизвестный сервер,
+        неизвестный инструмент и недоступный сервер — поля `error` снимка, а не исключения:
+        терминальный слой печатает причину, автоматический вызов идёт дальше без данных.
+        """
+        arguments = dict(arguments or {})
+        spec = self._spec_by_name(server)
+        if spec is None:
+            known = ", ".join(entry.name for entry in config.mcp_servers())
+            return MCPToolResult(
+                server=server,
+                tool=tool,
+                arguments=arguments,
+                error=f"сервер «{server}» не найден в реестре (есть: {known})",
+            )
+        self._signal(on_phase, RequestPhase.MCP_TOOL)
+        try:
+            text = MCPClient(spec).call_tool(tool, arguments)
+        except MCPError as error:
+            return MCPToolResult(server=spec.name, tool=tool, arguments=arguments, error=str(error))
+        return MCPToolResult(server=spec.name, tool=tool, arguments=arguments, text=text)
+
+    @staticmethod
+    def _spec_by_name(server: str) -> Optional[config.MCPServerSpec]:
+        for spec in config.mcp_servers():
+            if spec.name == server:
+                return spec
+        return None
+
+    def _choose_and_call_tool(
+        self,
+        question: str,
+        on_phase: Optional[Callable[["RequestPhase"], None]],
+    ) -> Optional[MCPToolResult]:
+        """Выбрать инструмент моделью и вызвать его — до отправки вопроса.
+
+        Вспомогательный запрос устроен как извлекатель фактов: инструкция из ассета, разбор
+        ответа на стороне приложения, расход в общий журнал сессии. Любой сбой — ошибка
+        запроса, неразобранный ответ, неизвестное имя, отказ сервера — возвращается снимком
+        с `error`: вопрос уйдёт без данных инструмента, но уйдёт обязательно.
+        """
+        reports = [report for report in self._mcp_reports if not report.error and report.tools]
+        if not reports:
+            return None
+        self._signal(on_phase, RequestPhase.TOOL_CHOICE)
+        try:
+            meta = self.client.ask_with_usage_messages(
+                mcp_tools.build_choice_messages(reports, question),
+                max_tokens=config.max_tokens_for_words(config.TOOL_CHOICE_MAX_WORDS),
+                temperature=None,
+                model=self.config.model,
+            )
+        except APIError as error:
+            return MCPToolResult(server="", tool="", error=f"выбор инструмента не удался: {error}")
+        self._last_result = meta
+        self._ledger.record(meta)
+        choice = mcp_tools.parse_choice(meta.content)
+        if choice is mcp_tools.UNPARSED:
+            return MCPToolResult(
+                server="", tool="", error="ответ выбора инструмента не разобран"
+            )
+        if choice is None:
+            return None
+        server = choice.server or self._server_of_tool(reports, choice.tool)
+        return self.call_mcp_tool(server, choice.tool, choice.arguments, on_phase=on_phase)
+
+    @staticmethod
+    def _server_of_tool(reports: List[MCPReport], tool: str) -> str:
+        """Сервер, объявивший инструмент: модель вправе назвать только имя инструмента."""
+        for report in reports:
+            if any(declared.name == tool for declared in report.tools):
+                return report.spec_name
+        return ""
 
     def mcp_reports(self) -> Tuple[MCPReport, ...]:
         """Снимки подключения, снятые последним обходом реестра; процессов не запускает."""
@@ -942,6 +1069,9 @@ class TabletopAgent:
         strategy_memory = self._strategy_memory_message()
         if strategy_memory is not None:
             messages.append(strategy_memory)
+        tool_result = self._tool_result_message()
+        if tool_result is not None:
+            messages.append(tool_result)
         messages.extend(self._view_turns(skip))
         messages.append({"role": "user", "content": user_prompt})
         return messages
@@ -987,6 +1117,21 @@ class TabletopAgent:
         content = memory_layers.memory_message(records)
         if content is None:
             return None
+        return {"role": "system", "content": content}
+
+    def _tool_result_message(self) -> Optional[Dict[str, str]]:
+        """Системное сообщение с результатом вызова инструмента; без вызова — None.
+
+        Стоит ниже памяти и выше ходов диалога: это данные, добытые под текущий вопрос, а не
+        то, что известно о пользователе. В лог сессии и в файл истории не попадает — данные
+        справочника устаревают, и при восстановлении сессии были бы ложным контекстом.
+        """
+        result = self._last_tool
+        if result is None or result.error or not result.text:
+            return None
+        content = mcp_tools.tool_result_message(
+            result.server, result.tool, result.arguments, result.text
+        )
         return {"role": "system", "content": content}
 
     def _strategy_memory_message(self) -> Optional[Dict[str, str]]:

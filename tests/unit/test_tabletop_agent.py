@@ -2030,7 +2030,7 @@ def test_mcp_report_after_successful_connection():
     assert report.server_name == "фейковый-сервер"
     assert report.server_version == "9.9.9"
     assert report.protocol_version == "2025-06-18"
-    assert [tool.name for tool in report.tools] == ["fake_search", "fake_details"]
+    assert [tool.name for tool in report.tools] == ["fake_search", "fake_details", "fake_echo"]
     assert report.error == ""
 
 
@@ -2078,7 +2078,7 @@ def test_connect_mcp_servers_covers_the_whole_registry(monkeypatch):
 
     assert [r.spec_name for r in reports] == [first.name, second.name]
     assert reports[0].server_name == "фейковый-сервер"
-    assert [t.name for t in reports[0].tools] == ["fake_search", "fake_details"]
+    assert [t.name for t in reports[0].tools] == ["fake_search", "fake_details", "fake_echo"]
     assert reports[1].tools == ()
     assert all(r.error == "" for r in reports)
 
@@ -2130,3 +2130,175 @@ def test_connect_mcp_servers_does_not_touch_the_model(monkeypatch):
 
     assert client.calls == []
     assert agent.session_usage.requests == 0
+
+
+# --- вызов инструмента MCP -------------------------------------------------------------
+
+
+def registry_of(monkeypatch, *specs) -> None:
+    monkeypatch.setattr(config, "mcp_servers", lambda: specs)
+
+
+def connected_agent(monkeypatch, client=None, answers=None):
+    """Агент с единственным фейковым сервером, уже обойдённым при «запуске»."""
+    spec = fake_mcp_spec()._replace(name="фейковый")
+    registry_of(monkeypatch, spec)
+    agent, client = make_agent(client=client, answers=answers)
+    agent.connect_mcp_servers()
+    return agent, client
+
+
+def test_call_mcp_tool_returns_snapshot(monkeypatch):
+    agent, _ = connected_agent(monkeypatch)
+
+    result = agent.call_mcp_tool("фейковый", "fake_echo", {"first": "раз"})
+
+    assert result.server == "фейковый"
+    assert result.tool == "fake_echo"
+    assert result.arguments == {"first": "раз"}
+    assert "раз" in result.text
+    assert result.error == ""
+
+
+def test_call_mcp_tool_on_unknown_server_is_an_error(monkeypatch):
+    agent, _ = connected_agent(monkeypatch)
+
+    result = agent.call_mcp_tool("нет-такого-сервера", "fake_echo", {})
+
+    assert result.error
+    assert "нет-такого-сервера" in result.error
+    assert result.text == ""
+
+
+def test_call_mcp_tool_on_unknown_tool_is_an_error(monkeypatch):
+    agent, _ = connected_agent(monkeypatch)
+
+    result = agent.call_mcp_tool("фейковый", "нет-такого-инструмента", {})
+
+    assert result.error
+    assert result.text == ""
+
+
+def test_call_mcp_tool_does_not_touch_the_model(monkeypatch):
+    agent, client = connected_agent(monkeypatch)
+
+    agent.call_mcp_tool("фейковый", "fake_search", {})
+
+    assert client.calls == []
+    assert agent.session_usage.requests == 0
+
+
+def test_call_mcp_tool_signals_phase(monkeypatch):
+    agent, _ = connected_agent(monkeypatch)
+    phases = []
+
+    agent.call_mcp_tool("фейковый", "fake_search", {}, on_phase=phases.append)
+
+    assert RequestPhase.MCP_TOOL in phases
+
+
+# --- автоматический выбор инструмента --------------------------------------------------
+
+
+CHOICE = '{"server": "фейковый", "tool": "fake_echo", "arguments": {"first": "гоблин"}}'
+NO_CHOICE = '{"tool": null}'
+
+
+def test_auto_tool_call_puts_result_into_the_request(monkeypatch):
+    agent, client = connected_agent(monkeypatch, answers=[CHOICE, "Ответ модели"])
+
+    agent.ask("сколько хитов у гоблина?")
+
+    system_contents = [m["content"] for m in client.calls[-1]["messages"] if m["role"] == "system"]
+    assert any("fake_echo" in content and "гоблин" in content for content in system_contents)
+    assert agent.last_tool.tool == "fake_echo"
+    assert agent.last_tool.error == ""
+
+
+def test_auto_tool_result_sits_above_the_dialogue(monkeypatch):
+    agent, client = connected_agent(monkeypatch, answers=[CHOICE, "Ответ модели"])
+
+    agent.ask("сколько хитов у гоблина?")
+
+    roles = [m["role"] for m in client.calls[-1]["messages"]]
+    assert roles[-1] == "user"
+    assert roles.index("user") == len(roles) - 1
+
+
+def test_auto_tool_choice_request_is_counted_in_the_ledger(monkeypatch):
+    agent, client = connected_agent(monkeypatch, answers=[CHOICE, "Ответ модели"])
+
+    agent.ask("вопрос")
+
+    assert len(client.calls) == 2
+    assert agent.session_usage.requests == 2
+
+
+def test_model_may_decide_no_tool_is_needed(monkeypatch):
+    agent, client = connected_agent(monkeypatch, answers=[NO_CHOICE, "Ответ модели"])
+
+    agent.ask("вопрос без справочника")
+
+    assert agent.last_tool is None
+    system_contents = [m["content"] for m in client.calls[-1]["messages"] if m["role"] == "system"]
+    assert not any("fake_echo" in content for content in system_contents)
+
+
+def test_unparsable_choice_does_not_block_the_answer(monkeypatch):
+    agent, client = connected_agent(monkeypatch, answers=["совершенно не JSON", "Ответ модели"])
+
+    meta = agent.ask("вопрос")
+
+    assert meta.content == "Ответ модели"
+    assert agent.last_tool.error
+
+
+def test_failed_tool_call_does_not_block_the_answer(monkeypatch):
+    bad_choice = '{"server": "фейковый", "tool": "нет-такого", "arguments": {}}'
+    agent, client = connected_agent(monkeypatch, answers=[bad_choice, "Ответ модели"])
+
+    meta = agent.ask("вопрос")
+
+    assert meta.content == "Ответ модели"
+    assert agent.last_tool.error
+
+
+def test_auto_tools_disabled_sends_no_choice_request(monkeypatch):
+    agent, client = connected_agent(monkeypatch, answers=["Ответ модели"])
+    agent.auto_tools = False
+
+    agent.ask("вопрос")
+
+    assert len(client.calls) == 1
+    assert agent.last_tool is None
+
+
+def test_request_shape_without_tool_is_unchanged(monkeypatch):
+    agent, client = connected_agent(monkeypatch, answers=[NO_CHOICE, "Ответ модели"])
+
+    agent.ask("вопрос")
+
+    messages = sans_invariants(client.calls[-1]["messages"])
+    assert [m["role"] for m in messages] == ["system", "user"]
+
+
+def test_tool_result_is_not_written_to_history(monkeypatch, tmp_path):
+    history = HistoryManager(tmp_path / "history.json")
+    agent, _ = connected_agent(monkeypatch, answers=[CHOICE, "Ответ модели"])
+    agent.history = history
+
+    agent.ask("сколько хитов у гоблина?")
+
+    stored = json.loads((tmp_path / "history.json").read_text(encoding="utf-8"))
+    assert "fake_echo" not in json.dumps(stored, ensure_ascii=False)
+
+
+def test_tool_result_is_not_kept_in_the_session_log(monkeypatch):
+    """Результат живёт один запрос: следующий вопрос не тащит его за собой."""
+    agent, client = connected_agent(monkeypatch, answers=[CHOICE, "Ответ", NO_CHOICE, "Ответ 2"])
+
+    agent.ask("первый вопрос")
+    agent.ask("второй вопрос")
+
+    system_contents = [m["content"] for m in client.calls[-1]["messages"] if m["role"] == "system"]
+    assert not any("fake_echo" in content for content in system_contents)
