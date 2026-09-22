@@ -240,8 +240,9 @@ class AgentConfig:
     settings: AnswerSettings = field(default_factory=AnswerSettings)
     model: str = config.DEFAULT_MODEL
     # Автовыбор инструмента — решение сессии, как модель и настройки ответа: между запусками
-    # не сохраняется, выключается командой `/tool auto off`.
-    auto_tools: bool = True
+    # не сохраняется, выключается командой `/tool auto off`. Значение по умолчанию берётся из
+    # конфигурации, поэтому его можно снять на весь запуск переменной окружения.
+    auto_tools: bool = field(default_factory=lambda: config.AUTO_TOOLS)
 
     # Плоский доступ на чтение к параметрам настроек ответа.
     @property

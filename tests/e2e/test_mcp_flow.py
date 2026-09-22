@@ -19,7 +19,7 @@ def test_startup_connects_and_prints_the_summary(app, stub):
     with app() as session:
         text = session.wait_for("MCP: 1/1")
 
-    assert "2 инструмента" in text
+    assert "3 инструмента" in text
     assert stub.call_count == 0
 
 

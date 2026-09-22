@@ -2184,6 +2184,14 @@ def test_tool_call_prints_the_reason_of_a_failure(make_app, recording_console, m
     assert recording_console.contains("Вызов не удался")
 
 
+def test_tool_call_without_server_name_resolves_it_by_the_tool(make_app, recording_console, monkeypatch):
+    """Имя сервера необязательно: в реестре оно может содержать пробел, а команда — по словам."""
+    fake_registry(monkeypatch, fake_spec("рабочий"))
+    make_app(["/tool call fake_echo first=раз", "/exit"], FakeClient()).run()
+
+    assert recording_console.contains("раз")
+
+
 def test_tool_call_without_tool_name_prints_the_format(make_app, recording_console, monkeypatch):
     fake_registry(monkeypatch, fake_spec("рабочий"))
     make_app(["/tool call", "/exit"], FakeClient()).run()

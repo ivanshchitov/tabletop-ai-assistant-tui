@@ -1493,7 +1493,7 @@ class TabletopAITUI:
     def _print_tool_usage(self) -> None:
         self.console.print(
             "[bold yellow]Формат: /tool list — перечень инструментов, "
-            "/tool call <сервер>.<инструмент> ключ=значение — вызов, "
+            "/tool call <инструмент> ключ=значение — вызов, "
             "/tool auto on|off — автовызов.[/bold yellow]"
         )
 
@@ -1506,7 +1506,7 @@ class TabletopAITUI:
         state = "включён" if self.agent.auto_tools else "выключен"
         self.console.print(
             f"[bold cyan]Инструменты MCP (автовызов {state}; вызов: "
-            f"/tool call <сервер>.<инструмент> ключ=значение)[/bold cyan]"
+            f"/tool call <инструмент> ключ=значение)[/bold cyan]"
         )
         for report in reports:
             self.console.print(f"[bold]  {escape(report.spec_name)}[/bold]")
@@ -1535,18 +1535,22 @@ class TabletopAITUI:
         self.console.print(f"[bold green]Автовызов инструмента {state}.[/bold green]")
 
     def _call_tool_manually(self, arguments: List[str]) -> None:
-        """Ручной вызов: `<сервер>.<инструмент>` и пары `ключ=значение`; к модели не обращается."""
+        """Ручной вызов: имя инструмента (или `сервер.инструмент`) и пары `ключ=значение`.
+
+        Имя сервера необязательно: у записи реестра оно может содержать пробел, а команда
+        разбирается по словам — тогда форма `сервер.инструмент` стала бы непроизносимой.
+        Сервер по имени инструмента находится в снимках подключения, как при автовызове.
+        """
         if not arguments:
             self._print_tool_usage()
             return
         target = arguments[0]
-        if "." not in target:
+        server, _, tool = target.rpartition(".")
+        if not tool:
             self._print_tool_usage()
             return
-        server, _, tool = target.partition(".")
-        if not server or not tool:
-            self._print_tool_usage()
-            return
+        if not server:
+            server = self._server_of_tool(tool)
         values: Dict[str, str] = {}
         for pair in arguments[1:]:
             if "=" not in pair:
@@ -1561,6 +1565,13 @@ class TabletopAITUI:
         ):
             result = self.agent.call_mcp_tool(server, tool, values)
         self._print_tool_result(result)
+
+    def _server_of_tool(self, tool: str) -> str:
+        """Сервер, объявивший инструмент, по снимкам запуска; не нашли — пустое имя."""
+        for report in self.agent.mcp_reports():
+            if any(declared.name == tool for declared in report.tools):
+                return report.spec_name
+        return ""
 
     def _print_tool_result(self, result) -> None:
         """Результат вызова: текст чужого процесса печатается с экранированием разметки."""

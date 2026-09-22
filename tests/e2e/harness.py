@@ -62,6 +62,7 @@ class AppSession:
         tasks_dir: Optional[Path] = None,
         mcp_command: Optional[str] = None,
         mcp_args: Optional[str] = None,
+        auto_tools: Optional[bool] = None,
         api_url: Optional[str] = None,
         cols: int = 100,
         rows: int = 40,
@@ -124,6 +125,12 @@ class AppSession:
             # поднимала бы настоящий сервер из реестра, то есть лезла бы в сеть за npx.
             env["TABLETOP_MCP_COMMAND"] = mcp_command
             env["TABLETOP_MCP_ARGS"] = mcp_args or ""
+        if auto_tools is not None:
+            # Автовыбор инструмента стоит вспомогательного запроса перед каждым вопросом.
+            # Прогон выключает его по умолчанию (как свёрнута анимация печати): иначе каждый
+            # тест, считающий запросы к модели или читающий первый из них, проверял бы не то,
+            # что собирался. Тесты самого автовызова включают его явно.
+            env["TABLETOP_AUTO_TOOLS"] = "1" if auto_tools else "0"
         if api_url is not None:
             env["OPENCODE_API_URL"] = api_url
             env["TABLETOP_REQUEST_TIMEOUT"] = "1"

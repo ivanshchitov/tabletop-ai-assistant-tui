@@ -108,6 +108,7 @@ def app(stub, history_file, memory_file, profile_file, task_file, tasks_dir, tui
         # поднимал бы настоящий сервер из реестра, то есть ходил бы в сеть за npx.
         kwargs.setdefault("mcp_command", sys.executable)
         kwargs.setdefault("mcp_args", str(FAKE_MCP_SERVER))
+        kwargs.setdefault("auto_tools", False)
         session = AppSession(
             api_url=stub.url,
             history_file=history_file,
