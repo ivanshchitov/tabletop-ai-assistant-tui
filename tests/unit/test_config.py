@@ -1,6 +1,8 @@
 """Конфигурация: пересчёт токенов, переключатели окружения, доступ к ключу."""
 
 import importlib
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -286,3 +288,20 @@ def test_mcp_servers_override_replaces_the_whole_registry(monkeypatch):
     assert servers[0].command == "python3"
     assert servers[0].args == ("-u", "fake_server.py")
     assert servers[0].name == config.MCP_OVERRIDE_NAME
+
+
+def test_own_dnd_server_is_in_registry():
+    """Свой сервер подключается так же, как чужие: записью реестра, а не отдельным путём."""
+    spec = config.MCP_SERVERS["dnd-rules"]
+    assert spec.transport == "stdio"
+    assert spec.args and spec.args[0].endswith("dnd_server.py")
+    assert "TABLETOP_DND_API_URL" in spec.env_keys
+
+
+def test_own_dnd_server_script_exists():
+    assert Path(config.MCP_SERVERS["dnd-rules"].args[0]).is_file()
+
+
+def test_own_dnd_server_runs_by_project_interpreter():
+    """Сервер запускается тем же интерпретатором, что и приложение: пакет mcp есть только в нём."""
+    assert config.MCP_SERVERS["dnd-rules"].command == sys.executable

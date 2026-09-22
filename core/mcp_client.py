@@ -1,4 +1,4 @@
-"""Клиент MCP: соединение по stdio, рукопожатие и список инструментов.
+"""Клиент MCP: соединение по stdio, рукопожатие, список инструментов и вызов инструмента.
 
 Приложение синхронное (главный цикл — обычный ``input()``), а официальный пакет ``mcp``
 асинхронный. Граница двух миров спрятана здесь: наружу модуль отдаёт обычные синхронные
@@ -16,8 +16,8 @@
 import asyncio
 import os
 import sys
-from dataclasses import dataclass
-from typing import Dict, List, Optional
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
 
 from . import config
 
@@ -28,10 +28,44 @@ class MCPError(Exception):
 
 @dataclass(frozen=True)
 class MCPTool:
-    """Инструмент так, как его объявил сервер."""
+    """Инструмент так, как его объявил сервер: имя, описание и схема входных параметров."""
 
     name: str
     description: str
+    input_schema: Dict[str, Any] = field(default_factory=dict)
+
+    def parameters(self) -> List["MCPParameter"]:
+        """Параметры схемы в удобном для отчёта виде; чужая схема может быть какой угодно."""
+        properties = self.input_schema.get("properties") if isinstance(self.input_schema, dict) else None
+        if not isinstance(properties, dict):
+            return []
+        required = self.input_schema.get("required") or []
+        parameters = []
+        for name, definition in properties.items():
+            definition = definition if isinstance(definition, dict) else {}
+            parameters.append(
+                MCPParameter(
+                    name=str(name),
+                    type=str(definition.get("type", "")),
+                    description=str(definition.get("description", "")),
+                    required=name in required,
+                    allowed=tuple(str(value) for value in definition.get("enum", []) or []),
+                    default=None if definition.get("default") is None else str(definition["default"]),
+                )
+            )
+        return parameters
+
+
+@dataclass(frozen=True)
+class MCPParameter:
+    """Один входной параметр инструмента — для отчёта и для запроса выбора инструмента."""
+
+    name: str
+    type: str
+    description: str
+    required: bool
+    allowed: tuple = ()
+    default: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -106,13 +140,74 @@ class MCPClient:
                 listing = await asyncio.wait_for(session.list_tools(), self.timeout)
 
         info = initialized.server_info
-        tools = [MCPTool(name=tool.name, description=tool.description or "") for tool in listing.tools]
+        tools = [
+            MCPTool(
+                name=tool.name,
+                description=tool.description or "",
+                # mcp 2.x отдаёт поля в snake_case — как server_info и protocol_version выше.
+                input_schema=dict(tool.input_schema or {}),
+            )
+            for tool in listing.tools
+        ]
         return MCPConnection(
             server_name=info.name,
             server_version=info.version or "",
             protocol_version=initialized.protocol_version,
             tools=tools,
         )
+
+
+    def call_tool(self, name: str, arguments: Optional[Dict[str, Any]] = None) -> str:
+        """Вызвать инструмент сервера и вернуть текст результата.
+
+        Соединение одноразовое, как у `connect()`: процесс поднимается на вызов и гасится
+        сразу после ответа. Любой сбой — отсутствие команды, отказ рукопожатия, неизвестный
+        инструмент, ошибка самого инструмента — приходит как `MCPError`, чтобы вызывающая
+        сторона превратила его в данные снимка, а не в падение сессии.
+        """
+        if self.spec.transport != "stdio":
+            raise MCPError(f"Транспорт «{self.spec.transport}» не поддерживается")
+        _require_sdk()
+        try:
+            return asyncio.run(self._call_tool(name, arguments or {}))
+        except MCPError:
+            raise
+        except asyncio.TimeoutError as error:
+            raise MCPError(f"Сервер не ответил за {self.timeout:.0f} с") from error
+        except FileNotFoundError as error:
+            raise MCPError(f"Команда запуска не найдена: {self.spec.command}") from error
+        except BaseException as error:  # noqa: BLE001
+            raise MCPError(_describe(error)) from error
+
+    async def _call_tool(self, name: str, arguments: Dict[str, Any]) -> str:
+        from mcp import ClientSession, StdioServerParameters
+        from mcp.client.stdio import stdio_client
+
+        parameters = StdioServerParameters(
+            command=self.spec.command,
+            args=list(self.spec.args),
+            env=self.server_environment() or None,
+        )
+        async with stdio_client(parameters) as (read, write):
+            async with ClientSession(read, write) as session:
+                await asyncio.wait_for(session.initialize(), self.timeout)
+                result = await asyncio.wait_for(
+                    session.call_tool(name, arguments), self.timeout
+                )
+        text = _result_text(result)
+        if getattr(result, "is_error", False) or getattr(result, "isError", False):
+            raise MCPError(text or f"Инструмент «{name}» вернул ошибку")
+        return text
+
+
+def _result_text(result: Any) -> str:
+    """Собрать текстовые блоки ответа в одну строку: сервер вправе прислать их несколько."""
+    blocks = []
+    for item in getattr(result, "content", []) or []:
+        text = getattr(item, "text", None)
+        if text:
+            blocks.append(text)
+    return "\n".join(blocks).strip()
 
 
 def _require_sdk() -> None:

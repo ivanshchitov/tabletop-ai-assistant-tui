@@ -38,7 +38,7 @@ def test_connect_completes_handshake():
 def test_tools_are_returned_with_names_and_descriptions():
     connection = MCPClient(fake_spec()).connect()
     names = [tool.name for tool in connection.tools]
-    assert names == ["fake_search", "fake_details"]
+    assert names == ["fake_search", "fake_details", "fake_echo"]
     assert connection.tools[0].description == "Поиск по фейковому каталогу"
 
 
@@ -82,7 +82,17 @@ def test_tool_names_are_not_hardcoded_in_the_app():
     """Замена сервера — одна запись реестра: имена его инструментов в коде не встречаются."""
     roots = [Path(__file__).resolve().parents[2] / name for name in ("core", "ui")]
     sources = [path.read_text(encoding="utf-8") for root in roots for path in root.glob("*.py")]
-    for name in ("bgg_search", "bgg_game_details", "bgg_top_games", "bgg_user_collection"):
+    for name in (
+        "bgg_search",
+        "bgg_game_details",
+        "bgg_top_games",
+        "bgg_user_collection",
+        # Свой сервер проекта — такой же чужой процесс: его инструменты тоже приходят
+        # по протоколу, а не из кода приложения.
+        "dnd_sections",
+        "dnd_search",
+        "dnd_entry",
+    ):
         assert not any(name in source for source in sources)
 
 
@@ -110,3 +120,47 @@ def test_missing_sdk_reports_the_environment_not_the_server(monkeypatch):
     assert "mcp" in message
     assert "3.10" in message
     assert sys.executable in message
+
+
+# --- вызов инструмента ---
+
+
+def test_call_tool_returns_text_with_arguments():
+    result = MCPClient(fake_spec()).call_tool("fake_echo", {"first": "раз", "second": "два"})
+    assert "раз" in result
+    assert "два" in result
+
+
+def test_call_tool_without_arguments():
+    assert MCPClient(fake_spec()).call_tool("fake_search", {})
+
+
+def test_call_unknown_tool_raises_mcp_error():
+    with pytest.raises(MCPError) as excinfo:
+        MCPClient(fake_spec()).call_tool("нет-такого-инструмента", {})
+    assert str(excinfo.value)
+
+
+def test_call_tool_on_unavailable_server_raises_mcp_error():
+    spec = fake_spec()._replace(command="нет-такой-команды-на-диске")
+    with pytest.raises(MCPError):
+        MCPClient(spec).call_tool("fake_search", {})
+
+
+def test_call_tool_leaves_no_process_behind():
+    """Соединение одноразовое: после вызова процесс сервера не остаётся висеть."""
+    before = _fake_server_processes()
+    MCPClient(fake_spec()).call_tool("fake_search", {})
+    assert _fake_server_processes() == before
+
+
+def test_tools_carry_input_schemas():
+    connection = MCPClient(fake_spec()).connect()
+    echo = next(tool for tool in connection.tools if tool.name == "fake_echo")
+    assert echo.input_schema["properties"]["first"]["type"] == "string"
+    assert echo.input_schema["required"] == ["first"]
+
+
+def _fake_server_processes() -> int:
+    listing = subprocess.run(["ps", "-A", "-o", "command"], capture_output=True, text=True)
+    return listing.stdout.count(str(FAKE_SERVER))

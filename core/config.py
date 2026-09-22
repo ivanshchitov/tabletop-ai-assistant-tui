@@ -1,6 +1,7 @@
 """Загрузка конфигурации и переменных окружения."""
 
 import os
+import sys
 from pathlib import Path
 from typing import NamedTuple, Optional, Tuple
 
@@ -84,6 +85,10 @@ DEFAULT_CONTEXT_STRATEGY = CONTEXT_STRATEGIES[0]
 # вытесняются самые старые по времени появления, чтобы блок не рос бесконечно.
 FACTS_MAX_WORDS = 120
 MAX_FACTS_KEYS = 20
+
+# Выбор инструмента MCP: ответ — один короткий JSON-объект, поэтому потолок выхода маленький.
+# Он же удерживает цену автовыбора: запрос уходит перед каждым вопросом.
+TOOL_CHOICE_MAX_WORDS = 80
 
 # Память агента. Долговременная память (сведения о пользователе между сессиями) живёт в отдельном
 # файле: /clear её не касается, поэтому хранить её в конверте истории нельзя. Путь выводится из
@@ -202,6 +207,17 @@ MCP_SERVERS = {
         args=("-y", "boardgame-rules-mcp"),
         env_keys=(),
         description="Рулбуки 1jour-1jeu: поиск правил игры, текст рулбука, структурированная сводка",
+    ),
+    "dnd-rules": MCPServerSpec(
+        name="dnd-rules",
+        transport="stdio",
+        # Собственный сервер проекта — отдельный процесс, как и чужие записи реестра.
+        # Запускается тем же интерпретатором, что и приложение: пакет `mcp` стоит только в нём,
+        # а системный python3 на 3.9 его вовсе не поставит.
+        command=sys.executable,
+        args=(str(BASE_DIR / "mcp_server" / "dnd_server.py"),),
+        env_keys=("TABLETOP_DND_API_URL",),
+        description="Справочник D&D 5e: разделы, поиск по разделу, запись по идентификатору",
     ),
     "rule-disputes": MCPServerSpec(
         name="rule-disputes",
