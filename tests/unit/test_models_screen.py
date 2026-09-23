@@ -11,9 +11,9 @@ def test_panel_lists_all_available_models():
 
 
 def test_initial_state_puts_cursor_on_current_model():
-    state = initial_state("kimi-k2.5")
-    assert state.selected == "kimi-k2.5"
-    assert state.current == "kimi-k2.5"
+    state = initial_state("kimi-k3")
+    assert state.selected == "kimi-k3"
+    assert state.current == "kimi-k3"
     assert not state.confirmed
     assert not state.cancelled
 
@@ -30,7 +30,7 @@ def test_down_and_up_move_selection_with_wraparound():
 
 
 def test_enter_confirms_selected_model():
-    state = apply_key(initial_state("glm-5.1"), keyboard.DOWN)
+    state = apply_key(initial_state("glm-5.3-flash"), keyboard.DOWN)
     state = apply_key(state, keyboard.ENTER)
     assert state.confirmed
     assert not state.cancelled
@@ -38,7 +38,7 @@ def test_enter_confirms_selected_model():
 
 
 def test_esc_cancels_panel():
-    state = apply_key(initial_state("glm-5.1"), keyboard.ESC)
+    state = apply_key(initial_state("glm-5.3-flash"), keyboard.ESC)
     assert state.cancelled
     assert not state.confirmed
 

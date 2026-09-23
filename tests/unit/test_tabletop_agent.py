@@ -350,14 +350,14 @@ def test_past_user_turns_keep_their_own_word_limit():
 
 def test_ask_passes_session_settings_and_model():
     agent, client = make_agent(
-        settings=AnswerSettings(max_words=300, temperature=1.1), model="kimi-k2.6"
+        settings=AnswerSettings(max_words=300, temperature=1.1), model="kimi-k3"
     )
     agent.ask("Вопрос")
 
     call = client.calls[0]
     assert call["max_tokens"] == config.max_tokens_for_words(300)
     assert call["temperature"] == 1.1
-    assert call["model"] == "kimi-k2.6"
+    assert call["model"] == "kimi-k3"
 
 
 def test_ask_returns_answer_meta():
@@ -372,14 +372,14 @@ def test_ask_returns_answer_meta():
 
 def test_config_exposes_all_five_settings():
     agent, _ = make_agent(
-        settings=AnswerSettings(max_words=300, temperature=1.1), model="kimi-k2.6"
+        settings=AnswerSettings(max_words=300, temperature=1.1), model="kimi-k3"
     )
 
     assert agent.config.format is AnswerFormat.FREE
     assert agent.config.max_words == 300
     assert agent.config.list_limit == config.DEFAULT_LIST_LIMIT
     assert agent.config.temperature == 1.1
-    assert agent.config.model == "kimi-k2.6"
+    assert agent.config.model == "kimi-k3"
 
 
 def test_config_model_change_reaches_next_request():

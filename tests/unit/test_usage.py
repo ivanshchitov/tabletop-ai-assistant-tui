@@ -4,8 +4,8 @@ from core import usage
 
 
 def test_estimate_cost_known_model():
-    cost = usage.estimate_cost("deepseek-v4-flash", prompt_tokens=1_000_000, completion_tokens=1_000_000)
-    assert cost == 0.22 + 0.66
+    cost = usage.estimate_cost("deepseek-v4.1-flash", prompt_tokens=1_000_000, completion_tokens=1_000_000)
+    assert cost == 0.30 + 1.20
 
 
 def test_estimate_cost_unknown_model_returns_none():

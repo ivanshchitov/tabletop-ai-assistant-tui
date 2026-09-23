@@ -23,7 +23,7 @@ OK_JSON = '{"ok": true, "issues": []}'
 def _meta(content: str, finish_reason: str = "") -> AnswerMeta:
     return AnswerMeta(
         content=content,
-        model="deepseek-v4-flash",
+        model="deepseek-v4.1-flash",
         elapsed_seconds=1.0,
         prompt_tokens=10,
         completion_tokens=20,

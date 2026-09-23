@@ -1,8 +1,8 @@
 """Доп.-информация (время/токены/стоимость) после ответа модели.
 
 Stub-сервер отдаёт фиксированный usage (см. stub_api.Reply.body): prompt_tokens=50,
-completion_tokens=100 — стоимость для deepseek-v4-flash (0.22$/0.66$ за 1M) считается как
-(50*0.22 + 100*0.66) / 1_000_000 = 0.000077.
+completion_tokens=100 — стоимость для deepseek-v4.1-flash (0.30$/1.20$ за 1M) считается как
+(50*0.30 + 100*1.20) / 1_000_000 = 0.000135.
 """
 
 import json
@@ -15,7 +15,7 @@ def test_question_answer_shows_usage_metadata(app, stub):
     session.wait_for("Ответ stub-сервера.")
 
     session.wait_for("Токены: 50+100=150")
-    session.wait_for("$0.000077")
+    session.wait_for("$0.000135")
 
     session.send_line("/exit")
     session.wait_exit()

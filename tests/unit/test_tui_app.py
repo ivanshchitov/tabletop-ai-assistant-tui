@@ -721,13 +721,13 @@ def test_models_command_esc_keeps_current_model(make_app, monkeypatch):
 
 
 def test_question_uses_selected_model(make_app, monkeypatch):
-    _panel_keys(monkeypatch, [keyboard.DOWN, keyboard.DOWN, keyboard.DOWN, keyboard.ENTER])  # glm-5.1
+    _panel_keys(monkeypatch, [keyboard.DOWN, keyboard.DOWN, keyboard.ENTER])  # glm-5.3-flash
 
     client = FakeClient()
     make_app(["/models", "Вопрос", "/exit"], client).run()
 
     assert len(client.calls) == 1
-    assert client.calls[0]["model"] == "glm-5.1"
+    assert client.calls[0]["model"] == "glm-5.3-flash"
 
 
 def test_strategy_follows_the_selected_model(make_app, monkeypatch):
@@ -1390,7 +1390,7 @@ def test_status_bar_shows_the_active_profile(make_app, recording_console, monkey
     script_interview(monkeypatch, NOVICE_ANSWERS)
     make_app(["/profile setup", "Вопрос", "/exit"], FakeClient(["Ответ"])).run()
 
-    assert recording_console.contains("Модель: deepseek-v4-flash  |  Профиль: новичок  |  Формат:")
+    assert recording_console.contains("Модель: deepseek-v4.1-flash  |  Профиль: новичок  |  Формат:")
 
 
 def test_status_bar_hides_the_profile_when_there_is_none(make_app, recording_console):
@@ -1747,7 +1747,7 @@ def test_task_panel_shows_what_the_spend_was_for(make_app, recording_console):
     app = _app_with_plan(make_app)
     meta = AnswerMeta(
         content="",
-        model="deepseek-v4-flash",
+        model="deepseek-v4.1-flash",
         elapsed_seconds=12.5,
         prompt_tokens=100,
         completion_tokens=200,

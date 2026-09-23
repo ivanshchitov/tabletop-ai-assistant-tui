@@ -4,7 +4,7 @@ import json
 
 from . import harness
 
-DEFAULT_MODEL = "deepseek-v4-flash"
+DEFAULT_MODEL = "deepseek-v4.1-flash"
 
 
 def _wait_panel_open(session) -> None:
@@ -23,8 +23,8 @@ def test_panel_lists_models_with_current_marked(app, stub):
     session.send_line("/models")
     _wait_panel_open(session)
 
-    session.wait_on_screen("deepseek-v4-flash (текущая)")
-    for model in ("deepseek-v4-pro", "kimi-k2.5", "glm-5.1", "mimo-v2.5-free"):
+    session.wait_on_screen("deepseek-v4.1-flash (текущая)")
+    for model in ("deepseek-v4-pro", "kimi-k3", "glm-5.3-flash", "mimo-v2.5-free"):
         session.wait_on_screen(model)
     assert stub.call_count == 0
 
@@ -43,7 +43,7 @@ def test_select_model_then_question_uses_it(app, stub, history_file):
     session.send_line("/models")
     _wait_panel_open(session)
 
-    # ↓ — с дефолтной deepseek-v4-flash на deepseek-v4-pro; Enter применяет.
+    # ↓ — с дефолтной deepseek-v4.1-flash на deepseek-v4-pro; Enter применяет.
     session.send_key(harness.KEY_DOWN, 1)
     session.send_key(harness.KEY_ENTER, 1)
     session.wait_for("Модель: deepseek-v4-pro")  # статус-бар после закрытия панели

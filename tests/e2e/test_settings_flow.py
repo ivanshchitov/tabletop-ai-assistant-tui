@@ -10,6 +10,7 @@ import json
 import pytest
 
 from . import harness
+from core import config
 from ui import settings_screen
 
 from .harness import (
@@ -130,7 +131,9 @@ def test_full_settings_walkthrough_changes_the_next_request(app, stub):
     user_prompt = harness.sans_invariants(payload["messages"])[1]["content"]
     assert "не более 50 слов" in user_prompt
     assert "не более 6 вариантов" in user_prompt
-    assert payload["max_tokens"] == 50 * 4 + 50
+    # Смена контракта (update-model-pool): потолок не опускается ниже порога разгона
+    # reasoning-моделей — при 50 словах формула даёт 250, а уходит порог.
+    assert payload["max_tokens"] == config.MIN_REQUEST_MAX_TOKENS
     assert "stop" not in payload
 
 

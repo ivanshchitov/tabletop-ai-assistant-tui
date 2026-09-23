@@ -63,9 +63,9 @@ def test_request_payload_carries_messages_and_settings(client):
 @responses.activate
 def test_model_parameter_reaches_payload(client):
     responses.add(responses.POST, config.API_URL, json=_completion("ok"), status=200)
-    client.ask("system", "user", model="kimi-k2.5")
+    client.ask("system", "user", model="kimi-k3")
     payload = json.loads(responses.calls[0].request.body)
-    assert payload["model"] == "kimi-k2.5"
+    assert payload["model"] == "kimi-k3"
 
 
 @responses.activate
@@ -118,15 +118,15 @@ def test_ask_with_usage_returns_answer_meta(client):
         json=_completion_with_usage("Ответ", prompt_tokens=100, completion_tokens=200),
         status=200,
     )
-    meta = client.ask_with_usage("system", "user", model="deepseek-v4-flash")
+    meta = client.ask_with_usage("system", "user", model="deepseek-v4.1-flash")
 
     assert meta.content == "Ответ"
-    assert meta.model == "deepseek-v4-flash"
+    assert meta.model == "deepseek-v4.1-flash"
     assert meta.elapsed_seconds > 0
     assert meta.prompt_tokens == 100
     assert meta.completion_tokens == 200
     assert meta.total_tokens == 300
-    assert meta.cost_usd == pytest.approx((100 * 0.22 + 200 * 0.66) / 1_000_000)
+    assert meta.cost_usd == pytest.approx((100 * 0.30 + 200 * 1.20) / 1_000_000)
 
 
 @responses.activate

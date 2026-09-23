@@ -10,13 +10,22 @@ from core import config
 
 
 def test_max_tokens_formula():
-    assert config.max_tokens_for_words(100) == 100 * config.WORDS_TO_TOKENS_RATIO + config.TOKENS_OVERHEAD
+    """Выше порога работает формула; смена контракта — снизу потолок ограничен порогом."""
+    assert config.max_tokens_for_words(1000) == 1000 * config.WORDS_TO_TOKENS_RATIO + config.TOKENS_OVERHEAD
+
+
+def test_max_tokens_never_drops_below_the_floor():
+    """Reasoning-модели тратят сотни токенов до первого символа: тесный потолок = пустой ответ."""
+    assert config.max_tokens_for_words(config.MIN_MAX_WORDS) == config.MIN_REQUEST_MAX_TOKENS
+    assert config.max_tokens_for_words(30) == config.MIN_REQUEST_MAX_TOKENS
 
 
 def test_max_tokens_is_monotonic():
-    values = [config.max_tokens_for_words(w) for w in (10, 50, 200, 500)]
+    """Ниже порога значения совпадают (порог их подпирает), выше — строго растут."""
+    values = [config.max_tokens_for_words(w) for w in (500, 700, 1000)]
     assert values == sorted(values)
     assert len(set(values)) == len(values)
+    assert config.max_tokens_for_words(10) <= config.max_tokens_for_words(500)
 
 
 def test_max_tokens_leaves_headroom_above_word_limit():
@@ -26,7 +35,7 @@ def test_max_tokens_leaves_headroom_above_word_limit():
 
 
 def test_max_words_ceiling_raised_for_reasoning_models():
-    """Reasoning-модели (kimi-k2.x, glm-5.1, deepseek-v4-pro) на сложных вопросах тратят весь
+    """Reasoning-модели (kimi-k2.x, glm-5.3-flash, deepseek-v4-pro) на сложных вопросах тратят весь
     max_tokens на рассуждение раньше, чем дойдут до ответа — 500-словный потолок (2050 токенов)
     этого не покрывает, 1000-словный (4050 токенов) — покрывает (проверено вручную против API).
     """
@@ -66,7 +75,7 @@ def test_api_url_override_from_environment(monkeypatch):
 
 
 def test_request_timeout_default_covers_slow_reasoning_models(monkeypatch):
-    """kimi-k2.6 на сложном вопросе генерирует дольше 30с — прежний дефолт обрывал запрос раньше,
+    """kimi-k3 на сложном вопросе генерирует дольше 30с — прежний дефолт обрывал запрос раньше,
     чем модель успевала ответить (проверено вручную против реального API)."""
     monkeypatch.delenv("TABLETOP_REQUEST_TIMEOUT", raising=False)
     reloaded = importlib.reload(config)
@@ -104,17 +113,15 @@ def test_base_dir_points_at_repository_root():
 
 
 def test_model_name_is_the_reasoning_model():
-    assert config.DEFAULT_MODEL == "deepseek-v4-flash"
+    assert config.DEFAULT_MODEL == "deepseek-v4.1-flash"
 
 
 def test_available_models_is_the_fixed_list():
     assert config.AVAILABLE_MODELS == [
-        "deepseek-v4-flash",
+        "deepseek-v4.1-flash",
         "deepseek-v4-pro",
-        "kimi-k2.5",
-        "glm-5.1",
+        "glm-5.3-flash",
         "mimo-v2.5-free",
-        "kimi-k2.6",
         "kimi-k3",
     ]
 
