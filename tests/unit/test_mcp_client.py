@@ -92,6 +92,15 @@ def test_tool_names_are_not_hardcoded_in_the_app():
         "dnd_sections",
         "dnd_search",
         "dnd_entry",
+        "dnd_digest",
+        # Планировщик — тоже инструменты сервера: приложение читает его файл состояния,
+        # но заданиями управляют модель и ручной вызов, а не код приложения по имени.
+        # Имя сводки — schedule_summary, а не schedule_report: последнее совпало бы подстрокой
+        # с методом снимка агента `schedule_report()` и уронило бы эту проверку.
+        "schedule_add",
+        "schedule_list",
+        "schedule_run_due",
+        "schedule_summary",
     ):
         assert not any(name in source for source in sources)
 

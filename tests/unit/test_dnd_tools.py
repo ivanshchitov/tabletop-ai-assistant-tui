@@ -32,8 +32,9 @@ def tools(stub):
 # --- регистрация и схемы ---
 
 
-def test_three_tools_are_declared():
-    assert len(TOOLS) == 3
+def test_reference_and_digest_tools_are_declared():
+    """Справочных инструментов три; к ним добавился сбор данных с накоплением (день 18)."""
+    assert {tool.name for tool in TOOLS} == {"dnd_sections", "dnd_search", "dnd_entry", "dnd_digest"}
 
 
 def test_every_tool_has_name_and_description():
@@ -150,3 +151,61 @@ def test_entry_result_is_readable_json(tools):
     text = tools.call("dnd_entry", {"section": "monsters", "index": "goblin"})
     payload = json.loads(text[text.index("{") :])
     assert payload["name"] == "Goblin"
+
+
+# --- сбор данных с накоплением ---
+
+
+@pytest.fixture
+def digest_tools(stub, tmp_path):
+    """Инструменты со своим хранилищем планировщика: накопление проверяется между вызовами."""
+    from core.schedule_store import ScheduleStore
+    from mcp_server.dnd_api import DndAPI
+
+    return DndTools(DndAPI(url=stub.url), store=ScheduleStore(path=tmp_path / "schedule.json"))
+
+
+def test_digest_is_declared_with_its_schema():
+    digest = next(tool for tool in TOOLS if tool.name == "dnd_digest")
+    assert "section" in digest.input_schema["properties"]
+    assert digest.input_schema["required"] == ["section"]
+
+
+def test_first_digest_reports_everything_as_fresh(digest_tools):
+    text = digest_tools.call("dnd_digest", {"section": "monsters"})
+    assert "monsters" in text
+    assert "Goblin" in text
+    assert "впервые: 2" in text
+
+
+def test_repeated_digest_reports_no_fresh_entries(digest_tools):
+    digest_tools.call("dnd_digest", {"section": "monsters"})
+    text = digest_tools.call("dnd_digest", {"section": "monsters"})
+    assert "впервые: 0" in text
+    assert digest_tools.store.collected("monsters/2014") == ("Goblin", "Hobgoblin")
+
+
+def test_new_entry_in_the_external_api_is_reported_as_fresh(digest_tools, monkeypatch):
+    from tests import dnd_api_stub
+
+    digest_tools.call("dnd_digest", {"section": "monsters"})
+    monkeypatch.setitem(
+        dnd_api_stub.ENTRIES["monsters"], "orc", {"index": "orc", "name": "Orc", "hit_points": 15}
+    )
+    text = digest_tools.call("dnd_digest", {"section": "monsters"})
+    assert "впервые: 1" in text
+    assert "Orc" in text
+
+
+def test_digest_keeps_rulesets_apart(digest_tools):
+    digest_tools.call("dnd_digest", {"section": "monsters"})
+    text = digest_tools.call("dnd_digest", {"section": "monsters", "ruleset": "2024"})
+    assert "впервые: 2" in text
+    assert digest_tools.store.collected("monsters/2024") == ("Goblin (2024)", "Hobgoblin (2024)")
+
+
+def test_digest_rejects_unknown_section_without_calling_the_api(digest_tools, stub):
+    stub.paths.clear()
+    text = digest_tools.call("dnd_digest", {"section": "таверны"})
+    assert "неизвестен" in text
+    assert all("/таверны" not in path for path in stub.paths)

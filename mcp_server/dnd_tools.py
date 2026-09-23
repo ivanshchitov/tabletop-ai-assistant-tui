@@ -4,10 +4,15 @@
 каждый инструмент проверяется обычным юнит-тестом против локальной заглушки API — так же,
 как панели интерфейса проверяются редьюсерами без терминала.
 
-Три инструмента покрывают весь справочник, потому что все его разделы устроены одинаково:
-список раздела и запись по идентификатору. Инструмент на раздел дал бы два десятка почти
-одинаковых описаний, которые грузятся в каждый запрос выбора инструмента и при этом хуже
+Справочные инструменты покрывают весь справочник, потому что все его разделы устроены
+одинаково: список раздела и запись по идентификатору. Инструмент на раздел дал бы два десятка
+почти одинаковых описаний, которые грузятся в каждый запрос выбора инструмента и при этом хуже
 различаются моделью, — раздел дешевле передать параметром.
+
+Сбор данных (`dnd_digest`) отличается от поиска тем, что помнит прошлые вызовы: собранное
+складывается в хранилище планировщика, поэтому повторный вызов отличает записи, встреченные
+впервые, от уже известных. Это и делает его пригодным для расписания — по одному вызову в
+период, с накоплением картины.
 
 Ошибка — это текст результата, а не исключение: его читает модель, которая и выбирала
 аргументы, поэтому в тексте перечисляются допустимые значения.
@@ -17,11 +22,17 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+from core.schedule_store import ScheduleStore
+
 from .dnd_api import RULESETS, DEFAULT_RULESET, DndAPI, DndAPIError
 
 MIN_LIMIT = 1
 MAX_LIMIT = 10
 DEFAULT_LIMIT = 5
+# Сбор берёт раздел целиком, а не первые пять записей: его смысл — накопленная картина,
+# поэтому потолок отдельный и заметно выше лимита поиска.
+MAX_DIGEST_LIMIT = 50
+DEFAULT_DIGEST_LIMIT = 20
 
 _RULESET_PARAMETER = {
     "type": "string",
@@ -101,6 +112,29 @@ TOOLS: Tuple[ToolSpec, ...] = (
             "required": ["section", "index"],
         },
     ),
+    ToolSpec(
+        name="dnd_digest",
+        description=(
+            "Сбор записей раздела справочника с накоплением: возвращает срез раздела и "
+            "отмечает записи, встреченные впервые по сравнению с прошлыми сборами. "
+            "Подходит для регулярного запуска по расписанию."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "section": _SECTION_PARAMETER,
+                "limit": {
+                    "type": "integer",
+                    "description": (
+                        f"Сколько записей собрать за один раз, от {MIN_LIMIT} до {MAX_DIGEST_LIMIT}."
+                    ),
+                    "default": DEFAULT_DIGEST_LIMIT,
+                },
+                "ruleset": _RULESET_PARAMETER,
+            },
+            "required": ["section"],
+        },
+    ),
 )
 
 TOOL_NAMES = tuple(tool.name for tool in TOOLS)
@@ -113,28 +147,35 @@ class ArgumentError(Exception):
 class DndTools:
     """Выполнение вызовов инструментов поверх одного клиента внешнего API."""
 
-    def __init__(self, api: Optional[DndAPI] = None) -> None:
+    def __init__(self, api: Optional[DndAPI] = None, store: Optional[ScheduleStore] = None) -> None:
         self.api = api if api is not None else DndAPI()
+        # Хранилище нужно сбору: накопленное переживает и вызов, и перезапуск процесса.
+        self.store = store if store is not None else ScheduleStore()
         # Перечень разделов кэшируется: он нужен и как ответ инструмента, и как проверка
         # аргумента `section`, а меняется на стороне сервиса разве что с новой редакцией.
         self._sections: Dict[str, List[str]] = {}
 
     def call(self, name: str, arguments: Dict[str, Any]) -> str:
         """Выполнить инструмент и вернуть текст результата — включая текст отказа."""
+        return self.call_result(name, arguments)[1]
+
+    def call_result(self, name: str, arguments: Dict[str, Any]) -> Tuple[bool, str]:
+        """То же, но с признаком успеха: планировщику нужно знать исход, а не разбирать текст."""
         handlers = {
             "dnd_sections": self._sections_tool,
             "dnd_search": self._search_tool,
             "dnd_entry": self._entry_tool,
+            "dnd_digest": self._digest_tool,
         }
         handler = handlers.get(name)
         if handler is None:
-            return f"Инструмент «{name}» не объявлен. Доступны: {', '.join(TOOL_NAMES)}."
+            return False, f"Инструмент «{name}» не объявлен. Доступны: {', '.join(TOOL_NAMES)}."
         try:
-            return handler(arguments or {})
+            return True, handler(arguments or {})
         except ArgumentError as error:
-            return f"Неверные аргументы: {error}"
+            return False, f"Неверные аргументы: {error}"
         except DndAPIError as error:
-            return f"Источник данных не ответил: {error}"
+            return False, f"Источник данных не ответил: {error}"
 
     # --- инструменты ---
 
@@ -165,6 +206,23 @@ class DndTools:
         body = json.dumps(entry, ensure_ascii=False, indent=2)
         return f"Запись «{index}» раздела «{section}» (редакция {ruleset}):\n{body}"
 
+    def _digest_tool(self, arguments: Dict[str, Any]) -> str:
+        ruleset = self._ruleset(arguments)
+        limit = self._limit(arguments, default=DEFAULT_DIGEST_LIMIT, maximum=MAX_DIGEST_LIMIT)
+        section = self._section(arguments, ruleset)
+        results = self.api.search(section, limit=limit, ruleset=ruleset)
+        names = [str(item.get("name") or item.get("index") or "?") for item in results]
+        # Ключ накопления включает ветку правил: одна и та же запись в редакциях 2014 и 2024 —
+        # разные данные, и «встречено впервые» должно считаться по каждой ветке отдельно.
+        fresh = self.store.remember_collected(f"{section}/{ruleset}", names)
+        lines = [
+            f"Сводка раздела «{section}» (редакция {ruleset}): собрано {len(names)}, "
+            f"впервые: {len(fresh)}"
+        ]
+        if fresh:
+            lines += [f"- {name}" for name in fresh]
+        return "\n".join(lines)
+
     # --- разбор аргументов ---
 
     def _ruleset(self, arguments: Dict[str, Any]) -> str:
@@ -181,14 +239,16 @@ class DndTools:
             raise ArgumentError(f"параметр {key} обязателен и не может быть пустым")
         return value
 
-    def _limit(self, arguments: Dict[str, Any]) -> int:
-        raw = arguments.get("limit", DEFAULT_LIMIT)
+    def _limit(
+        self, arguments: Dict[str, Any], default: int = DEFAULT_LIMIT, maximum: int = MAX_LIMIT
+    ) -> int:
+        raw = arguments.get("limit", default)
         try:
             value = int(raw)
         except (TypeError, ValueError):
             raise ArgumentError(f"limit должен быть целым числом, получено «{raw}»") from None
-        if not MIN_LIMIT <= value <= MAX_LIMIT:
-            raise ArgumentError(f"limit должен быть от {MIN_LIMIT} до {MAX_LIMIT}, получено {value}")
+        if not MIN_LIMIT <= value <= maximum:
+            raise ArgumentError(f"limit должен быть от {MIN_LIMIT} до {maximum}, получено {value}")
         return value
 
     def _section(self, arguments: Dict[str, Any], ruleset: str) -> str:
