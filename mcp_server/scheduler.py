@@ -12,6 +12,7 @@
 Отказ — это текст результата, а не исключение: его читает модель, которая и выбирала аргументы.
 """
 
+import json
 import time
 from typing import Any, Callable, Dict, Sequence, Tuple
 
@@ -148,8 +149,9 @@ class Scheduler:
         if isinstance(delay, str):
             return delay
 
-        raw_arguments = arguments.get("arguments")
-        job_arguments = dict(raw_arguments) if isinstance(raw_arguments, dict) else {}
+        job_arguments = self._job_arguments(arguments.get("arguments"))
+        if isinstance(job_arguments, str):
+            return job_arguments
         job = self.store.add_job(
             tool=tool,
             arguments=job_arguments,
@@ -242,6 +244,28 @@ class Scheduler:
                 f"Неверные аргументы: {key} должен быть от {minimum} до {maximum}, получено {value}."
             )
         return value
+
+    def _job_arguments(self, raw: Any):
+        """Аргументы задания: объект — как есть, строка — JSON (иначе текст отказа).
+
+        Строкой они приходят двумя путями: из ручного `/tool call`, который разбирает ввод
+        парами «ключ=значение», и от моделей, охотно присылающих вложенный объект строкой.
+        """
+        if isinstance(raw, dict):
+            return dict(raw)
+        if raw in (None, ""):
+            return {}
+        if isinstance(raw, str):
+            try:
+                parsed = json.loads(raw)
+            except ValueError:
+                return (
+                    "Неверные аргументы: arguments должен быть объектом или строкой JSON, "
+                    f"получено «{raw}»."
+                )
+            if isinstance(parsed, dict):
+                return parsed
+        return f"Неверные аргументы: arguments должен быть объектом, получено «{raw}»."
 
     def _summary(self, text: str) -> str:
         first = (text or "").strip().splitlines()

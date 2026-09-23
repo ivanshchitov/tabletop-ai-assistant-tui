@@ -217,3 +217,21 @@ def test_scheduler_declares_four_tools():
 
 def test_unknown_scheduler_tool_is_reported(scheduler):
     assert "не объявлен" in scheduler.call("schedule_drop", {})
+
+
+def test_arguments_may_arrive_as_a_json_string(scheduler, tools):
+    """Ручной вызов /tool call передаёт значения строками, да и модели часто шлют JSON строкой."""
+    scheduler.call(
+        "schedule_add",
+        {"tool": "dnd_digest", "arguments": '{"section": "spells"}', "every_minutes": 5},
+    )
+    scheduler.call("schedule_run_due", {})
+    assert tools.calls[0][1] == {"section": "spells"}
+
+
+def test_unparsable_arguments_string_is_rejected(scheduler):
+    text = scheduler.call(
+        "schedule_add", {"tool": "dnd_digest", "arguments": "section spells", "every_minutes": 5}
+    )
+    assert "arguments" in text
+    assert "заданий нет" in scheduler.call("schedule_list", {})
