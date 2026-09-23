@@ -97,7 +97,23 @@ def tasks_dir(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def app(stub, history_file, memory_file, profile_file, task_file, tasks_dir, tui_display, request):
+def schedule_file(tmp_path: Path) -> Path:
+    """Файл планировщика: прогон не должен трогать schedule.json репозитория."""
+    return tmp_path / "schedule.json"
+
+
+@pytest.fixture
+def app(
+    stub,
+    history_file,
+    memory_file,
+    profile_file,
+    task_file,
+    tasks_dir,
+    schedule_file,
+    tui_display,
+    request,
+):
     """Фабрика сессий: одна и та же история переживает несколько запусков подряд."""
     mode, mirror = tui_display
     sessions = []
@@ -116,6 +132,7 @@ def app(stub, history_file, memory_file, profile_file, task_file, tasks_dir, tui
             profile_file=profile_file,
             task_file=task_file,
             tasks_dir=tasks_dir,
+            schedule_file=schedule_file,
             **kwargs,
         )
         sessions.append(session)

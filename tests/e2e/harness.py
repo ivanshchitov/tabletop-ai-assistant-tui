@@ -60,6 +60,7 @@ class AppSession:
         profile_file: Optional[Path] = None,
         task_file: Optional[Path] = None,
         tasks_dir: Optional[Path] = None,
+        schedule_file: Optional[Path] = None,
         mcp_command: Optional[str] = None,
         mcp_args: Optional[str] = None,
         auto_tools: Optional[bool] = None,
@@ -120,6 +121,10 @@ class AppSession:
         if tasks_dir is not None:
             # Результаты задач — свой каталог: прогон не должен писать файлы в реальный tasks/.
             env["TABLETOP_TASKS_DIR"] = str(tasks_dir)
+        if schedule_file is not None:
+            # Планировщик — свой файл: без переопределения прогон читал бы и писал реальный
+            # schedule.json репозитория, а фоновый исполнитель выполнял бы чужие задания.
+            env["TABLETOP_SCHEDULE_FILE"] = str(schedule_file)
         if mcp_command is not None:
             # MCP-сервер — на фейковом сервере прогона: без переопределения команда /mcp
             # поднимала бы настоящий сервер из реестра, то есть лезла бы в сеть за npx.

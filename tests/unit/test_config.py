@@ -305,3 +305,34 @@ def test_own_dnd_server_script_exists():
 def test_own_dnd_server_runs_by_project_interpreter():
     """Сервер запускается тем же интерпретатором, что и приложение: пакет mcp есть только в нём."""
     assert config.MCP_SERVERS["dnd-rules"].command == sys.executable
+
+
+def test_schedule_file_override_from_environment(monkeypatch, tmp_path):
+    """Без переключателя любой прогон писал бы в реальный schedule.json репозитория."""
+    target = tmp_path / "custom-schedule.json"
+    monkeypatch.setenv("TABLETOP_SCHEDULE_FILE", str(target))
+    reloaded = importlib.reload(config)
+    try:
+        assert reloaded.SCHEDULE_FILE == target
+    finally:
+        monkeypatch.delenv("TABLETOP_SCHEDULE_FILE", raising=False)
+        importlib.reload(config)
+
+
+def test_schedule_file_defaults_into_repository_root(monkeypatch):
+    monkeypatch.delenv("TABLETOP_SCHEDULE_FILE", raising=False)
+    reloaded = importlib.reload(config)
+    try:
+        assert reloaded.SCHEDULE_FILE == reloaded.BASE_DIR / "schedule.json"
+    finally:
+        importlib.reload(config)
+
+
+def test_scheduler_limits_are_sane():
+    """Период и отложенный старт ограничены диапазоном, журнал прогонов — длиной."""
+    assert config.MIN_EVERY_MINUTES >= 1
+    assert config.MAX_EVERY_MINUTES > config.MIN_EVERY_MINUTES
+    assert config.MIN_START_DELAY_MINUTES == 0
+    assert config.MAX_START_DELAY_MINUTES >= config.MIN_EVERY_MINUTES
+    assert config.MAX_RUN_LOG > 0
+    assert config.SCHEDULER_TICK_SECONDS > 0

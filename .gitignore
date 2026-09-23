@@ -223,6 +223,7 @@ memory.json
 profile.json
 task.json
 tasks/
+schedule.json
 
 # Solve-challenge-task: screen recordings and README drafts
 videos/
