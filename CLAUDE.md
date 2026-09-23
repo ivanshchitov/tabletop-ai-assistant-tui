@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 A console TUI (Python + `rich`) that answers board-game questions via a model picked with the
-`/models` command (default `deepseek-v4-flash`), an OpenAI-compatible chat-completions model
+`/models` command (default `deepseek-v4.1-flash`), an OpenAI-compatible chat-completions model
 served at OpenCode Zen (`https://opencode.ai/zen/v1/chat/completions`).
 Off-topic questions get a fixed refusal phrase instead of being answered.
 
@@ -592,16 +592,23 @@ Deliberate decisions baked in:
 
 **`/models` (`ui/models_screen.py` + `core/config.py`):** model selection, one decision per
 session. Deliberate decisions baked in:
-- `config.AVAILABLE_MODELS` is the fixed list (`deepseek-v4-flash`, `deepseek-v4-pro`,
-  `kimi-k2.5`, `glm-5.1`, `mimo-v2.5-free`, `kimi-k2.6`, `kimi-k3`) and `DEFAULT_MODEL` is its
+- `config.AVAILABLE_MODELS` is the fixed list (`deepseek-v4.1-flash`, `deepseek-v4-pro`,
+  `glm-5.3-flash`, `mimo-v2.5-free`, `kimi-k3`) and `DEFAULT_MODEL` is its
   first element; the old `MODEL_NAME` constant no longer exists. The panel and the client only
-  read the list from here. `kimi-k2.6` and `kimi-k3` were added specifically to give a clear
-  weak/medium/strong price tier alongside `deepseek-v4-flash` for the day-5 challenge comparison
-  (time/tokens/cost across model strength) — not required by any other feature.
+  read the list from here. `kimi-k3` gives the strong end of the weak/medium/strong price tier the
+  day-5 challenge comparison needs (time/tokens/cost across model strength), with
+  `deepseek-v4.1-flash` and `deepseek-v4-pro` below it.
+- **The pool is provider data and it rots.** OpenCode Zen retired `deepseek-v4-flash` (the old
+  default), `kimi-k2.5`, `kimi-k2.6` and `glm-5.1`: a request with a retired model answers
+  `HTTP 403` «Model access is disabled», and `GET /zen/v1/models` no longer lists it. The symptom is
+  the app failing *every* question out of the box, so check that endpoint before suspecting the
+  client. The URL itself did not change (the `/zen/go/` endpoint is a different product and needs an
+  `x-opencode-session` header); the fix is one constant, which is the point of keeping the list as
+  data (`update-model-pool`, day 18).
 - `config.MODEL_PRICING` maps every model in `AVAILABLE_MODELS` to a `(input_price, output_price)`
-  pair in USD per 1M tokens, used by `core.usage.estimate_cost()` to price a request. Where
-  OpenCode Zen has peak/off-peak pricing (DeepSeek V4 Flash/Pro), the table stores the lower
-  off-peak number — comparative, not accounting-grade precision (see
+  pair in USD per 1M tokens, used by `core.usage.estimate_cost()` to price a request. The numbers
+  come from the provider's published price list (one number per model now, so the old peak/off-peak
+  caveat is gone) — comparative, not accounting-grade precision (see
   `openspec/changes/archive/2026-09-04-add-model-usage-metadata/design.md` for the full rationale).
 - The selected model lives on `TabletopAITUI.model` — session-only, like `AnswerSettings` (no
   persistence between restarts is deliberate, same backlog logic). Every request passes it as
@@ -808,14 +815,22 @@ deferred and periodic calls of its own tools, with the aggregate the agent annou
   `settings.max_words` via `config.max_tokens_for_words()` (a fixed tokens-per-word ratio plus
   overhead), just large enough that generation doesn't get cut off mid-sentence before the model
   reaches its own instructed stopping point.
+- **`config.MIN_REQUEST_MAX_TOKENS` (2000) is the floor of that ceiling.** Reasoning models spend
+  hundreds of tokens *before* the first character of `content`: measured on `deepseek-v4.1-flash`,
+  `max_tokens=170` (the formula's value for a 30-word answer) comes back with empty content,
+  `finish_reason=length` and 470 reasoning tokens, while 500 answers normally. The floor is not a
+  length control — the word limit still lives in the prompt — and the auxiliary requests
+  (summarizer, facts, pipeline) get the same headroom because they derive their budget from the same
+  function. This is the low-end twin of the `MAX_MAX_WORDS` note below.
 - **Known API constraint:** don't add the OpenAI-style `stop` parameter to the request payload.
-  `deepseek-v4-flash` is a reasoning model — it returns a separate `reasoning_content` field before
+  `deepseek-v4.1-flash` is a reasoning model — it returns a separate `reasoning_content` field before
   `content`, and a hard `stop` match inside `reasoning_content` truncates the response with
   `content` empty. Any length/stop behavior has to be a prompt instruction plus client-side
   handling, never the API's `stop` field.
-- **`config.MAX_MAX_WORDS` is 1000, not 500.** Several reasoning models in the pool (`kimi-k2.5`,
-  `kimi-k2.6`, `glm-5.1`, `deepseek-v4-pro`) put their thinking into `reasoning_content`, same as
-  `deepseek-v4-flash` above — and on a demanding comparison-style question, that reasoning can eat
+- **`config.MAX_MAX_WORDS` is 1000, not 500.** Several reasoning models in the pool (measured when
+  the pool still held `kimi-k2.5`, `kimi-k2.6` and `glm-5.1`; `deepseek-v4-pro` and `kimi-k3` behave
+  the same) put their thinking into `reasoning_content`, same as
+  the default model above — and on a demanding comparison-style question, that reasoning can eat
   the *entire* `max_tokens` budget before the model ever starts writing `content`, coming back with
   `finish_reason: "length"` and an empty answer even though the request itself succeeded (no
   `APIError`, real `usage` numbers). Verified directly against the API: at the old ceiling (500
@@ -1050,7 +1065,8 @@ saved: `dialogues` stays a flat list across branches.
   line, the profile landing in the temp `profile.json`, the next question carrying the profile
   message, `/clear` and a restart keeping it, `Ctrl+C` cancelling without writing, and the repo's
   real `profile.json` staying untouched.
-- `tests/e2e/cassettes/` — real `deepseek-v4-flash` answers, recorded once with
+- `tests/e2e/cassettes/` — real model answers (recorded with `deepseek-v4-flash`, since retired;
+  replay does not depend on the model name), recorded once with
   `pytest tests/e2e/test_recorded_answers.py -m network --record-cassettes` (needs a real key,
   spends quota) and replayed by the stub afterwards. Tests skip themselves when a cassette is
   missing, so the repo works without a key.
