@@ -29,6 +29,7 @@ from .answer_settings import AnswerFormat, AnswerSettings, ContextStrategy
 from .api_client import APIClient, AnswerMeta, APIError
 from .history_manager import HistoryManager
 from .long_term_memory import LongTermMemory
+from .schedule_store import JobRun, ScheduledJob, ScheduleStore
 from .mcp_client import MCPClient, MCPError, MCPTool
 from .task_pipeline import TaskStepReport
 from .task_state import Stage, TaskItem, TaskState, TaskStore
@@ -161,6 +162,25 @@ class MCPReport:
     error: str = ""
 
 
+@dataclass(frozen=True)
+class ScheduleReport:
+    """Снимок планировщика для отчёта интерфейса: задания, прогоны, накопленное, файл."""
+
+    jobs: Tuple[ScheduledJob, ...]
+    runs: Tuple[JobRun, ...]
+    collected_total: int
+    path: str
+
+
+@dataclass(frozen=True)
+class ScheduleAnnouncement:
+    """Прогоны, случившиеся с прошлого сообщения: то, что агент сам сообщает пользователю."""
+
+    runs: Tuple[JobRun, ...]
+    fresh: int = 0
+    failed: int = 0
+
+
 @dataclass
 class MCPToolResult:
     """Снимок вызова инструмента: что вызвали, с чем, что вернулось.
@@ -279,6 +299,7 @@ class TabletopAgent:
         profile: Optional[ProfileStore] = None,
         task: Optional[TaskStore] = None,
         task_results_dir: Optional[Path] = None,
+        schedule: Optional[ScheduleStore] = None,
     ) -> None:
         self.client = client
         self.config = AgentConfig(
@@ -296,6 +317,12 @@ class TabletopAgent:
         # конвейер её ведения живёт здесь же — решение о том, что уходит модели, принимает
         # агент, а терминальный слой только показывает снимок и рисует панель.
         self.task = task if task is not None else TaskStore()
+        # Планировщик — общий файл с серверным процессом: пишет туда он, агент только читает
+        # и перечитывает. Отметка объявленного ставится сразу на последний прогон файла, иначе
+        # первая же реплика сессии вывалила бы всё, что накопилось за прошлые запуски.
+        self.schedule = schedule if schedule is not None else ScheduleStore()
+        self._announced_at, self._announced_at_count = self._schedule_cursor()
+        self._last_schedule: Optional[ScheduleAnnouncement] = None
         self._pipeline = task_pipeline.TaskPipeline(
             self.task,
             self._ask_task,
@@ -390,6 +417,11 @@ class TabletopAgent:
         self.config.auto_tools = bool(value)
 
     @property
+    def last_schedule(self) -> Optional["ScheduleAnnouncement"]:
+        """Прогоны планировщика, о которых пользователю ещё не сообщали; None — новых нет."""
+        return self._last_schedule
+
+    @property
     def last_invariants(self) -> Optional[InvariantsCheck]:
         """Результат проверки последнего ответа на инварианты — для строк журнала интерфейса."""
         return self._last_invariants
@@ -452,6 +484,8 @@ class TabletopAgent:
         self._remember(user_prompt, meta.content)
         # Долговременная память: пара «вопрос–ответ» с метриками — на диск сразу после ответа.
         self.history.add(question, meta.content, usage=self._usage_block(meta))
+        # Ход завершён — можно посмотреть, что за это время сделал фоновый исполнитель.
+        self._refresh_schedule()
         return meta
 
     def _ask_question(self, messages: List[Dict[str, str]]) -> AnswerMeta:
@@ -538,6 +572,46 @@ class TabletopAgent:
             names=self.profile.names(),
             profile_store=str(self.profile.path),
         )
+
+    def schedule_report(self) -> ScheduleReport:
+        """Снимок планировщика: интерфейс рисует его и сам файл не читает."""
+        self.schedule.reload()
+        return ScheduleReport(
+            jobs=self.schedule.jobs(),
+            runs=self.schedule.runs(),
+            collected_total=self.schedule.collected_total(),
+            path=str(self.schedule.path),
+        )
+
+    def _schedule_cursor(self) -> Tuple[float, int]:
+        """Отметка объявленного: время последнего прогона и сколько прогонов пришлось на него.
+
+        Один проход исполнителя записывает все просроченные задания одним и тем же временем,
+        поэтому одного времени мало — иначе соседние прогоны того же прохода считались бы
+        объявленными.
+        """
+        runs = self.schedule.runs()
+        if not runs:
+            return 0.0, 0
+        last = max(run.at for run in runs)
+        return last, sum(1 for run in runs if run.at == last)
+
+    def _refresh_schedule(self) -> None:
+        """Обновляет снимок новых прогонов и сдвигает отметку объявленного."""
+        self.schedule.reload()
+        runs = self.schedule.runs()
+        same_moment = [run for run in runs if run.at == self._announced_at][self._announced_at_count :]
+        later = [run for run in runs if run.at > self._announced_at]
+        fresh_runs = tuple(same_moment + later)
+        if not fresh_runs:
+            self._last_schedule = None
+            return
+        self._last_schedule = ScheduleAnnouncement(
+            runs=fresh_runs,
+            fresh=sum(run.fresh for run in fresh_runs),
+            failed=sum(1 for run in fresh_runs if not run.ok),
+        )
+        self._announced_at, self._announced_at_count = self._schedule_cursor()
 
     def invariants_report(self) -> InvariantsReport:
         """Снимок таблицы инвариантов для отчёта интерфейса; запросов к модели не делает."""

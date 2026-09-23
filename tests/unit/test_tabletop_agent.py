@@ -16,6 +16,7 @@ from core.long_term_memory import LongTermMemory
 from core import task_state
 from core.invariants import INVARIANTS, REFUSAL_PREFIX, invariants_message
 from core.tabletop_agent import RequestPhase, TabletopAgent
+from core.schedule_store import ScheduleStore
 from core.task_state import Stage, TaskStore
 from core.user_profile import InterviewState, ProfileStore
 
@@ -84,6 +85,9 @@ def isolated_history(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         tabletop_agent, "TaskStore", lambda: TaskStore(tmp_path / "task.json")
+    )
+    monkeypatch.setattr(
+        tabletop_agent, "ScheduleStore", lambda: ScheduleStore(tmp_path / "schedule.json")
     )
 
 
@@ -2302,3 +2306,88 @@ def test_tool_result_is_not_kept_in_the_session_log(monkeypatch):
 
     system_contents = [m["content"] for m in client.calls[-1]["messages"] if m["role"] == "system"]
     assert not any("fake_echo" in content for content in system_contents)
+
+
+# --- планировщик ----------------------------------------------------------------------
+
+
+def schedule_with_run(tmp_path, at: float = 1000.0, fresh: int = 3):
+    """Хранилище планировщика с одним заданием и одним прогоном — как его оставил исполнитель."""
+    store = ScheduleStore(path=tmp_path / "schedule.json")
+    job = store.add_job(tool="dnd_digest", arguments={"section": "spells"}, every_minutes=5, next_run=at)
+    store.record_run(job, at=at, ok=True, summary="собрано 5, впервые: 3", collected=5, fresh=fresh)
+    return store
+
+
+def test_schedule_report_is_a_snapshot_without_requests(tmp_path):
+    store = schedule_with_run(tmp_path)
+    agent, client = make_agent(schedule=store)
+
+    report = agent.schedule_report()
+
+    assert [job.tool for job in report.jobs] == ["dnd_digest"]
+    assert report.runs[0].summary == "собрано 5, впервые: 3"
+    assert report.collected_total == store.collected_total()
+    assert client.calls == []
+
+
+def test_schedule_report_is_empty_without_jobs(tmp_path):
+    agent, _ = make_agent(schedule=ScheduleStore(path=tmp_path / "schedule.json"))
+    report = agent.schedule_report()
+    assert report.jobs == ()
+    assert report.runs == ()
+
+
+def test_past_runs_are_not_announced_at_session_start(tmp_path):
+    """Отметка ставится на последний прогон файла: старт сессии не вываливает историю."""
+    store = schedule_with_run(tmp_path)
+    agent, _ = make_agent(schedule=store)
+
+    agent.ask("Вопрос")
+
+    assert agent.last_schedule is None
+
+
+def test_new_run_is_announced_once(tmp_path):
+    store = schedule_with_run(tmp_path, at=1000.0)
+    agent, _ = make_agent(schedule=store)
+    agent.ask("Первый вопрос")
+
+    # Исполнитель отработал в своём процессе: файл меняет другой экземпляр хранилища.
+    writer = ScheduleStore(path=tmp_path / "schedule.json")
+    writer.record_run(writer.jobs()[0], at=2000.0, ok=True, summary="собрано 7, впервые: 2", collected=7, fresh=2)
+
+    agent.ask("Второй вопрос")
+    announced = agent.last_schedule
+    assert announced is not None
+    assert len(announced.runs) == 1
+    assert announced.fresh == 2
+
+    agent.ask("Третий вопрос")
+    assert agent.last_schedule is None
+
+
+def test_several_runs_of_one_tick_are_announced_together(tmp_path):
+    store = schedule_with_run(tmp_path, at=1000.0)
+    agent, _ = make_agent(schedule=store)
+    agent.ask("Первый вопрос")
+
+    writer = ScheduleStore(path=tmp_path / "schedule.json")
+    second = writer.add_job(tool="dnd_digest", arguments={"section": "monsters"}, every_minutes=5, next_run=0.0)
+    writer.record_run(writer.jobs()[0], at=2000.0, ok=True, summary="итог 1", collected=7, fresh=2)
+    writer.record_run(second, at=2000.0, ok=False, summary="Источник данных не ответил", collected=7, fresh=0)
+
+    agent.ask("Второй вопрос")
+    announced = agent.last_schedule
+    assert len(announced.runs) == 2
+    assert announced.failed == 1
+
+
+def test_schedule_report_sees_runs_written_by_another_process(tmp_path):
+    store = schedule_with_run(tmp_path)
+    agent, _ = make_agent(schedule=store)
+
+    writer = ScheduleStore(path=tmp_path / "schedule.json")
+    writer.record_run(writer.jobs()[0], at=2000.0, ok=True, summary="новый прогон", collected=9, fresh=2)
+
+    assert any(run.summary == "новый прогон" for run in agent.schedule_report().runs)
