@@ -222,6 +222,7 @@ class TabletopAITUI:
             self.agent.client = self.client
 
         self._connect_mcp_servers()
+        self._print_scheduler_startup_line()
 
         self.console.print(Panel(APP_TITLE, style="bold cyan"))
         if self.history.dialogues:
@@ -361,6 +362,9 @@ class TabletopAITUI:
             return True
         if command == "/tool":
             self._handle_tool(user_input)
+            return True
+        if command == "/schedule":
+            self._print_schedule_report()
             return True
         return False
 
@@ -613,6 +617,7 @@ class TabletopAITUI:
                     "модель слабее в рассуждениях.[/bold yellow]"
                 )
         self._print_usage_meta(meta)
+        self._print_schedule_line()
         self.console.rule(style="dim")
 
     def _print_usage_report(self) -> None:
@@ -1352,6 +1357,87 @@ class TabletopAITUI:
             )
             self.console.print(f"[bold red]⛔ Ответ отклонён: {final}.[/bold red]")
         return check.rejected
+
+    def _print_scheduler_startup_line(self) -> None:
+        """Строка итога планировщика при запуске: сколько заданий и сколько прогонов накопилось.
+
+        Имя метода намеренно не повторяет имя инструмента сервера: инвариант
+        `test_tool_names_are_not_hardcoded_in_the_app` ищет имена инструментов подстрокой
+        по коду `core/` и `ui/`, и совпадение читалось бы как зашитое имя.
+
+        Прогоны прошлых запусков не объявляются по одному (агент ставит отметку на последний из
+        них), поэтому накопленное показывает эта строка — иначе работа фонового исполнителя,
+        пока приложение было закрыто, осталась бы невидимой до команды `/schedule`.
+        """
+        report = self.agent.schedule_report()
+        if not report.jobs:
+            self.console.print("[dim]🗓 Планировщик: заданий нет — подробности: /schedule[/dim]")
+            return
+        runs = sum(job.runs for job in report.jobs)
+        self.console.print(
+            f"[dim]🗓 Планировщик: {plural_ru(len(report.jobs), 'задание', 'задания', 'заданий')}, "
+            f"{plural_ru(runs, 'прогон', 'прогона', 'прогонов')} — подробности: /schedule[/dim]"
+        )
+
+    def _print_schedule_line(self) -> None:
+        """Строка о прогонах, случившихся с прошлого сообщения: то, что агент сообщает сам.
+
+        Снимок готовит агент (`last_schedule`), интерфейс только печатает. В history.json строка
+        не попадает — как строки сжатия, фактов, маршрутизации памяти и вызова инструмента.
+        Во время прогона `/task` объявления нет: ходов агента там не происходит, и накопившееся
+        выйдет первым же ответом после прогона.
+        """
+        announced = self.agent.last_schedule
+        if announced is None:
+            return
+        line = (
+            f"🗓 Планировщик: {plural_ru(len(announced.runs), 'новый прогон', 'новых прогона', 'новых прогонов')}"
+        )
+        if announced.fresh:
+            line += f", впервые собрано {plural_ru(announced.fresh, 'запись', 'записи', 'записей')}"
+        if announced.failed:
+            line += f", с отказом: {announced.failed}"
+        self.console.print(f"[dim]{line} — подробности: /schedule[/dim]")
+
+    def _print_schedule_report(self) -> None:
+        """Отчёт /schedule: снимок планировщика, без запросов к модели и без запуска процессов.
+
+        Аргументы игнорируются: задания ставятся вызовом инструмента (автоматическим выбором
+        модели или `/tool call`), а не подкомандой — приложение о планировщике только читает.
+        """
+        report = self.agent.schedule_report()
+        self.console.print("[bold cyan]Планировщик заданий (без обращения к модели):[/bold cyan]")
+        self.console.print(f"[dim]  Файл: {escape(report.path)}[/dim]")
+        if not report.jobs:
+            self.console.print(
+                "[dim]  Заданий нет: поставьте задание вызовом инструмента планировщика — "
+                "попросите об этом модель или вызовите его вручную через /tool call.[/dim]"
+            )
+            return
+        runs_by_job = {}
+        for run in report.runs:
+            runs_by_job[run.number] = run
+        for job in report.jobs:
+            arguments = ", ".join(f"{key}={value}" for key, value in job.arguments.items())
+            self.console.print(
+                f"[dim]  {job.number}. {escape(job.tool)}"
+                f"{' (' + escape(arguments) + ')' if arguments else ''}: "
+                f"каждые {job.every_minutes} мин, следующий запуск "
+                f"{time.strftime('%H:%M:%S', time.localtime(job.next_run))}, "
+                f"прогонов {job.runs}[/dim]"
+            )
+            last = runs_by_job.get(job.number)
+            if last is not None:
+                mark = "выполнено" if last.ok else "отказ"
+                self.console.print(f"[dim]     последний прогон: {mark} — {escape(last.summary)}[/dim]")
+        self.console.print(
+            f"[dim]  Прогонов в журнале: {len(report.runs)}, накоплено записей: "
+            f"{report.collected_total}.[/dim]"
+        )
+        self.console.print(
+            "[dim]  Задания выполняет фоновый исполнитель: ./tabletop-scheduler.py "
+            "(разовый проход — ключ --once).[/dim]"
+        )
 
     def _print_invariants_report(self) -> None:
         """Отчёт /invariants: таблица инвариантов из снимка агента, без запросов к модели.

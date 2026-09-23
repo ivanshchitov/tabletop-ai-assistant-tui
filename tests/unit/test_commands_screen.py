@@ -24,6 +24,7 @@ def test_panel_lists_all_commands_with_descriptions():
         # о подключении к MCP-серверу и его инструментах.
         "/mcp",
         "/tool",
+        "/schedule",
     ]
     for command, description in commands_screen.COMMAND_OPTIONS:
         assert command.startswith("/")

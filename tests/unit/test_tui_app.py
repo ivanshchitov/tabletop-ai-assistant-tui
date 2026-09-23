@@ -14,6 +14,7 @@ from core import tabletop_agent
 from core.history_manager import HistoryManager
 from core.long_term_memory import LongTermMemory
 from core import task_state
+from core.schedule_store import ScheduleStore
 from core.task_state import TaskStore
 from core.user_profile import ProfileStore
 from ui import branches_screen, keyboard, settings_screen, tui_app
@@ -115,6 +116,9 @@ def isolated_long_term_memory(tmp_path, monkeypatch):
         tabletop_agent, "ProfileStore", lambda: ProfileStore(tmp_path / "profile.json")
     )
     monkeypatch.setattr(tabletop_agent, "TaskStore", lambda: TaskStore(tmp_path / "task.json"))
+    monkeypatch.setattr(
+        tabletop_agent, "ScheduleStore", lambda: ScheduleStore(tmp_path / "schedule.json")
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -2255,3 +2259,46 @@ def test_journal_line_after_a_failed_call(make_app, recording_console, monkeypat
 
     assert recording_console.contains("Инструмент не вызван")
     assert recording_console.contains("Ответ про настолки")
+
+
+# --- планировщик ----------------------------------------------------------------------
+
+
+def test_schedule_report_without_jobs(make_app, recording_console):
+    app = make_app(["/schedule"])
+    app.run()
+
+    assert recording_console.contains("Планировщик заданий")
+    assert recording_console.contains("Заданий нет")
+    assert app.client.calls == []
+
+
+def test_schedule_report_shows_jobs_runs_and_collected(make_app, recording_console, tmp_path):
+    store = ScheduleStore(path=tmp_path / "schedule.json")
+    job = store.add_job(
+        tool="dnd_digest", arguments={"section": "spells"}, every_minutes=5, next_run=1000.0
+    )
+    store.record_run(job, at=1000.0, ok=True, summary="собрано 5, впервые: 3", collected=5, fresh=3)
+    store.remember_collected("spells/2014", ["лечение", "щит"])
+
+    app = make_app(["/schedule"])
+    app.agent.schedule = store
+    app.run()
+
+    assert recording_console.contains("dnd_digest")
+    assert recording_console.contains("каждые 5 мин")
+    assert recording_console.contains("прогонов 1")
+    assert recording_console.contains("накоплено записей: 2")
+
+
+def test_schedule_report_escapes_foreign_text(make_app, recording_console, tmp_path):
+    """Итог прогона — текст чужого процесса: без escape rich принял бы его за разметку."""
+    store = ScheduleStore(path=tmp_path / "schedule.json")
+    job = store.add_job(tool="dnd_digest", arguments={}, every_minutes=5, next_run=0.0)
+    store.record_run(job, at=0.0, ok=False, summary="[/dim] отказ", collected=0, fresh=0)
+
+    app = make_app(["/schedule"])
+    app.agent.schedule = store
+    app.run()
+
+    assert recording_console.contains("[/dim] отказ")
