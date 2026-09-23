@@ -2,7 +2,7 @@
 
 import pytest
 
-from core import config, prompts
+from core import config, mcp_tools, prompts
 from core.answer_settings import AnswerFormat, AnswerSettings
 
 REFUSAL_PHRASE = (
@@ -146,3 +146,19 @@ def test_user_prompt_handles_empty_and_multiline_questions():
     multiline = prompts.build_user_prompt("Первая строка\nВторая строка", AnswerSettings())
     assert "Первая строка\nВторая строка" in multiline
     assert prompts.build_user_prompt("", AnswerSettings())
+
+
+def test_system_prompt_allows_requests_about_the_assistants_own_tools():
+    """Просьба настроить сбор игровых данных — тема игр, а не посторонний вопрос.
+
+    Живой прогон дня 18: `schedule_add` вызывался успешно, а ответом шла фраза отказа —
+    модель принимала операцию над игровыми данными за вопрос не по теме.
+    """
+    message = prompts.build_system_message(AnswerFormat.FREE)
+    assert "собственной работе с данными об играх" in message
+    assert "отказ НЕ даётся" in message
+
+
+def test_tool_result_instruction_forbids_refusing_after_a_call():
+    instruction = mcp_tools.result_instruction()
+    assert "отвечай по результату, а не фразой отказа" in instruction

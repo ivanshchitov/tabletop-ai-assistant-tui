@@ -508,17 +508,18 @@ def test_summary_is_used_in_following_requests_without_resummarizing():
 def test_ceiling_estimate_above_limit_triggers_early_compression(monkeypatch):
     """Потолок токенов: оценка выше потолка сжимает досрочно, независимо от порога.
 
-    EPT=1: система ~1650 ток. плюс сообщение инвариантов ~1500 ток.; 3 обмена с ответами
-    ~700 симв. дают ~3225 ток. ходов — при потолке 6000 сжатие срабатывает на четвёртом вопросе
-    при raw=6 < порога (потолок поднят с 5000 после add-agent-invariants: сообщение инвариантов
-    входит в оценку каждого запроса).
+    EPT=1: система ~2000 ток. плюс сообщение инвариантов ~1500 ток.; 3 обмена с ответами
+    ~700 симв. дают ~3225 ток. ходов — при потолке 6500 сжатие срабатывает на четвёртом вопросе
+    при raw=6 < порога (потолок поднимался дважды: после add-agent-invariants — из-за сообщения
+    инвариантов в каждом запросе, и после fix-tool-request-refusal — из-за выросшего системного
+    промпта; оба входят в оценку каждого запроса).
     """
     monkeypatch.setattr(config, "ESTIMATED_CHARS_PER_TOKEN", 1)
     agent, client = make_agent(
         answers=[f"Ответ {i} " + "х" * 700 for i in range(1, 4)]
         + ["РЕЗЮМЕ 1", "Ответ 4", "Ответ 5"]
     )
-    agent.settings = agent.settings.with_max_session_tokens(6000)
+    agent.settings = agent.settings.with_max_session_tokens(6500)
     for i in range(1, 4):
         agent.ask(f"Вопрос {i}")  # raw=6, оценка ещё под потолком
     agent.ask("Вопрос 4")  # оценка выше потолка: суммаризатор + вопрос

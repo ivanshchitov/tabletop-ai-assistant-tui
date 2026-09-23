@@ -147,7 +147,9 @@ def app(
 
 
 @pytest.fixture
-def live_app(history_file, memory_file, profile_file, task_file, tasks_dir, tui_display, request):
+def live_app(
+    history_file, memory_file, profile_file, task_file, tasks_dir, schedule_file, tui_display, request
+):
     """Сессия против настоящего OpenCode Zen — без stub-сервера и с реальным ключом.
 
     Пропускает тест, если ключа нет: репозиторий должен оставаться проверяемым без него.
@@ -170,6 +172,7 @@ def live_app(history_file, memory_file, profile_file, task_file, tasks_dir, tui_
             profile_file=profile_file,
             task_file=task_file,
             tasks_dir=tasks_dir,
+            schedule_file=schedule_file,
             api_url=None,
             **kwargs,
         )

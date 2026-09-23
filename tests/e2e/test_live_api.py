@@ -153,6 +153,27 @@ def test_live_off_topic_refusal_survives_a_formatting_request(live_app):
     assert _collapse(REFUSAL_PHRASE) in _collapse(answer)
 
 
+def test_live_tool_request_is_not_refused(live_app, schedule_file):
+    """Просьба о собственных инструментах — тема игр: отказ здесь был дефектом (день 18).
+
+    Автовызов включён специально: модель сама ставит задание планировщика, и ответ должен
+    рассказывать о нём, а не отдавать фразу отказа.
+    """
+    with live_app(auto_tools=True) as session:
+        answer = answer_text(
+            session,
+            "Настрой сбор новых заклинаний D&D: вызывай dnd_digest по разделу spells каждую минуту",
+        )
+
+    assert _collapse(REFUSAL_PHRASE) not in _collapse(answer), (
+        "Просьба о собственном инструменте получила фразу отказа.\n"
+        f"Получено: {answer!r}"
+    )
+    assert json.loads(schedule_file.read_text(encoding="utf-8"))["jobs"], (
+        "Задание не создано — проверять нечего"
+    )
+
+
 def test_live_json_format_returns_valid_json(live_app):
     """В JSON-формате модель обязана вернуть разбираемый JSON — иначе приложение предупреждает."""
     with live_app() as session:
