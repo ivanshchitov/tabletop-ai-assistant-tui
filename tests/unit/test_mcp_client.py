@@ -101,6 +101,10 @@ def test_tool_names_are_not_hardcoded_in_the_app():
         "schedule_list",
         "schedule_run_due",
         "schedule_summary",
+        # Цепочка дня 19: сводка и сохранение — тоже инструменты сервера. Сводка названа
+        # dnd_summarize, потому что голое «summarize» подстрокой встречается в суммаризаторе.
+        "dnd_summarize",
+        "save_to_file",
     ):
         assert not any(name in source for source in sources)
 

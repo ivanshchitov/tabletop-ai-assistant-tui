@@ -235,3 +235,13 @@ def test_unparsable_arguments_string_is_rejected(scheduler):
     )
     assert "arguments" in text
     assert "заданий нет" in scheduler.call("schedule_list", {})
+
+
+def test_call_result_reports_failure_flag(scheduler):
+    """Сервер ставит признак ошибки по этому флагу (день 19): отказ отличим от данных."""
+    ok, text = scheduler.call_result("schedule_add", {"tool": ""})
+    assert ok is False and text.startswith("Неверные аргументы")
+    ok, text = scheduler.call_result("schedule_drop", {})
+    assert ok is False and "не объявлен" in text
+    ok, _ = scheduler.call_result("schedule_list", {})
+    assert ok is True

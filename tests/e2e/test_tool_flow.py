@@ -143,3 +143,51 @@ def test_tool_lines_are_not_written_to_history(app, stub, history_file):
     stored = json.loads(history_file.read_text(encoding="utf-8"))
     assert "fake_echo" not in json.dumps(stored, ensure_ascii=False)
     assert stored["dialogues"][-1]["answer"] == "Ответ с данными инструмента."
+
+
+# --- цепочка инструментов (день 19) ---
+
+
+CHAIN = json.dumps(
+    {
+        "steps": [
+            {"tool": "fake_search", "arguments": {"query": "огонь"}},
+            {"tool": "fake_echo", "arguments": {"first": "$1"}},
+            {"tool": "fake_echo", "arguments": {"first": "$2", "second": "fire-spells"}},
+        ]
+    },
+    ensure_ascii=False,
+)
+STEP_1 = "фейковый вызов fake_search(query=огонь)"
+STEP_2 = f"фейковый вызов fake_echo(first={STEP_1})"
+STEP_3 = f"фейковый вызов fake_echo(first={STEP_2}, second=fire-spells)"
+
+
+def test_chain_runs_automatically_and_passes_data(app, stub, history_file):
+    """Три шага по одному запросу выбора; вход каждого шага — дословно выход предыдущего."""
+    stub.sequence(answer(CHAIN), answer("Сводка сохранена."))
+    with app(auto_tools=True) as session:
+        session.wait_for("MCP: 1/1")
+        session.wait_for_prompt()
+        session.send_line("Найди заклинания огня, сведи и сохрани в файл")
+        text = session.wait_for("Токены:")
+        session.send_line("/exit")
+        session.wait_exit()
+
+    # Строки журнала длиннее ширины терминала и переносятся — сверяем по тексту без переносов.
+    flat = " ".join(text.split())
+    assert "🔧 1/3" in flat and "🔧 2/3" in flat and "🔧 3/3" in flat
+    # Объёмы в журнале: шаг 2 получил ровно столько, сколько вернул шаг 1, и так далее.
+    assert f"first ← шаг 1: {len(STEP_1)} симв." in flat
+    assert f"first ← шаг 2: {len(STEP_2)} симв." in flat
+    assert f"→ {len(STEP_3)} симв." in flat
+    # Один запрос выбора плюс вопрос: шаги цепочки к модели не обращаются.
+    assert stub.call_count == 2
+    systems = [m["content"] for m in stub.payload_at(1)["messages"] if m["role"] == "system"]
+    chain_message = next(content for content in systems if "Шаг 1" in content)
+    # Эхо-сервер вернул то, что получил: результат шага 3 содержит данные шага 1 без искажений.
+    assert STEP_3 in chain_message
+    assert "first=← шаг 2" in chain_message
+
+    stored = json.loads(history_file.read_text(encoding="utf-8"))
+    assert "fake_search" not in json.dumps(stored, ensure_ascii=False)

@@ -3,7 +3,7 @@
 Чистый слой без сети и без модели — как `context_strategies` для фактов.
 """
 
-from core import mcp_tools
+from core import config, mcp_tools
 from core.mcp_client import MCPTool
 from core.tabletop_agent import MCPReport
 
@@ -117,3 +117,92 @@ def test_result_message_carries_instruction():
 def test_render_arguments_is_readable():
     assert mcp_tools.render_arguments({"b": 2, "a": "раз"}) == "a=раз, b=2"
     assert mcp_tools.render_arguments({}) == "без аргументов"
+
+
+# --- цепочка шагов (день 19) ---
+
+
+CHAIN = (
+    '{"steps": ['
+    '{"tool": "fake_search", "arguments": {"query": "огонь"}},'
+    '{"server": "сервер", "tool": "echo_tool", "arguments": {"text": "$1"}}'
+    "]}"
+)
+
+
+def test_parse_chain_reads_steps_in_order():
+    steps, dropped = mcp_tools.parse_chain(CHAIN)
+    assert [step.tool for step in steps] == ["fake_search", "echo_tool"]
+    assert steps[0].server == ""
+    assert steps[1].server == "сервер"
+    assert steps[1].arguments == {"text": "$1"}
+    assert dropped == 0
+
+
+def test_parse_chain_accepts_the_single_tool_format():
+    """Прежний ответ с одним инструментом — цепочка из одного шага."""
+    steps, dropped = mcp_tools.parse_chain('{"tool": "echo_tool", "arguments": {"text": "a"}}')
+    assert [step.tool for step in steps] == ["echo_tool"]
+    assert dropped == 0
+
+
+def test_parse_chain_no_tool_is_none():
+    assert mcp_tools.parse_chain('{"tool": null}') is None
+    assert mcp_tools.parse_chain('{"steps": []}') is None
+
+
+def test_parse_chain_unparsed_is_a_failure():
+    assert mcp_tools.parse_chain("совсем не JSON") is mcp_tools.UNPARSED
+
+
+def test_parse_chain_caps_the_number_of_steps():
+    steps = ",".join('{"tool": "echo_tool", "arguments": {}}' for _ in range(config.TOOL_CHAIN_MAX_STEPS + 2))
+    parsed, dropped = mcp_tools.parse_chain('{"steps": [' + steps + "]}")
+    assert len(parsed) == config.TOOL_CHAIN_MAX_STEPS == 4
+    assert dropped == 2
+
+
+def test_parse_chain_skips_steps_without_tool_name():
+    steps, _ = mcp_tools.parse_chain('{"steps": [{"tool": ""}, {"tool": "echo_tool"}, "мусор"]}')
+    assert [step.tool for step in steps] == ["echo_tool"]
+
+
+def test_reference_is_replaced_verbatim():
+    text = "строка 1\nстрока 2 с «кавычками» и $1 внутри"
+    resolved, sources = mcp_tools.resolve_references({"text": "$1", "name": "файл"}, [text])
+    assert resolved == {"text": text, "name": "файл"}
+    assert sources == {"text": 1}
+
+
+def test_reference_inside_other_text_is_left_as_is():
+    resolved, sources = mcp_tools.resolve_references({"text": "см. $1"}, ["данные"])
+    assert resolved == {"text": "см. $1"}
+    assert sources == {}
+
+
+def test_reference_to_unfinished_step_is_an_error():
+    import pytest
+
+    with pytest.raises(mcp_tools.ReferenceFailure, match="шаг 2"):
+        mcp_tools.resolve_references({"text": "$2"}, ["только первый"])
+    with pytest.raises(mcp_tools.ReferenceFailure):
+        mcp_tools.resolve_references({"text": "$0"}, ["первый"])
+
+
+def test_arguments_render_references_as_step_links():
+    rendered = mcp_tools.render_arguments({"text": "очень длинный текст", "name": "x"}, {"text": 1})
+    assert rendered == "name=x, text=← шаг 1"
+
+
+def test_chain_message_names_every_step_without_repeating_passed_text():
+    steps = [
+        ("сервер", "fake_search", {"query": "огонь"}, {}, "НАЙДЕНО-ТЕКСТ"),
+        ("сервер", "echo_tool", {"text": "НАЙДЕНО-ТЕКСТ"}, {"text": 1}, "СВОДКА-ТЕКСТ"),
+    ]
+    message = mcp_tools.tool_chain_message(steps)
+    assert "Шаг 1" in message and "Шаг 2" in message
+    assert "fake_search" in message and "echo_tool" in message
+    assert "text=← шаг 1" in message
+    # Переданный текст в сообщении один раз — как результат шага 1, а не ещё и в аргументах.
+    assert message.count("НАЙДЕНО-ТЕКСТ") == 1
+    assert "СВОДКА-ТЕКСТ" in message

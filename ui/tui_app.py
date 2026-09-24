@@ -1676,9 +1676,13 @@ class TabletopAITUI:
         В файл истории не пишется, как строки сжатия, фактов и маршрутизации памяти: это
         событие текущего обмена, а не часть диалога.
         """
-        result = self.agent.last_tool
-        if result is None:
-            return
+        chain = self.agent.last_tool_chain
+        if len(chain) == 1 and chain[0].total == 1:
+            self._print_single_tool_line(chain[0])
+        elif chain:
+            self._print_chain_lines(chain)
+
+    def _print_single_tool_line(self, result) -> None:
         if result.error:
             self.console.print(
                 f"[bold yellow]🔧 Инструмент не вызван: {escape(result.error)}[/bold yellow]"
@@ -1686,6 +1690,37 @@ class TabletopAITUI:
             return
         head = f"{result.server}.{result.tool} ({mcp_tools.render_arguments(result.arguments)})"
         self.console.print(f"[dim]🔧 Инструмент {escape(head)}[/dim]")
+
+    def _print_chain_lines(self, chain) -> None:
+        """Строки цепочки: шаг, что получено по ссылке и сколько, каков объём результата.
+
+        Объёмы — проверка передачи глазами: «← шаг 1: N симв.» у шага 2 совпадает с
+        «→ N симв.» у шага 1, потому что агент подставил результат дословно.
+        """
+        for result in chain:
+            number = f"{result.step}/{result.total}"
+            if result.error:
+                rest = result.total - result.step
+                tail = f"; цепочка остановлена, не выполнено шагов: {rest}" if rest else ""
+                self.console.print(
+                    f"[bold yellow]🔧 {number} шаг не выполнен ({escape(result.tool)}): "
+                    f"{escape(result.error)}{tail}[/bold yellow]"
+                )
+                continue
+            arguments = mcp_tools.render_arguments(result.arguments, result.sources)
+            head = f"{number} {result.server}.{result.tool} ({arguments})"
+            passed = "".join(
+                f"; {key} ← шаг {source}: {len(result.arguments[key])} симв."
+                for key, source in sorted(result.sources.items())
+            )
+            self.console.print(
+                f"[dim]🔧 {escape(head)}{escape(passed)} → {len(result.text)} симв.[/dim]"
+            )
+        dropped = chain[-1].dropped
+        if dropped:
+            self.console.print(
+                f"[bold yellow]🔧 Отброшено шагов сверх потолка: {dropped}[/bold yellow]"
+            )
 
     def _print_facts_line(self) -> None:
         """Строка о блоке фактов: печатается один раз на изменение отчёта агента.

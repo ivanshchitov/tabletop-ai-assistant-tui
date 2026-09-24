@@ -48,7 +48,8 @@ def test_schemas_declare_types_and_required_fields():
     for schema in schemas.values():
         assert schema["type"] == "object"
         for parameter in schema["properties"].values():
-            assert parameter["type"] in {"string", "integer"}
+            # boolean — флаг подробностей поиска (день 19).
+            assert parameter["type"] in {"string", "integer", "boolean"}
             assert parameter["description"]
     entry = next(tool for tool in TOOLS if "required" in tool.input_schema and tool.input_schema["required"])
     assert entry.input_schema["required"]
@@ -209,3 +210,41 @@ def test_digest_rejects_unknown_section_without_calling_the_api(digest_tools, st
     text = digest_tools.call("dnd_digest", {"section": "таверны"})
     assert "неизвестен" in text
     assert all("/таверны" not in path for path in stub.paths)
+
+
+# --- поиск с подробностями (день 19) ---
+
+
+def test_search_details_is_an_optional_boolean():
+    search = next(tool for tool in TOOLS if tool.name == "dnd_search")
+    details = search.input_schema["properties"]["details"]
+    assert details["type"] == "boolean"
+    assert details["default"] is False
+    assert "details" not in search.input_schema["required"]
+
+
+def test_search_without_details_keeps_the_plain_list(tools, stub):
+    text = tools.call("dnd_search", {"section": "spells", "query": "fire"})
+    assert "- fireball: Fireball" in text
+    # Без подробностей записи не запрашиваются: прежний поиск — один запрос списка.
+    assert not any(path.endswith("/spells/fireball") for path in stub.paths)
+
+
+def test_search_details_carries_entry_fields_as_json(tools):
+    """Подробный поиск — вход для сводки: основные поля записей в машиночитаемом виде."""
+    text = tools.call("dnd_search", {"section": "spells", "query": "fire", "details": True})
+    header, _, body = text.partition("\n")
+    assert "spells" in header
+    records = json.loads(body)
+    assert [record["index"] for record in records] == ["fireball", "fire-bolt"]
+    fireball = records[0]
+    assert fireball["name"] == "Fireball"
+    assert fireball["level"] == 3
+    assert fireball["school"] == "Evocation"
+    assert fireball["desc"].startswith("Взрыв пламени")
+
+
+def test_search_details_accepts_string_flag(tools):
+    """Ручной `/tool call` передаёт значения строками: «true» тоже включает подробности."""
+    text = tools.call("dnd_search", {"section": "spells", "query": "fire", "details": "true"})
+    assert json.loads(text.partition("\n")[2])[0]["index"] == "fireball"

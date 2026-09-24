@@ -88,6 +88,8 @@ SCHEDULE_TOOLS: Tuple[ToolSpec, ...] = (
 
 SCHEDULE_TOOL_NAMES = tuple(tool.name for tool in SCHEDULE_TOOLS)
 
+ARGUMENT_ERROR_PREFIX = "Неверные аргументы"
+
 
 class Scheduler:
     """Инструменты планировщика поверх хранилища и исполнителя вызова."""
@@ -106,6 +108,10 @@ class Scheduler:
         self._now = now
 
     def call(self, name: str, arguments: Dict[str, Any]) -> str:
+        return self.call_result(name, arguments)[1]
+
+    def call_result(self, name: str, arguments: Dict[str, Any]) -> Tuple[bool, str]:
+        """То же, но с признаком успеха: по нему сервер ставит протокольный признак ошибки."""
         handlers = {
             "schedule_add": self._add,
             "schedule_list": self._list,
@@ -114,10 +120,13 @@ class Scheduler:
         }
         handler = handlers.get(name)
         if handler is None:
-            return (
+            return False, (
                 f"Инструмент «{name}» не объявлен. Доступны: {', '.join(SCHEDULE_TOOL_NAMES)}."
             )
-        return handler(arguments or {})
+        text = handler(arguments or {})
+        # Все отказы планировщика начинаются одной фразой: разбирать каждую ветку отдельно
+        # значило бы переписать инструменты ради флага, которого прежде не требовалось.
+        return not text.startswith(ARGUMENT_ERROR_PREFIX), text
 
     # --- инструменты ---
 

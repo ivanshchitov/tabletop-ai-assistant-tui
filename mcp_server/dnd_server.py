@@ -21,6 +21,7 @@ from typing import Any, Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from mcp_server.dnd_tools import TOOLS, DndTools  # noqa: E402
+from mcp_server.pipeline_tools import PIPELINE_TOOL_NAMES, PIPELINE_TOOLS, PipelineTools  # noqa: E402
 from mcp_server.scheduler import SCHEDULE_TOOL_NAMES, SCHEDULE_TOOLS, Scheduler  # noqa: E402
 
 SERVER_NAME = "dnd-rules"
@@ -28,11 +29,16 @@ SERVER_VERSION = "1.0.0"
 SERVER_INSTRUCTIONS = (
     "Справочник правил настольной ролевой игры D&D 5e: разделы, поиск по разделу, полная "
     "запись по идентификатору и сбор раздела с накоплением, плюс планировщик отложенных и "
-    "периодических вызовов этих инструментов."
+    "периодических вызовов этих инструментов, сводка найденных записей и сохранение текста "
+    "в файл — звенья цепочки «поиск → сводка → файл»."
 )
 
 
-def build_server(tools: DndTools, scheduler: Optional[Scheduler] = None):
+def build_server(
+    tools: DndTools,
+    scheduler: Optional[Scheduler] = None,
+    pipeline: Optional[PipelineTools] = None,
+):
     """Собрать сервер: справочные инструменты и планировщик поверх готового исполнителя вызовов."""
     from mcp import types
     from mcp.server.lowlevel import Server
@@ -46,9 +52,11 @@ def build_server(tools: DndTools, scheduler: Optional[Scheduler] = None):
             tool_names=[tool.name for tool in TOOLS],
         )
 
+    pipeline = pipeline if pipeline is not None else PipelineTools()
+
     declarations = [
         types.Tool(name=tool.name, description=tool.description, inputSchema=tool.input_schema)
-        for tool in TOOLS + SCHEDULE_TOOLS
+        for tool in TOOLS + SCHEDULE_TOOLS + PIPELINE_TOOLS
     ]
 
     async def on_list_tools(context, params) -> Any:
@@ -58,9 +66,18 @@ def build_server(tools: DndTools, scheduler: Optional[Scheduler] = None):
         # Вызов ходит в сеть (а вызов планировщика — ещё и в инструменты), поэтому выполняется
         # в отдельном потоке: блокирующий запрос прямо в событийном цикле задержал бы и ответ
         # на ping, и завершение процесса.
-        call = scheduler.call if params.name in SCHEDULE_TOOL_NAMES else tools.call
-        text = await asyncio.to_thread(call, params.name, dict(params.arguments or {}))
-        return types.CallToolResult(content=[types.TextContent(type="text", text=text)])
+        if params.name in SCHEDULE_TOOL_NAMES:
+            call = scheduler.call_result
+        elif params.name in PIPELINE_TOOL_NAMES:
+            call = pipeline.call_result
+        else:
+            call = tools.call_result
+        ok, text = await asyncio.to_thread(call, params.name, dict(params.arguments or {}))
+        # Отказ помечается протокольным признаком ошибки: иначе клиент не отличит «Неверные
+        # аргументы: …» от данных, и цепочка передала бы текст отказа следующему инструменту.
+        return types.CallToolResult(
+            content=[types.TextContent(type="text", text=text)], is_error=not ok
+        )
 
     return Server(
         SERVER_NAME,

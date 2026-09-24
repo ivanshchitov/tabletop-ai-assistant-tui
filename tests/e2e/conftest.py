@@ -103,6 +103,12 @@ def schedule_file(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def exports_dir(tmp_path: Path) -> Path:
+    """Каталог выгрузок: прогон не должен писать в реальный exports/ репозитория."""
+    return tmp_path / "exports"
+
+
+@pytest.fixture
 def app(
     stub,
     history_file,
@@ -111,6 +117,7 @@ def app(
     task_file,
     tasks_dir,
     schedule_file,
+    exports_dir,
     tui_display,
     request,
 ):
@@ -133,6 +140,7 @@ def app(
             task_file=task_file,
             tasks_dir=tasks_dir,
             schedule_file=schedule_file,
+            exports_dir=exports_dir,
             **kwargs,
         )
         sessions.append(session)

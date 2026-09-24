@@ -2261,6 +2261,57 @@ def test_journal_line_after_a_failed_call(make_app, recording_console, monkeypat
     assert recording_console.contains("Ответ про настолки")
 
 
+CHAIN_ANSWER = (
+    '{"steps": ['
+    '{"tool": "fake_search", "arguments": {"query": "огонь"}},'
+    '{"tool": "fake_echo", "arguments": {"first": "$1"}},'
+    '{"tool": "fake_echo", "arguments": {"first": "$2", "second": "файл"}}'
+    "]}"
+)
+
+
+def test_chain_prints_a_line_per_step_with_passed_volume(make_app, recording_console, monkeypatch):
+    """Цепочка (день 19): строка на шаг, объём переданного равен объёму результата источника."""
+    fake_registry(monkeypatch, fake_spec("рабочий"))
+    client = FakeClient([CHAIN_ANSWER, "Ответ про настолки"])
+    app = make_app(["Вопрос про настолки", "/exit"], client)
+    app.run()
+
+    first, second, third = app.agent.last_tool_chain
+    assert recording_console.contains("🔧 1/3 рабочий.fake_search")
+    assert recording_console.contains("🔧 2/3 рабочий.fake_echo")
+    assert recording_console.contains("🔧 3/3 рабочий.fake_echo")
+    assert recording_console.contains(f"first ← шаг 1: {len(first.text)} симв.")
+    assert recording_console.contains(f"first ← шаг 2: {len(second.text)} симв.")
+    assert recording_console.contains(f"→ {len(third.text)} симв.")
+
+
+def test_chain_failure_names_the_step_and_stops(make_app, recording_console, monkeypatch):
+    fake_registry(monkeypatch, fake_spec("рабочий"))
+    broken = (
+        '{"steps": [{"tool": "fake_search", "arguments": {}},'
+        '{"tool": "нет-такого", "arguments": {"first": "$1"}},'
+        '{"tool": "fake_echo", "arguments": {"first": "$2"}}]}'
+    )
+    client = FakeClient([broken, "Ответ про настолки"])
+    make_app(["Вопрос про настолки", "/exit"], client).run()
+
+    assert recording_console.contains("🔧 2/3 шаг не выполнен")
+    assert recording_console.contains("цепочка остановлена, не выполнено шагов: 1")
+    assert not recording_console.contains("🔧 3/3")
+    assert recording_console.contains("Ответ про настолки")
+
+
+def test_chain_reports_dropped_steps(make_app, recording_console, monkeypatch):
+    fake_registry(monkeypatch, fake_spec("рабочий"))
+    many = ",".join('{"tool": "fake_search", "arguments": {}}' for _ in range(5))
+    client = FakeClient(['{"steps": [' + many + "]}", "Ответ"])
+    make_app(["Вопрос про настолки", "/exit"], client).run()
+
+    assert recording_console.contains("🔧 4/4")
+    assert recording_console.contains("Отброшено шагов сверх потолка: 1")
+
+
 # --- планировщик ----------------------------------------------------------------------
 
 

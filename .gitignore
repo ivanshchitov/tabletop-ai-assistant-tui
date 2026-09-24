@@ -224,6 +224,7 @@ profile.json
 task.json
 tasks/
 schedule.json
+exports/
 
 # Solve-challenge-task: screen recordings and README drafts
 videos/

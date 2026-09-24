@@ -2392,3 +2392,120 @@ def test_schedule_report_sees_runs_written_by_another_process(tmp_path):
     writer.record_run(writer.jobs()[0], at=2000.0, ok=True, summary="новый прогон", collected=9, fresh=2)
 
     assert any(run.summary == "новый прогон" for run in agent.schedule_report().runs)
+
+
+# --- цепочка инструментов (день 19) ---------------------------------------------------
+
+
+CHAIN = (
+    '{"steps": ['
+    '{"tool": "fake_search", "arguments": {"query": "огонь"}},'
+    '{"tool": "fake_echo", "arguments": {"first": "$1"}},'
+    '{"tool": "fake_echo", "arguments": {"first": "$2", "second": "fire-spells"}}'
+    "]}"
+)
+
+
+def test_chain_runs_every_step_with_one_choice_request(monkeypatch):
+    agent, client = connected_agent(monkeypatch, answers=[CHAIN, "Ответ модели"])
+
+    meta = agent.ask("найди, сведи и сохрани")
+
+    chain = agent.last_tool_chain
+    assert [step.tool for step in chain] == ["fake_search", "fake_echo", "fake_echo"]
+    assert all(step.error == "" for step in chain)
+    assert [(step.step, step.total) for step in chain] == [(1, 3), (2, 3), (3, 3)]
+    # Один запрос выбора плюс сам вопрос: шаги цепочки новых запросов к модели не делают.
+    assert len(client.calls) == 2
+    assert meta.content == "Ответ модели"
+    assert agent.last_tool is chain[-1]
+
+
+def test_chain_passes_previous_result_verbatim(monkeypatch):
+    """Корректность передачи: аргумент шага N+1 — ровно текст результата шага N."""
+    agent, _ = connected_agent(monkeypatch, answers=[CHAIN, "Ответ модели"])
+
+    agent.ask("найди, сведи и сохрани")
+
+    first, second, third = agent.last_tool_chain
+    assert second.arguments["first"] == first.text
+    assert second.sources == {"first": 1}
+    assert third.arguments["first"] == second.text
+    assert third.sources == {"first": 2}
+    assert third.arguments["second"] == "fire-spells"
+    # Эхо-инструмент возвращает то, что получил: текст шага 1 дошёл до шага 3 внутри шага 2.
+    assert first.text in third.text
+
+
+def test_chain_results_go_into_the_request(monkeypatch):
+    agent, client = connected_agent(monkeypatch, answers=[CHAIN, "Ответ модели"])
+
+    agent.ask("найди, сведи и сохрани")
+
+    system_contents = [m["content"] for m in client.calls[-1]["messages"] if m["role"] == "system"]
+    chain_message = next(content for content in system_contents if "Шаг 1" in content)
+    assert "Шаг 2" in chain_message and "Шаг 3" in chain_message
+    assert "first=← шаг 1" in chain_message
+
+
+def test_chain_stops_on_a_failed_step(monkeypatch):
+    broken = (
+        '{"steps": ['
+        '{"tool": "fake_search", "arguments": {"query": "огонь"}},'
+        '{"tool": "нет-такого", "arguments": {"first": "$1"}},'
+        '{"tool": "fake_echo", "arguments": {"first": "$2"}}'
+        "]}"
+    )
+    agent, client = connected_agent(monkeypatch, answers=[broken, "Ответ модели"])
+
+    meta = agent.ask("вопрос")
+
+    chain = agent.last_tool_chain
+    assert [step.tool for step in chain] == ["fake_search", "нет-такого"]
+    assert chain[0].error == "" and chain[1].error
+    assert chain[1].total == 3
+    assert meta.content == "Ответ модели"
+    system_contents = [m["content"] for m in client.calls[-1]["messages"] if m["role"] == "system"]
+    # В запрос уходит только то, что выполнено успешно до сбоя.
+    assert any("fake_search" in content for content in system_contents)
+    assert not any("нет-такого" in content for content in system_contents)
+
+
+def test_forward_reference_fails_the_step_without_a_call(monkeypatch):
+    forward = '{"steps": [{"tool": "fake_echo", "arguments": {"first": "$1"}}]}'
+    agent, _ = connected_agent(monkeypatch, answers=[forward, "Ответ модели"])
+
+    agent.ask("вопрос")
+
+    (step,) = agent.last_tool_chain
+    assert "шаг 1" in step.error
+    assert step.text == ""
+
+
+def test_chain_longer_than_the_ceiling_is_cut(monkeypatch):
+    many = ",".join('{"tool": "fake_search", "arguments": {}}' for _ in range(config.TOOL_CHAIN_MAX_STEPS + 1))
+    agent, _ = connected_agent(monkeypatch, answers=['{"steps": [' + many + "]}", "Ответ"])
+
+    agent.ask("вопрос")
+
+    chain = agent.last_tool_chain
+    assert len(chain) == config.TOOL_CHAIN_MAX_STEPS
+    assert chain[-1].dropped == 1
+
+
+def test_single_tool_is_a_chain_of_one(monkeypatch):
+    agent, _ = connected_agent(monkeypatch, answers=[CHOICE, "Ответ модели"])
+
+    agent.ask("вопрос")
+
+    (step,) = agent.last_tool_chain
+    assert (step.step, step.total, step.sources, step.dropped) == (1, 1, {}, 0)
+
+
+def test_no_tool_leaves_an_empty_chain(monkeypatch):
+    agent, _ = connected_agent(monkeypatch, answers=[NO_CHOICE, "Ответ модели"])
+
+    agent.ask("вопрос")
+
+    assert agent.last_tool_chain == ()
+    assert agent.last_tool is None

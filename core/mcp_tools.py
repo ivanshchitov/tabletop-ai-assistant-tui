@@ -16,7 +16,7 @@ import json
 import re
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from . import config
 
@@ -32,7 +32,15 @@ RESULT_MESSAGE_TEMPLATE = (
     "Инструмент «{tool}» сервера «{server}», аргументы: {arguments}.\n\n{text}\n\n{instruction}"
 )
 
+CHAIN_MESSAGE_TEMPLATE = (
+    "Данные внешних источников, полученные для текущего вопроса цепочкой инструментов "
+    "(шагов: {count}).\n\n{steps}\n\n{instruction}"
+)
+CHAIN_STEP_TEMPLATE = "Шаг {number}: инструмент «{tool}» сервера «{server}», аргументы: {arguments}.\n{text}"
+
 NO_ARGUMENTS = "без аргументов"
+# Ссылка на результат выполненного шага: аргумент, целиком равный «$N».
+_REFERENCE_RE = re.compile(r"^\$(\d+)$")
 
 _FENCED_JSON_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
 _JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
@@ -136,6 +144,64 @@ def parse_choice(text: str) -> Any:
     )
 
 
+class ReferenceFailure(ValueError):
+    """Аргумент ссылается на шаг, который ещё не выполнен: вызывать инструмент нельзя."""
+
+
+def parse_chain(text: str) -> Any:
+    """Разобрать ответ выбора как цепочку: (шаги, отброшено), None или `UNPARSED`.
+
+    Цепочка — `{"steps": [{"server", "tool", "arguments"}, ...]}`; прежний ответ с одним
+    инструментом — цепочка из одного шага. Шаги сверх `TOOL_CHAIN_MAX_STEPS` отбрасываются,
+    их число возвращается, чтобы журнал мог о нём сказать.
+    """
+    data = _first_json_object(text or "")
+    if data is None:
+        return UNPARSED
+    raw_steps = data.get("steps")
+    if not isinstance(raw_steps, list):
+        single = parse_choice(text)
+        return None if single is None else ((single,), 0)
+    steps = []
+    for raw in raw_steps:
+        if not isinstance(raw, dict):
+            continue
+        step = parse_choice(json.dumps(raw, ensure_ascii=False))
+        if isinstance(step, ToolChoice):
+            steps.append(step)
+    if not steps:
+        return None
+    limit = config.TOOL_CHAIN_MAX_STEPS
+    return tuple(steps[:limit]), max(0, len(steps) - limit)
+
+
+def resolve_references(
+    arguments: Dict[str, Any], results: List[str]
+) -> Tuple[Dict[str, Any], Dict[str, int]]:
+    """Подставить результаты выполненных шагов вместо ссылок `$N`.
+
+    Подстановка дословная: модель данные не перепечатывает, поэтому то, что вернул шаг N,
+    доходит до следующего инструмента без усечения и пересказа. Заменяется только значение,
+    целиком равное ссылке, — встраивание в текст породило бы случайные совпадения.
+    Возвращает аргументы и карту «аргумент → номер шага-источника».
+    """
+    resolved: Dict[str, Any] = {}
+    sources: Dict[str, int] = {}
+    for key, value in arguments.items():
+        match = _REFERENCE_RE.match(value.strip()) if isinstance(value, str) else None
+        if match is None:
+            resolved[key] = value
+            continue
+        number = int(match.group(1))
+        if not 1 <= number <= len(results):
+            raise ReferenceFailure(
+                f"аргумент {key} ссылается на шаг {number}, а выполнено шагов: {len(results)}"
+            )
+        resolved[key] = results[number - 1]
+        sources[key] = number
+    return resolved, sources
+
+
 def _first_json_object(text: str) -> Optional[Dict[str, Any]]:
     """Первый JSON-объект в тексте: модель любит обрамлять ответ пояснениями и ```-блоками."""
     candidates = _FENCED_JSON_RE.findall(text)
@@ -152,11 +218,21 @@ def _first_json_object(text: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def render_arguments(arguments: Dict[str, Any]) -> str:
-    """Аргументы одной строкой — и для журнала, и для сообщения модели."""
+def render_arguments(
+    arguments: Dict[str, Any], sources: Optional[Dict[str, int]] = None
+) -> str:
+    """Аргументы одной строкой — и для журнала, и для сообщения модели.
+
+    Аргумент, полученный по ссылке, пишется ссылкой на шаг: переданный текст уже есть в
+    результате шага-источника, и повторять его значило бы удвоить объём запроса.
+    """
     if not arguments:
         return NO_ARGUMENTS
-    return ", ".join(f"{key}={value}" for key, value in sorted(arguments.items()))
+    sources = sources or {}
+    return ", ".join(
+        f"{key}=← шаг {sources[key]}" if key in sources else f"{key}={value}"
+        for key, value in sorted(arguments.items())
+    )
 
 
 def tool_result_message(
@@ -169,4 +245,24 @@ def tool_result_message(
         arguments=render_arguments(arguments),
         text=text,
         instruction=result_instruction(),
+    )
+
+
+def tool_chain_message(steps: Iterable[Tuple[str, str, Dict[str, Any], Dict[str, int], str]]) -> str:
+    """Системное сообщение с результатами цепочки: каждый шаг — что вызвали и что вернулось.
+
+    Шаг — кортеж (сервер, инструмент, аргументы, источники ссылок, текст результата).
+    """
+    blocks = [
+        CHAIN_STEP_TEMPLATE.format(
+            number=number,
+            tool=tool,
+            server=server,
+            arguments=render_arguments(arguments, sources),
+            text=text,
+        )
+        for number, (server, tool, arguments, sources, text) in enumerate(steps, start=1)
+    ]
+    return CHAIN_MESSAGE_TEMPLATE.format(
+        count=len(blocks), steps="\n\n".join(blocks), instruction=result_instruction()
     )

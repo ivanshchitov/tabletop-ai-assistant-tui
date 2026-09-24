@@ -73,7 +73,7 @@ TOOLS: Tuple[ToolSpec, ...] = (
         name="dnd_search",
         description=(
             "Поиск записей внутри раздела справочника по части названия: возвращает "
-            "идентификаторы и названия найденных записей."
+            "идентификаторы и названия найденных записей, а с details=true — их основные поля."
         ),
         input_schema={
             "type": "object",
@@ -87,6 +87,14 @@ TOOLS: Tuple[ToolSpec, ...] = (
                     "type": "integer",
                     "description": f"Сколько записей вернуть, от {MIN_LIMIT} до {MAX_LIMIT}.",
                     "default": DEFAULT_LIMIT,
+                },
+                "details": {
+                    "type": "boolean",
+                    "description": (
+                        "true — вернуть основные поля каждой найденной записи JSON-массивом "
+                        "(вход для сводки dnd_summarize), false — только идентификаторы и названия."
+                    ),
+                    "default": False,
                 },
                 "ruleset": _RULESET_PARAMETER,
             },
@@ -138,6 +146,32 @@ TOOLS: Tuple[ToolSpec, ...] = (
 )
 
 TOOL_NAMES = tuple(tool.name for tool in TOOLS)
+
+
+# Поля, которые подробный поиск берёт из записи: по ним сводка строит строку записи. Берутся те,
+# что есть, — у разделов разный набор, а полная запись раздула бы каждый запрос к модели.
+BRIEF_FIELDS = (
+    "level", "school", "casting_time", "range", "duration",
+    "size", "type", "challenge_rating", "hit_points", "hit_die",
+)
+MAX_BRIEF_DESC_CHARS = 300
+
+
+def brief_record(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Основные поля записи: идентификатор, название, известные поля и начало описания."""
+    record: Dict[str, Any] = {"index": entry.get("index", ""), "name": entry.get("name", "")}
+    for key in BRIEF_FIELDS:
+        value = entry.get(key)
+        if isinstance(value, dict):
+            value = value.get("name")
+        if value is not None and value != "":
+            record[key] = value
+    desc = entry.get("desc")
+    if isinstance(desc, list):
+        desc = " ".join(str(part) for part in desc)
+    if isinstance(desc, str) and desc.strip():
+        record["desc"] = desc.strip()[:MAX_BRIEF_DESC_CHARS]
+    return record
 
 
 class ArgumentError(Exception):
@@ -194,6 +228,13 @@ class DndTools:
         results = self.api.search(section, query, limit=limit, ruleset=ruleset)
         if not results:
             return f"В разделе «{section}» ничего не найдено по запросу «{query}»."
+        if self._flag(arguments, "details"):
+            records = [
+                brief_record(self.api.entry(section, str(item.get("index", "")), ruleset=ruleset))
+                for item in results
+            ]
+            header = f"Найдено в разделе «{section}» (редакция {ruleset}), записей: {len(records)}"
+            return header + "\n" + json.dumps(records, ensure_ascii=False, indent=2)
         lines = [f"Найдено в разделе «{section}» (редакция {ruleset}):"]
         lines += [f"- {item.get('index', '?')}: {item.get('name', '')}" for item in results]
         return "\n".join(lines)
@@ -238,6 +279,13 @@ class DndTools:
         if not value:
             raise ArgumentError(f"параметр {key} обязателен и не может быть пустым")
         return value
+
+    def _flag(self, arguments: Dict[str, Any], key: str) -> bool:
+        # Ручной вызов разбирает ввод парами «ключ=значение», поэтому булево приходит строкой.
+        value = arguments.get(key, False)
+        if isinstance(value, str):
+            return value.strip().lower() in {"true", "1", "yes", "да"}
+        return bool(value)
 
     def _limit(
         self, arguments: Dict[str, Any], default: int = DEFAULT_LIMIT, maximum: int = MAX_LIMIT

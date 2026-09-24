@@ -194,6 +194,12 @@ class MCPToolResult:
     arguments: Dict[str, Any] = field(default_factory=dict)
     text: str = ""
     error: str = ""
+    # Место в цепочке (день 19): номер шага, сколько шагов выбрано, какие аргументы получены
+    # по ссылке и с какого шага, сколько шагов отброшено потолком. Одиночный вызов — шаг 1 из 1.
+    step: int = 1
+    total: int = 1
+    sources: Dict[str, int] = field(default_factory=dict)
+    dropped: int = 0
 
 
 @dataclass
@@ -337,9 +343,10 @@ class TabletopAgent:
         # Снимки подключения к MCP: заполняются обходом реестра при запуске приложения и
         # отдаются отчёту как есть — повторный отчёт не поднимает серверные процессы заново.
         self._mcp_reports: Tuple[MCPReport, ...] = ()
-        # Результат последнего вызова инструмента MCP — для журнальной строки интерфейса и
-        # отчётов; живёт один обмен, в лог и в историю не попадает.
-        self._last_tool: Optional[MCPToolResult] = None
+        # Шаги последней цепочки инструментов MCP (одиночный вызов — цепочка из одного шага) —
+        # для журнальных строк интерфейса и запроса; живут один обмен, в лог и в историю
+        # не попадают.
+        self._last_tool_chain: Tuple[MCPToolResult, ...] = ()
         # Решение маршрута последней реплики — для журнальной строки интерфейса.
         self._last_routing: Tuple[memory_layers.MemoryRecord, ...] = ()
         # Лог ходов сессии: пары user/assistant успешных обменов, append-only. system в логе
@@ -405,7 +412,12 @@ class TabletopAgent:
     @property
     def last_tool(self) -> Optional[MCPToolResult]:
         """Снимок последнего вызова инструмента MCP: None — инструмент не вызывался."""
-        return self._last_tool
+        return self._last_tool_chain[-1] if self._last_tool_chain else None
+
+    @property
+    def last_tool_chain(self) -> Tuple[MCPToolResult, ...]:
+        """Шаги последней цепочки по порядку; пусто — инструменты не вызывались."""
+        return self._last_tool_chain
 
     @property
     def auto_tools(self) -> bool:
@@ -471,10 +483,10 @@ class TabletopAgent:
         # Маршрут слоёв считается до сборки запроса: запись, сделанная текущей репликой, должна
         # быть видна модели уже в этом запросе. Запросов к модели маршрут не делает.
         self._route_memory(question)
-        # Инструмент выбирается и вызывается до сборки запроса: его результат — данные
-        # текущего вопроса, поэтому он должен попасть в этот же запрос.
-        self._last_tool = (
-            self._choose_and_call_tool(question, on_phase) if self.config.auto_tools else None
+        # Инструменты выбираются и вызываются до сборки запроса: их результаты — данные
+        # текущего вопроса, поэтому они должны попасть в этот же запрос.
+        self._last_tool_chain = (
+            self._choose_and_call_tools(question, on_phase) if self.config.auto_tools else ()
         )
         skip = self._prepare_context(question, user_prompt, on_phase)
         self._signal(on_phase, RequestPhase.REQUEST)
@@ -699,21 +711,23 @@ class TabletopAgent:
                 return spec
         return None
 
-    def _choose_and_call_tool(
+    def _choose_and_call_tools(
         self,
         question: str,
         on_phase: Optional[Callable[["RequestPhase"], None]],
-    ) -> Optional[MCPToolResult]:
-        """Выбрать инструмент моделью и вызвать его — до отправки вопроса.
+    ) -> Tuple[MCPToolResult, ...]:
+        """Выбрать цепочку инструментов моделью и выполнить её — до отправки вопроса.
 
         Вспомогательный запрос устроен как извлекатель фактов: инструкция из ассета, разбор
-        ответа на стороне приложения, расход в общий журнал сессии. Любой сбой — ошибка
-        запроса, неразобранный ответ, неизвестное имя, отказ сервера — возвращается снимком
-        с `error`: вопрос уйдёт без данных инструмента, но уйдёт обязательно.
+        ответа на стороне приложения, расход в общий журнал сессии. Запрос один на всю
+        цепочку: шаги выполняются без новых обращений к модели, а результат шага N доходит до
+        следующего подстановкой ссылки `$N`, а не пересказом. Любой сбой — ошибка запроса,
+        неразобранный ответ, неизвестное имя, отказ сервера, неверная ссылка — снимок с
+        `error`: цепочка на нём останавливается, вопрос уходит с тем, что успело выполниться.
         """
         reports = [report for report in self._mcp_reports if not report.error and report.tools]
         if not reports:
-            return None
+            return ()
         self._signal(on_phase, RequestPhase.TOOL_CHOICE)
         try:
             meta = self.client.ask_with_usage_messages(
@@ -723,18 +737,44 @@ class TabletopAgent:
                 model=self.config.model,
             )
         except APIError as error:
-            return MCPToolResult(server="", tool="", error=f"выбор инструмента не удался: {error}")
+            return (MCPToolResult(server="", tool="", error=f"выбор инструмента не удался: {error}"),)
         self._last_result = meta
         self._ledger.record(meta)
-        choice = mcp_tools.parse_choice(meta.content)
-        if choice is mcp_tools.UNPARSED:
-            return MCPToolResult(
-                server="", tool="", error="ответ выбора инструмента не разобран"
-            )
-        if choice is None:
-            return None
+        parsed = mcp_tools.parse_chain(meta.content)
+        if parsed is mcp_tools.UNPARSED:
+            return (MCPToolResult(server="", tool="", error="ответ выбора инструмента не разобран"),)
+        if parsed is None:
+            return ()
+        steps, dropped = parsed
+        done: List[MCPToolResult] = []
+        for number, choice in enumerate(steps, start=1):
+            result = self._run_chain_step(reports, choice, done, on_phase)
+            result.step, result.total, result.dropped = number, len(steps), dropped
+            done.append(result)
+            # Текст отказа — не данные: следующий шаг получил бы его на вход как результат.
+            if result.error:
+                break
+        return tuple(done)
+
+    def _run_chain_step(
+        self,
+        reports: List[MCPReport],
+        choice: "mcp_tools.ToolChoice",
+        done: List[MCPToolResult],
+        on_phase: Optional[Callable[["RequestPhase"], None]],
+    ) -> MCPToolResult:
         server = choice.server or self._server_of_tool(reports, choice.tool)
-        return self.call_mcp_tool(server, choice.tool, choice.arguments, on_phase=on_phase)
+        try:
+            arguments, sources = mcp_tools.resolve_references(
+                choice.arguments, [result.text for result in done]
+            )
+        except mcp_tools.ReferenceFailure as error:
+            return MCPToolResult(
+                server=server, tool=choice.tool, arguments=dict(choice.arguments), error=str(error)
+            )
+        result = self.call_mcp_tool(server, choice.tool, arguments, on_phase=on_phase)
+        result.sources = sources
+        return result
 
     @staticmethod
     def _server_of_tool(reports: List[MCPReport], tool: str) -> str:
@@ -1201,12 +1241,20 @@ class TabletopAgent:
         то, что известно о пользователе. В лог сессии и в файл истории не попадает — данные
         справочника устаревают, и при восстановлении сессии были бы ложным контекстом.
         """
-        result = self._last_tool
-        if result is None or result.error or not result.text:
+        steps = [result for result in self._last_tool_chain if not result.error and result.text]
+        if not steps:
             return None
-        content = mcp_tools.tool_result_message(
-            result.server, result.tool, result.arguments, result.text
-        )
+        if len(steps) == 1 and not steps[0].sources:
+            # Одиночный вызов — прежний вид сообщения: цепочка его не меняет.
+            result = steps[0]
+            content = mcp_tools.tool_result_message(
+                result.server, result.tool, result.arguments, result.text
+            )
+        else:
+            content = mcp_tools.tool_chain_message(
+                (result.server, result.tool, result.arguments, result.sources, result.text)
+                for result in steps
+            )
         return {"role": "system", "content": content}
 
     def _strategy_memory_message(self) -> Optional[Dict[str, str]]:

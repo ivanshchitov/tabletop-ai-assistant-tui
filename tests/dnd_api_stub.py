@@ -47,6 +47,16 @@ ENTRIES: Dict[str, Dict[str, Dict[str, Any]]] = {
             "school": {"name": "Evocation"},
             "desc": ["Взрыв пламени в радиусе 20 футов."],
         },
+        # Второе заклинание огня нужно цепочке дня 19: сводка по одной записи не отличила бы
+        # «строка на запись» от «одна строка на всё».
+        "fire-bolt": {
+            "index": "fire-bolt",
+            "name": "Fire Bolt",
+            "level": 0,
+            "school": {"name": "Evocation"},
+            "range": "120 feet",
+            "desc": ["Огненный снаряд в существо в пределах дальности. Урон 1d10 огнём."],
+        },
     },
     "classes": {
         "wizard": {"index": "wizard", "name": "Wizard", "hit_die": 6},
