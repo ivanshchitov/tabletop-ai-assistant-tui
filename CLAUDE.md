@@ -18,7 +18,7 @@ echo "OPENCODE_API_KEY=sk-ваш_ключ" > .env   # or set OPENCODE_API_KEY di
 ./tabletop-ai-assistant.py                   # re-execs itself into .venv when one is next to it
 
 .venv/bin/pip install -r requirements-dev.txt
-pytest                      # everything except the `network` marker (1126 selected)
+pytest                      # everything except the `network` marker (1183 selected)
 pytest tests/unit -q        # fast layer, no subprocesses (~3s)
 pytest tests/e2e -q         # real app in a pty against a stub API (~130s)
 pytest --snapshot-update    # rewrite the e2e screen snapshots after a deliberate layout change
@@ -89,7 +89,7 @@ openspec archive <change-id> --yes        # non-interactive: without --yes the C
   deltas: `agent`, `question-answering`, `answer-settings`, `api-integration`,
   `history-persistence`, `terminal-ui`, `settings-screen`, `configuration`, `context-strategies`,
   `memory-model`, `user-profile`, `task-state`, `agent-invariants`, `test-infrastructure`,
-  `model-selection`, `mcp-integration`, `scheduled-jobs`.
+  `model-selection`, `mcp-integration`, `scheduled-jobs`, `tool-pipeline`.
   It records deliberate decisions worth knowing before touching related code: the JSON format's
   refusal reply is a machine-readable `{"error": ...}` object rather than the verbatim refusal
   phrase used by free/compact (not a bug to fix), and `AnswerSettings` is session-only by design —
@@ -170,13 +170,14 @@ the system interpreter, which has neither the project's dependencies nor, on 3.9
 `mcp` at all), which is why `core/config.py`'s `BASE_DIR` resolves two
 parents up (`Path(__file__).resolve().parent.parent`) rather than one — it has to reach back past
 `core/` to the repo root where `.env`, `assets/`, `history.json`, `memory.json`,
-`profile.json` and `schedule.json` actually live. `tabletop-scheduler.py` is the second root
+`profile.json`, `schedule.json` and `exports/` actually live. `tabletop-scheduler.py` is the second root
 entry point (the schedule's background runner, see the scheduler block) and repeats the same
 `os.execv` trick for the same reason.
 
 **Environment switches (`core/config.py`):** `OPENCODE_API_URL`, `TABLETOP_HISTORY_FILE`,
 `TABLETOP_MEMORY_FILE`, `TABLETOP_PROFILE_FILE`, `TABLETOP_TASK_FILE`, `TABLETOP_TASKS_DIR`,
-`TABLETOP_SCHEDULE_FILE`, `TABLETOP_REQUEST_TIMEOUT`,
+`TABLETOP_SCHEDULE_FILE`, `TABLETOP_EXPORTS_DIR` (the directory the own server's save-to-file tool
+writes into, default `exports/`), `TABLETOP_REQUEST_TIMEOUT`,
 `TABLETOP_TYPING_DELAY` (the last one read in `ui/tui_app.py`), `TABLETOP_COMPRESS_AFTER` (the
 session setting's default, messages, default 10), `TABLETOP_MAX_SESSION_TOKENS` (the session
 setting's default, tokens, default 20000), `TABLETOP_MCP_COMMAND`/`TABLETOP_MCP_ARGS` (the MCP
@@ -196,8 +197,8 @@ especially: their paths derive
 from `__file__`, not the working directory, so without the override *any* run — a test run
 included — would write to the single real
 `history.json`/`memory.json`/`profile.json`/`task.json`/`schedule.json`
-in the repo root. `SCHEDULE_FILE` is written by the *server* process, so its name is in that
-registry entry's `env_keys` too — an override the app knows about but never passes on would
+in the repo root. `SCHEDULE_FILE` and `EXPORTS_DIR` are written by the *server* process, so their
+names are in that registry entry's `env_keys` too — an override the app knows about but never passes on would
 isolate only half the feature. A new on-disk state file means a new env switch **and** a pass-through in
 `tests/e2e/harness.AppSession` — see the agent-loop gotchas above.
 
@@ -695,7 +696,7 @@ baked in:
 own choice (day 17). Deliberate decisions baked in:
 - **Generic tools, not one per section.** The API has ~20 sections of the same shape (list a
   section, fetch an entry), so `mcp_server/dnd_tools.py` declares `dnd_sections`, `dnd_search`,
-  `dnd_entry` and (day 18) `dnd_digest`, with the section passed as a parameter and an optional
+  `dnd_entry`, (day 18) `dnd_digest` and (day 19) the `details` flag of `dnd_search`, with the section passed as a parameter and an optional
   `ruleset` (`2014` default, `2024`). A tool per section would mean twenty near-identical schemas loaded into *every* choice
   request — the week-4 README's own point about MCP token cost — and a harder choice for the model.
   The section list comes from the API's index, not from a list in the code, so a new section on the
@@ -705,9 +706,9 @@ own choice (day 17). Deliberate decisions baked in:
   project interpreter). The existing "no tool name in `core`/`ui`" test now also covers `dnd_*`:
   the app knows the launch command, nothing else. `mcp_server/dnd_api.py` reads
   `TABLETOP_DND_API_URL` at call time — without it the unit tests would hit the public service.
-- **Arguments are validated before HTTP, and a failure is text.** Missing/empty required parameter,
-  a bad ruleset and an out-of-range limit are rejected with a message naming the allowed values —
-  the *model* reads that message, so it can fix the next choice; an unknown section is checked
+- **Arguments are validated before HTTP, and a failure is text marked `isError`.** Missing/empty
+  required parameter, a bad ruleset and an out-of-range limit are rejected with a message naming the
+  allowed values; an unknown section is checked
   against the (cached) section index, so the entry itself is never requested. Ordering matters in
   `_search_tool`/`_entry_tool`: local checks run first, because the section check costs an index
   request on a cold cache.
@@ -719,8 +720,8 @@ own choice (day 17). Deliberate decisions baked in:
 - **The automatic call is a separate auxiliary request, parsed client-side** (`core/mcp_tools.py`,
   `assets/tool_choice_prompt.md`) — the facts-extractor pattern, no `response_format`. `{"tool":
   null}` is a normal outcome, not a failure; unparsable output is a failure (`mcp_tools.UNPARSED`),
-  and either way the question still goes out. One call per question: chained calls would need a
-  depth and budget loop. `config.TOOL_CHOICE_MAX_WORDS` is 400, not the 80 the short JSON answer
+  and either way the question still goes out. Since day 19 the answer may be a *chain* of steps —
+  see the tool-pipeline block below; one choice request per question either way. `config.TOOL_CHOICE_MAX_WORDS` is 400, not the 80 the short JSON answer
   suggests: the pool's reasoning models spend 818–1601 output tokens on the choice (measured live
   against a 22-tool catalog), and a tighter budget returned empty content — the same failure mode
   as `MAX_MAX_WORDS`. The catalog itself costs ~3200 prompt tokens with four servers connected,
@@ -796,6 +797,43 @@ deferred and periodic calls of its own tools, with the aggregate the agent annou
   subprocess against the HTTP stub), `tests/e2e/test_schedule_flow.py` (report, startup line,
   announcement after the next answer and not twice, nothing in `history.json`, the repo's real
   `schedule.json` untouched). `tests/e2e/harness.AppSession` passes `TABLETOP_SCHEDULE_FILE`.
+
+**Tool pipeline (`mcp_server/pipeline_tools.py`, `core/mcp_tools.parse_chain`,
+`TabletopAgent._choose_and_call_tools`):** composition of MCP tools — search → summarize → save to
+file — run by the agent itself, with the data of one step handed to the next verbatim (day 19).
+Deliberate decisions baked in:
+- **No new server (user's call).** `dnd_search` grew a `details` flag (the main fields of every hit
+  as a JSON array after a header line — the summarizer's input), and `dnd_summarize` / `save_to_file`
+  live in `mcp_server/pipeline_tools.py`, dispatched by `dnd_server.py` by name like the scheduler.
+  They are not schedulable (not in `TOOLS`). The summary tool is `dnd_summarize`, not `summarize`:
+  the bare word is a substring of the summarizer code in `core/` and would fail the "no tool name in
+  `core`/`ui`" test — the `schedule_summary` trick again.
+- **The whole chain comes from one choice request:** `{"steps": [{"tool", "arguments"}, …]}`, the
+  old `{"tool": …}` being a chain of one. Re-choosing after every step would adapt to results but
+  cost a 3200-token catalog and 800–1600 reasoning tokens per step. `config.TOOL_CHAIN_MAX_STEPS`
+  (4) cuts the rest; the dropped count rides on `MCPToolResult.dropped` and gets a journal line.
+- **Data moves by reference, substituted by the agent.** A string argument equal to `$N` becomes
+  the full text of step N (`mcp_tools.resolve_references`) — the model never retypes data, so
+  "correct transfer" is deterministic and testable. Exact equality only (no embedding); a reference
+  to a step not yet done is a `ReferenceFailure` → the step errors without a call.
+- **A failure stops the chain and is never data.** The server sets `isError` from
+  `call_result`'s flag for *every* tool (the scheduler got `call_result` too, keyed on its common
+  «Неверные аргументы» prefix), and `MCPClient` already raises on it. Side effect for the single
+  day-17 call: a tool refusal is now a snapshot `error` (journal «Инструмент не вызван»), not text
+  for the answer model. The question still goes out with the steps done before the failure.
+- **Snapshots:** `MCPToolResult` gained `step`, `total`, `sources` (argument → source step),
+  `dropped`; the agent keeps `last_tool_chain` and `last_tool` is its last element. A single step
+  keeps the old result message; a chain uses `mcp_tools.tool_chain_message`, where a referenced
+  argument renders as `← шаг N` so the passed text is not duplicated in the request.
+- **Visibility:** one journal line per step — `🔧 2/3 сервер.инструмент (text=← шаг 1); text ← шаг
+  1: N симв. → M симв.` — so the volumes prove the transfer by eye; a failed step names the stop.
+  A single call keeps the old line (snapshots depend on it). E2E lines wrap at 100 columns, so the
+  chain test matches on whitespace-collapsed text.
+- **Summary is deterministic, save is fenced.** No LLM on the server: one line per record (name,
+  level/«заговор», school, range…, first sentence of `desc`). `save_to_file` writes
+  `<name>.md` under `config.exports_dir()` (read at call time), accepts only `[\w.-]` names, never
+  overwrites (`-2`, `-3`…), rejects empty text; `exports/` is gitignored and passed through
+  `harness.AppSession`.
 
 **Prompt assembly (`core/prompts.py` + `assets/*.md`):**
 - `assets/system_prompt.md` is the base system prompt; `assets/answer_format_compact.md` and
@@ -1002,9 +1040,12 @@ saved: `dialogues` stays a flat list across branches.
   `core/`/`ui/`.
 - `tests/unit/test_dnd_api.py`, `test_dnd_tools.py`, `test_dnd_server.py` and `tests/dnd_api_stub.py`
   — the project's own MCP server: the HTTP layer against a local stub of the external API, the
-  reference tools plus `dnd_digest` with their schemas and argument validation, and the server
-  itself as a real process (its scheduler tools included).
-  `tests/unit/test_mcp_tools.py` covers the tool catalog, the choice parsing and the result message.
+  reference tools plus `dnd_digest` and the `details` search with their schemas and argument
+  validation, and the server itself as a real process (its scheduler tools, the `isError` mark and
+  the search → summarize → save chain included). `tests/unit/test_pipeline_tools.py` covers the
+  summary and save tools (name fencing, no overwrite).
+  `tests/unit/test_mcp_tools.py` covers the tool catalog, the choice and chain parsing, `$N`
+  references and the result messages.
   `tests/unit/test_schedule_store.py`, `test_scheduler.py` and `test_scheduler_daemon.py` cover the
   scheduler — see the scheduler block above.
 - `tests/e2e/` — the real `tabletop-ai-assistant.py` running in `pty.fork()`, with output fed
@@ -1049,7 +1090,8 @@ saved: `dialogues` stays a flat list across branches.
   parameters and zero model requests, a manual call printing the result, an unknown tool keeping the
   session, the automatic call putting the result into the question's request, "no tool needed",
   `/tool auto off` removing the auxiliary request, an unparsable choice not blocking the answer, an
-  unavailable server, and the tool lines staying out of `history.json`.
+  unavailable server, the tool lines staying out of `history.json`, and a three-step chain run on one
+  choice request with the echo server proving the verbatim transfer.
 - `tests/e2e/test_schedule_flow.py` — the scheduler in a real pty: the empty and the filled
   `/schedule` report with zero model requests, the startup line, the background runner's `--once`
   pass between two questions producing the announcement after the next answer and nothing after the

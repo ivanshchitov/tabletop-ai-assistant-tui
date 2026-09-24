@@ -30,4 +30,4 @@
 
 - [x] 6.1 Полный `pytest -q` зелёный
 - [x] 6.2 `openspec archive add-tool-pipeline --yes`, `openspec validate --all --strict`
-- [ ] 6.3 `CLAUDE.md`/`README.md`: сверить списки (инструменты сервера, переменные окружения, capabilities, test layout)
+- [x] 6.3 `CLAUDE.md`/`README.md`: сверить списки (инструменты сервера, переменные окружения, capabilities, test layout)
