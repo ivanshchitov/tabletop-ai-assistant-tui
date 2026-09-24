@@ -29,5 +29,5 @@
 ## 6. Закрытие
 
 - [x] 6.1 Полный `pytest -q` зелёный
-- [ ] 6.2 `openspec archive add-tool-pipeline --yes`, `openspec validate --all --strict`
+- [x] 6.2 `openspec archive add-tool-pipeline --yes`, `openspec validate --all --strict`
 - [ ] 6.3 `CLAUDE.md`/`README.md`: сверить списки (инструменты сервера, переменные окружения, capabilities, test layout)
