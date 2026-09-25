@@ -10,4 +10,4 @@
 
 - [x] 2.1 Полный `pytest`, живой прогон демо-вопроса
 - [x] 2.2 `openspec archive allow-line-references --yes`, `openspec validate --all --strict`, коммит
-- [ ] 2.3 `README.md` и `CLAUDE.md`: строки-ссылки; коммит
+- [x] 2.3 `README.md` и `CLAUDE.md`: строки-ссылки; коммит

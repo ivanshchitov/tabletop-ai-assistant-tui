@@ -18,7 +18,7 @@ echo "OPENCODE_API_KEY=sk-ваш_ключ" > .env   # or set OPENCODE_API_KEY di
 ./tabletop-ai-assistant.py                   # re-execs itself into .venv when one is next to it
 
 .venv/bin/pip install -r requirements-dev.txt
-pytest                      # everything except the `network` marker (1225 selected)
+pytest                      # everything except the `network` marker (1230 selected)
 pytest tests/unit -q        # fast layer, no subprocesses (~3s)
 pytest tests/e2e -q         # real app in a pty against a stub API (~130s)
 pytest --snapshot-update    # rewrite the e2e screen snapshots after a deliberate layout change
@@ -814,14 +814,20 @@ Deliberate decisions baked in:
   (4) cuts the rest; the dropped count rides on `MCPToolResult.dropped` and gets a journal line.
 - **Data moves by reference, substituted by the agent.** A string argument equal to `$N` becomes
   the full text of step N (`mcp_tools.resolve_references`) — the model never retypes data, so
-  "correct transfer" is deterministic and testable. Exact equality only (no embedding); a reference
-  to a step not yet done is a `ReferenceFailure` → the step errors without a call.
+  "correct transfer" is deterministic and testable. A reference is the whole value or (day 20,
+  `allow-line-references`) a *line* of a multi-line value that is only `$N` — the demo dry run had
+  the model compose «Итог\n== План ==\n$1\n…» for `save_to_file`, and whole-value matching saved
+  the literal `$N`. `$N` mid-line stays as is («цена $5» must not become a substitution). Sources are
+  therefore `Dict[str, Tuple[int, ...]]`, rendered «← шаг N» / «← шаги N, M»
+  (`mcp_tools.source_label`); a reference to a step not yet done is a `ReferenceFailure` → the step
+  errors without a call. The flow asset also forbids saving raw text a server returned together with
+  its protocol instruction (the rulebook with the extraction schema) — the same dry run embedded it.
 - **A failure stops the chain and is never data.** The server sets `isError` from
   `call_result`'s flag for *every* tool (the scheduler got `call_result` too, keyed on its common
   «Неверные аргументы» prefix), and `MCPClient` already raises on it. Side effect for the single
   day-17 call: a tool refusal is now a snapshot `error` (journal «Инструмент не вызван»), not text
   for the answer model. The question still goes out with the steps done before the failure.
-- **Snapshots:** `MCPToolResult` gained `step`, `total`, `sources` (argument → source step),
+- **Snapshots:** `MCPToolResult` gained `step`, `total`, `sources` (argument → source steps),
   `dropped`; the agent keeps `last_tool_chain` and `last_tool` is its last element. A single step
   keeps the old result message; a chain uses `mcp_tools.tool_chain_message`, where a referenced
   argument renders as `← шаг N` so the passed text is not duplicated in the request.
