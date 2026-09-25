@@ -382,6 +382,14 @@ def source_label(steps: Tuple[int, ...]) -> str:
     return "← шаги " + ", ".join(str(step) for step in steps)
 
 
+def _clip_for_answer(text: str) -> str:
+    """Результат шага для запроса ответа — не длиннее `TOOL_ANSWER_RESULT_CHARS`, с пометкой."""
+    limit = config.TOOL_ANSWER_RESULT_CHARS
+    if len(text) <= limit:
+        return text
+    return text[:limit] + CLIPPED_NOTE.format(shown=limit, total=len(text))
+
+
 def tool_result_message(
     server: str, tool: str, arguments: Dict[str, Any], text: str
 ) -> str:
@@ -390,7 +398,7 @@ def tool_result_message(
         tool=tool,
         server=server,
         arguments=render_arguments(arguments),
-        text=text,
+        text=_clip_for_answer(text),
         instruction=result_instruction(),
     )
 
@@ -406,7 +414,7 @@ def tool_chain_message(steps: Iterable[Tuple[str, str, Dict[str, Any], Dict[str,
             tool=tool,
             server=server,
             arguments=render_arguments(arguments, sources),
-            text=text,
+            text=_clip_for_answer(text),
         )
         for number, (server, tool, arguments, sources, text) in enumerate(steps, start=1)
     ]

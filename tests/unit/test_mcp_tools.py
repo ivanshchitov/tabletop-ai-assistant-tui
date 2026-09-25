@@ -381,3 +381,29 @@ def test_choice_instruction_explains_more_and_tool_text_as_data():
     instruction = mcp_tools.choice_instruction()
     assert '"more": true' in instruction
     assert "данные" in instruction
+
+
+# --- предел результата в запросе ответа (harden-tool-flow) ---
+
+
+def test_long_step_result_is_shortened_in_the_answer_request(monkeypatch):
+    """Сырой рулбук на 33 тыс. символов съедал бюджет ответа reasoning-ом (демо дня 20)."""
+    monkeypatch.setattr(config, "TOOL_ANSWER_RESULT_CHARS", 50)
+    steps = [
+        ("сервер", "long_tool", {}, {}, "д" * 200),
+        ("сервер", "short_tool", {}, {}, "коротко"),
+    ]
+    message = mcp_tools.tool_chain_message(steps)
+    assert "д" * 50 in message and "д" * 51 not in message
+    assert "показано 50 из 200" in message
+    assert "коротко" in message
+
+
+def test_long_single_result_is_shortened_in_the_answer_request(monkeypatch):
+    monkeypatch.setattr(config, "TOOL_ANSWER_RESULT_CHARS", 50)
+    message = mcp_tools.tool_result_message("сервер", "long_tool", {}, "д" * 200)
+    assert "д" * 51 not in message and "показано 50 из 200" in message
+
+
+def test_answer_result_limit_is_configuration():
+    assert config.TOOL_ANSWER_RESULT_CHARS == 6000
