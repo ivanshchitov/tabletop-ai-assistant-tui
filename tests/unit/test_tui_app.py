@@ -2312,6 +2312,77 @@ def test_chain_reports_dropped_steps(make_app, recording_console, monkeypatch):
     assert recording_console.contains("Отброшено шагов сверх потолка: 1")
 
 
+# --- оркестрация: раунды, маршрут, /tool flow (день 20) -----------------------------
+
+
+FLOW_ANSWERS = [
+    '{"steps": [{"tool": "fake_search", "arguments": {"query": "огонь"}}], "more": true}',
+    '{"steps": [{"server": "первый", "tool": "fake_facts", "arguments": {"name": "гоблин"}}], "more": true}',
+    '{"steps": [{"tool": "fake_note", "arguments": {"text": "$2"}}]}',
+    "Ответ про настолки",
+]
+
+
+def two_fake_servers(monkeypatch):
+    fake_registry(monkeypatch, fake_spec("первый"), fake_spec("второй", "--second"))
+
+
+def test_flow_lines_name_round_and_server(make_app, recording_console, monkeypatch):
+    two_fake_servers(monkeypatch)
+    make_app(["Вопрос про настолки", "/exit"], FakeClient(list(FLOW_ANSWERS))).run()
+
+    assert recording_console.contains("🔧 р1 · 1/3 первый.fake_search")
+    assert recording_console.contains("🔧 р2 · 2/3 второй.fake_facts")
+    assert recording_console.contains("🔧 р3 · 3/3 второй.fake_note")
+
+
+def test_rerouted_step_is_marked(make_app, recording_console, monkeypatch):
+    two_fake_servers(monkeypatch)
+    make_app(["Вопрос про настолки", "/exit"], FakeClient(list(FLOW_ANSWERS))).run()
+
+    assert recording_console.contains("маршрут: первый → второй")
+
+
+def test_one_round_chain_keeps_the_old_line_format(make_app, recording_console, monkeypatch):
+    fake_registry(monkeypatch, fake_spec("рабочий"))
+    make_app(["Вопрос про настолки", "/exit"], FakeClient([CHAIN_ANSWER, "Ответ"])).run()
+
+    assert recording_console.contains("🔧 1/3 рабочий.fake_search")
+    assert not recording_console.contains("р1 ·")
+
+
+def test_failed_next_round_prints_why_the_flow_stopped(make_app, recording_console, monkeypatch):
+    two_fake_servers(monkeypatch)
+    client = FakeClient([FLOW_ANSWERS[0], "не JSON", "Ответ про настолки"])
+    make_app(["Вопрос про настолки", "/exit"], client).run()
+
+    assert recording_console.contains("Флоу остановлен: сбой выбора в раунде 2")
+    assert recording_console.contains("Ответ про настолки")
+
+
+def test_tool_flow_reports_the_last_flow(make_app, recording_console, monkeypatch):
+    two_fake_servers(monkeypatch)
+    client = FakeClient(list(FLOW_ANSWERS))
+    make_app(["Вопрос про настолки", "/tool flow", "/exit"], client).run()
+
+    assert recording_console.contains("Последний флоу инструментов")
+    assert recording_console.contains("Раундов: 3")
+    assert recording_console.contains("запросов выбора: 3")
+    assert recording_console.contains("text=← шаг 2")
+    assert recording_console.contains("модель завершила флоу")
+    # Отчёт — по снимку: к модели ушли три выбора и вопрос, больше ничего.
+    assert len(client.calls) == 4
+
+
+def test_tool_flow_before_any_flow(make_app, recording_console, monkeypatch):
+    two_fake_servers(monkeypatch)
+    client = FakeClient()
+    make_app(["/tool flow", "/exit"], client).run()
+
+    assert recording_console.contains("Флоу инструментов ещё не выполнялся")
+    assert client.calls == []
+
+
 # --- планировщик ----------------------------------------------------------------------
 
 

@@ -1574,13 +1574,48 @@ class TabletopAITUI:
         if subcommand == "call":
             self._call_tool_manually(parts[2:])
             return
+        if subcommand == "flow":
+            self._print_tool_flow()
+            return
         self._print_tool_usage()
+
+    def _print_tool_flow(self) -> None:
+        """Отчёт о последнем флоу по снимку агента: порядок шагов, раунды, серверы, итог.
+
+        Ни модели, ни серверов не трогает — как `/mcp` и `/tool list`.
+        """
+        flow = self.agent.last_tool_flow
+        if flow is None:
+            self.console.print("[dim]Флоу инструментов ещё не выполнялся.[/dim]")
+            return
+        self.console.print("[bold cyan]Последний флоу инструментов[/bold cyan]")
+        self.console.print(f"  Вопрос: {escape(flow.question)}")
+        self.console.print(
+            f"  Раундов: {flow.rounds}, запросов выбора: {flow.choice_requests}, "
+            f"шагов: {len(flow.steps)}"
+        )
+        servers = []
+        for result in flow.steps:
+            if result.server and result.server not in servers:
+                servers.append(result.server)
+        if servers:
+            self.console.print(f"  Серверы: {escape(', '.join(servers))}")
+        for result in flow.steps:
+            arguments = mcp_tools.render_arguments(result.arguments, result.sources)
+            head = f"{result.step}. р{result.round} {result.server}.{result.tool} ({arguments})"
+            outcome = (
+                f"[bold yellow]ошибка: {escape(result.error)}[/bold yellow]"
+                if result.error
+                else f"→ {len(result.text)} симв."
+            )
+            self.console.print(f"  {escape(head + self._route_tail(result))} {outcome}")
+        self.console.print(f"  Итог: {escape(flow.stop_reason)}")
 
     def _print_tool_usage(self) -> None:
         self.console.print(
             "[bold yellow]Формат: /tool list — перечень инструментов, "
             "/tool call <инструмент> ключ=значение — вызов, "
-            "/tool auto on|off — автовызов.[/bold yellow]"
+            "/tool auto on|off — автовызов, /tool flow — последний флоу.[/bold yellow]"
         )
 
     def _print_tool_list(self) -> None:
@@ -1681,6 +1716,22 @@ class TabletopAITUI:
             self._print_single_tool_line(chain[0])
         elif chain:
             self._print_chain_lines(chain)
+        flow = self.agent.last_tool_flow
+        # Остановка флоу без сбоя шага (сбой выбора следующего раунда, предел) видна отдельно:
+        # строки шагов о ней не говорят. Сбой шага уже назван в его строке.
+        if chain and flow is not None and flow.steps == chain and flow.stop_reason.startswith(
+            ("сбой выбора", "исчерпан")
+        ):
+            self.console.print(
+                f"[bold yellow]🔧 Флоу остановлен: {escape(flow.stop_reason)}[/bold yellow]"
+            )
+
+    @staticmethod
+    def _route_tail(result) -> str:
+        """Пометка исправленного маршрута: модель назвала один сервер, вызов ушёл на другой."""
+        if not result.rerouted_from:
+            return ""
+        return f" (маршрут: {result.rerouted_from} → {result.server})"
 
     def _print_single_tool_line(self, result) -> None:
         if result.error:
@@ -1689,7 +1740,7 @@ class TabletopAITUI:
             )
             return
         head = f"{result.server}.{result.tool} ({mcp_tools.render_arguments(result.arguments)})"
-        self.console.print(f"[dim]🔧 Инструмент {escape(head)}[/dim]")
+        self.console.print(f"[dim]🔧 Инструмент {escape(head + self._route_tail(result))}[/dim]")
 
     def _print_chain_lines(self, chain) -> None:
         """Строки цепочки: шаг, что получено по ссылке и сколько, каков объём результата.
@@ -1697,8 +1748,13 @@ class TabletopAITUI:
         Объёмы — проверка передачи глазами: «← шаг 1: N симв.» у шага 2 совпадает с
         «→ N симв.» у шага 1, потому что агент подставил результат дословно.
         """
+        # Флоу из нескольких раундов (день 20) называет раунд шага; однораундовая цепочка
+        # печатается прежним форматом — на нём держатся снапшоты экрана.
+        several_rounds = any(result.round > 1 for result in chain)
         for result in chain:
             number = f"{result.step}/{result.total}"
+            if several_rounds:
+                number = f"р{result.round} · {number}"
             if result.error:
                 rest = result.total - result.step
                 tail = f"; цепочка остановлена, не выполнено шагов: {rest}" if rest else ""
@@ -1714,7 +1770,8 @@ class TabletopAITUI:
                 for key, source in sorted(result.sources.items())
             )
             self.console.print(
-                f"[dim]🔧 {escape(head)}{escape(passed)} → {len(result.text)} симв.[/dim]"
+                f"[dim]🔧 {escape(head)}{escape(passed)} → {len(result.text)} симв."
+                f"{escape(self._route_tail(result))}[/dim]"
             )
         dropped = chain[-1].dropped
         if dropped:
