@@ -171,13 +171,40 @@ def test_reference_is_replaced_verbatim():
     text = "строка 1\nстрока 2 с «кавычками» и $1 внутри"
     resolved, sources = mcp_tools.resolve_references({"text": "$1", "name": "файл"}, [text])
     assert resolved == {"text": text, "name": "файл"}
-    assert sources == {"text": 1}
+    # Источники — кортеж шагов (allow-line-references): собранный аргумент ссылается на несколько.
+    assert sources == {"text": (1,)}
 
 
 def test_reference_inside_other_text_is_left_as_is():
     resolved, sources = mcp_tools.resolve_references({"text": "см. $1"}, ["данные"])
     assert resolved == {"text": "см. $1"}
     assert sources == {}
+
+
+def test_reference_lines_compose_several_steps():
+    template = "Итог вечера\n== План ==\n$1\n== Правила ==\n  $2  \nконец"
+    resolved, sources = mcp_tools.resolve_references({"text": template}, ["план\nна вечер", "правила"])
+    assert resolved["text"] == "Итог вечера\n== План ==\nплан\nна вечер\n== Правила ==\nправила\nконец"
+    assert sources == {"text": (1, 2)}
+
+
+def test_reference_inside_a_line_with_text_is_left_as_is():
+    resolved, sources = mcp_tools.resolve_references({"text": "Итог\nцена $1 за коробку"}, ["данные"])
+    assert resolved == {"text": "Итог\nцена $1 за коробку"}
+    assert sources == {}
+
+
+def test_reference_line_to_unfinished_step_is_an_error():
+    import pytest
+
+    with pytest.raises(mcp_tools.ReferenceFailure):
+        mcp_tools.resolve_references({"text": "Итог\n$2"}, ["данные"])
+
+
+def test_rendered_arguments_name_every_source_step():
+    rendered = mcp_tools.render_arguments({"text": "…", "name": "файл"}, {"text": (1, 3)})
+    assert "text=← шаги 1, 3" in rendered
+    assert "text=← шаг 2" in mcp_tools.render_arguments({"text": "…"}, {"text": (2,)})
 
 
 def test_reference_to_unfinished_step_is_an_error():
@@ -190,14 +217,14 @@ def test_reference_to_unfinished_step_is_an_error():
 
 
 def test_arguments_render_references_as_step_links():
-    rendered = mcp_tools.render_arguments({"text": "очень длинный текст", "name": "x"}, {"text": 1})
+    rendered = mcp_tools.render_arguments({"text": "очень длинный текст", "name": "x"}, {"text": (1,)})
     assert rendered == "name=x, text=← шаг 1"
 
 
 def test_chain_message_names_every_step_without_repeating_passed_text():
     steps = [
         ("сервер", "fake_search", {"query": "огонь"}, {}, "НАЙДЕНО-ТЕКСТ"),
-        ("сервер", "echo_tool", {"text": "НАЙДЕНО-ТЕКСТ"}, {"text": 1}, "СВОДКА-ТЕКСТ"),
+        ("сервер", "echo_tool", {"text": "НАЙДЕНО-ТЕКСТ"}, {"text": (1,)}, "СВОДКА-ТЕКСТ"),
     ]
     message = mcp_tools.tool_chain_message(steps)
     assert "Шаг 1" in message and "Шаг 2" in message
@@ -336,7 +363,7 @@ def test_round_messages_shorten_results_of_earlier_rounds(monkeypatch):
 
 
 def test_round_messages_show_references_as_step_links():
-    done = [Step(1, "текст"), Step(2, "второй", arguments={"text": "текст"}, sources={"text": 1})]
+    done = [Step(1, "текст"), Step(2, "второй", arguments={"text": "текст"}, sources={"text": (1,)})]
     content = mcp_tools.build_round_messages(two_servers(), "вопрос", done)[1]["content"]
     assert "text=← шаг 1" in content
 

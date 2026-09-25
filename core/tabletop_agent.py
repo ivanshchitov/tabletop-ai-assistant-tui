@@ -198,7 +198,7 @@ class MCPToolResult:
     # по ссылке и с какого шага, сколько шагов отброшено потолком. Одиночный вызов — шаг 1 из 1.
     step: int = 1
     total: int = 1
-    sources: Dict[str, int] = field(default_factory=dict)
+    sources: Dict[str, Tuple[int, ...]] = field(default_factory=dict)
     dropped: int = 0
     # Оркестрация (день 20): раунд выбора, в котором шаг появился, и сервер, названный моделью,
     # когда маршрутизация по каталогу отправила вызов на другой, объявивший инструмент.

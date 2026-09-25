@@ -306,28 +306,39 @@ def parse_chain(text: str) -> Any:
 
 def resolve_references(
     arguments: Dict[str, Any], results: List[str]
-) -> Tuple[Dict[str, Any], Dict[str, int]]:
+) -> Tuple[Dict[str, Any], Dict[str, Tuple[int, ...]]]:
     """Подставить результаты выполненных шагов вместо ссылок `$N`.
 
     Подстановка дословная: модель данные не перепечатывает, поэтому то, что вернул шаг N,
-    доходит до следующего инструмента без усечения и пересказа. Заменяется только значение,
-    целиком равное ссылке, — встраивание в текст породило бы случайные совпадения.
-    Возвращает аргументы и карту «аргумент → номер шага-источника».
+    доходит до следующего инструмента без усечения и пересказа. Ссылка — всё значение целиком
+    или отдельная строка многострочного значения (так итог собирается из нескольких шагов);
+    `$N` внутри строки вместе с другим текстом остаётся как есть — иначе «цена $5» дала бы
+    случайную подстановку. Возвращает аргументы и карту «аргумент → номера шагов-источников».
     """
     resolved: Dict[str, Any] = {}
-    sources: Dict[str, int] = {}
+    sources: Dict[str, Tuple[int, ...]] = {}
     for key, value in arguments.items():
-        match = _REFERENCE_RE.match(value.strip()) if isinstance(value, str) else None
-        if match is None:
+        if not isinstance(value, str):
             resolved[key] = value
             continue
-        number = int(match.group(1))
-        if not 1 <= number <= len(results):
-            raise ReferenceFailure(
-                f"аргумент {key} ссылается на шаг {number}, а выполнено шагов: {len(results)}"
-            )
-        resolved[key] = results[number - 1]
-        sources[key] = number
+        lines = value.split("\n")
+        used: List[int] = []
+        for index, line in enumerate(lines):
+            match = _REFERENCE_RE.match(line.strip())
+            if match is None:
+                continue
+            number = int(match.group(1))
+            if not 1 <= number <= len(results):
+                raise ReferenceFailure(
+                    f"аргумент {key} ссылается на шаг {number}, а выполнено шагов: {len(results)}"
+                )
+            lines[index] = results[number - 1]
+            used.append(number)
+        if used:
+            resolved[key] = "\n".join(lines)
+            sources[key] = tuple(used)
+        else:
+            resolved[key] = value
     return resolved, sources
 
 
@@ -348,7 +359,7 @@ def _first_json_object(text: str) -> Optional[Dict[str, Any]]:
 
 
 def render_arguments(
-    arguments: Dict[str, Any], sources: Optional[Dict[str, int]] = None
+    arguments: Dict[str, Any], sources: Optional[Dict[str, Tuple[int, ...]]] = None
 ) -> str:
     """Аргументы одной строкой — и для журнала, и для сообщения модели.
 
@@ -359,9 +370,16 @@ def render_arguments(
         return NO_ARGUMENTS
     sources = sources or {}
     return ", ".join(
-        f"{key}=← шаг {sources[key]}" if key in sources else f"{key}={value}"
+        f"{key}={source_label(sources[key])}" if key in sources else f"{key}={value}"
         for key, value in sorted(arguments.items())
     )
+
+
+def source_label(steps: Tuple[int, ...]) -> str:
+    """«← шаг N» для одной ссылки, «← шаги N, M» для итога, собранного из нескольких."""
+    if len(steps) == 1:
+        return f"← шаг {steps[0]}"
+    return "← шаги " + ", ".join(str(step) for step in steps)
 
 
 def tool_result_message(

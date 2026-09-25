@@ -2323,6 +2323,22 @@ FLOW_ANSWERS = [
 ]
 
 
+def test_composed_argument_names_all_source_steps(make_app, recording_console, monkeypatch):
+    """Итог из строк-ссылок: журнал называет все шаги-источники и объём собранного текста."""
+    fake_registry(monkeypatch, fake_spec("рабочий"))
+    chain = (
+        '{"steps": [{"tool": "fake_search", "arguments": {"query": "огонь"}},'
+        '{"tool": "fake_details", "arguments": {"id": "1"}},'
+        '{"tool": "fake_echo", "arguments": {"first": "Итог\\n$1\\n$2"}}]}'
+    )
+    app = make_app(["Вопрос про настолки", "/exit"], FakeClient([chain, "Ответ"]))
+    app.run()
+
+    third = app.agent.last_tool_chain[2]
+    assert recording_console.contains("first=← шаги 1, 2")
+    assert recording_console.contains(f"first ← шаги 1, 2: {len(third.arguments['first'])} симв.")
+
+
 def two_fake_servers(monkeypatch):
     fake_registry(monkeypatch, fake_spec("первый"), fake_spec("второй", "--second"))
 

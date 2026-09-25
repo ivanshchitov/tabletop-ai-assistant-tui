@@ -1766,8 +1766,8 @@ class TabletopAITUI:
             arguments = mcp_tools.render_arguments(result.arguments, result.sources)
             head = f"{number} {result.server}.{result.tool} ({arguments})"
             passed = "".join(
-                f"; {key} ← шаг {source}: {len(result.arguments[key])} симв."
-                for key, source in sorted(result.sources.items())
+                f"; {key} {mcp_tools.source_label(steps)}: {len(result.arguments[key])} симв."
+                for key, steps in sorted(result.sources.items())
             )
             self.console.print(
                 f"[dim]🔧 {escape(head)}{escape(passed)} → {len(result.text)} симв."

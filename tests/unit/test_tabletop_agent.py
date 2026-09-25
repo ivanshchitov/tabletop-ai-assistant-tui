@@ -2429,9 +2429,9 @@ def test_chain_passes_previous_result_verbatim(monkeypatch):
 
     first, second, third = agent.last_tool_chain
     assert second.arguments["first"] == first.text
-    assert second.sources == {"first": 1}
+    assert second.sources == {"first": (1,)}
     assert third.arguments["first"] == second.text
-    assert third.sources == {"first": 2}
+    assert third.sources == {"first": (2,)}
     assert third.arguments["second"] == "fire-spells"
     # Эхо-инструмент возвращает то, что получил: текст шага 1 дошёл до шага 3 внутри шага 2.
     assert first.text in third.text
@@ -2610,7 +2610,7 @@ def test_references_cross_rounds(monkeypatch):
 
     _, second, third = agent.last_tool_chain
     assert third.arguments["text"] == second.text
-    assert third.sources == {"text": 2}
+    assert third.sources == {"text": (2,)}
 
 
 def test_chain_without_more_costs_one_choice_request(monkeypatch):
