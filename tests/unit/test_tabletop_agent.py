@@ -2599,9 +2599,8 @@ def test_next_round_request_carries_previous_results(monkeypatch):
     second_choice = client.calls[1]["messages"][-1]["content"]
     assert first.text in second_choice
     assert "Шаг 1" in second_choice
-    # Раунды со второго получают более широкий выход: модель может писать данные в аргументах.
-    assert client.calls[1]["max_tokens"] == config.max_tokens_for_words(config.TOOL_FLOW_MAX_WORDS)
-    assert client.calls[0]["max_tokens"] == config.max_tokens_for_words(config.TOOL_CHOICE_MAX_WORDS)
+    budget = config.max_tokens_for_words(config.TOOL_CHOICE_MAX_WORDS)
+    assert client.calls[0]["max_tokens"] == client.calls[1]["max_tokens"] == budget
 
 
 def test_references_cross_rounds(monkeypatch):

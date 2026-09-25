@@ -152,15 +152,18 @@ def build_round_messages(
 ) -> List[Dict[str, str]]:
     """Запрос следующего раунда: инструкция выбора и раунда, каталог, вопрос, выполненные шаги.
 
-    Шаг — объект с полями `step`, `server`, `tool`, `arguments`, `sources`, `text`. Результаты
-    укладываются в `TOOL_FLOW_CONTEXT_CHARS` от нового шага к старому: свежий результат — то,
-    с чем модель работает сейчас, поэтому режутся старые. Подстановку `$N` бюджет не трогает.
+    Шаг — объект с полями `step`, `round`, `server`, `tool`, `arguments`, `sources`, `text`.
+    Результаты укладываются в `TOOL_FLOW_CONTEXT_CHARS` от нового шага к старому: свежий
+    результат — то, с чем модель работает сейчас, поэтому режутся старые, а шаги прошлых
+    раундов не длиннее `TOOL_FLOW_OLD_RESULT_CHARS`. Подстановку `$N` бюджет не трогает.
     """
     done = list(done)
     budget = config.TOOL_FLOW_CONTEXT_CHARS
+    latest = max((step.round for step in done), default=0)
     shown: Dict[int, str] = {}
     for step in reversed(done):
-        take = min(len(step.text), budget)
+        limit = budget if step.round == latest else min(budget, config.TOOL_FLOW_OLD_RESULT_CHARS)
+        take = min(len(step.text), limit)
         budget -= take
         text = step.text[:take]
         if take < len(step.text):

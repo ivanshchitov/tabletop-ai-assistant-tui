@@ -760,14 +760,13 @@ class TabletopAgent:
         rounds = 0
         stop = mcp_tools.FLOW_DONE
         messages = mcp_tools.build_choice_messages(reports, question)
-        max_words = config.TOOL_CHOICE_MAX_WORDS
         while True:
             rounds += 1
             self._signal(on_phase, RequestPhase.TOOL_CHOICE)
             try:
                 meta = self.client.ask_with_usage_messages(
                     messages,
-                    max_tokens=config.max_tokens_for_words(max_words),
+                    max_tokens=config.max_tokens_for_words(config.TOOL_CHOICE_MAX_WORDS),
                     temperature=None,
                     model=self.config.model,
                 )
@@ -817,7 +816,6 @@ class TabletopAgent:
                 stop = mcp_tools.FLOW_ROUNDS_LIMIT.format(limit=config.TOOL_FLOW_MAX_ROUNDS)
                 break
             messages = mcp_tools.build_round_messages(reports, question, done)
-            max_words = config.TOOL_FLOW_MAX_WORDS
         for result in done:
             result.total = planned
         self._last_tool_flow = ToolFlowReport(

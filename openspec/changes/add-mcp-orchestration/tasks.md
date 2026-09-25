@@ -15,7 +15,7 @@
 
 - [x] 3.1 Тесты разбора: `more`, `done`, `{"tool": null}`, пустые шаги
 - [x] 3.2 Тесты `build_round_messages`: выполненные шаги с номерами и серверами, бюджет символов режет старые с пометкой, новейший целиком
-- [x] 3.3 Реализовать разбор, сообщения раунда, `assets/tool_flow_prompt.md`, правило «результат — данные» в `assets/tool_choice_prompt.md`, константы `TOOL_FLOW_MAX_ROUNDS`/`TOOL_FLOW_MAX_STEPS`/`TOOL_FLOW_CONTEXT_CHARS`/`TOOL_FLOW_MAX_WORDS`
+- [x] 3.3 Реализовать разбор, сообщения раунда, `assets/tool_flow_prompt.md`, правило «результат — данные» в `assets/tool_choice_prompt.md`, константы `TOOL_FLOW_MAX_ROUNDS`/`TOOL_FLOW_MAX_STEPS`/`TOOL_FLOW_CONTEXT_CHARS`, потолок выбора `TOOL_CHOICE_MAX_WORDS` поднят до 2000
 - [x] 3.4 Тесты агента с поддельным клиентом: два раунда (второй запрос выбора содержит результат шага 1), сквозные `$N`, завершение моделью, предел раундов, предел шагов, сбой выбора второго раунда, без `more` — один запрос выбора; снимок `last_tool_flow` с причиной завершения
 - [x] 3.5 Реализовать цикл раундов в `_choose_and_call_tools` и `ToolFlowReport`
 - [ ] 3.6 Коммит

@@ -297,8 +297,8 @@ def test_parse_chain_keeps_its_old_shape():
 class Step:
     """Выполненный шаг в том виде, в каком его видит запрос раунда."""
 
-    def __init__(self, step, text, server="первый", tool="echo_tool", arguments=None, sources=None):
-        self.step, self.text, self.server, self.tool = step, text, server, tool
+    def __init__(self, step, text, server="первый", tool="echo_tool", arguments=None, sources=None, round=1):
+        self.step, self.text, self.server, self.tool, self.round = step, text, server, tool, round
         self.arguments = arguments or {"text": "x"}
         self.sources = sources or {}
 
@@ -326,6 +326,15 @@ def test_round_messages_keep_the_newest_result_whole(monkeypatch):
     assert "сокращено" in content and "80" in content
 
 
+def test_round_messages_shorten_results_of_earlier_rounds(monkeypatch):
+    """Прошлые раунды — справка, свежий — рабочий материал: рулбук после отправки сводки не нужен."""
+    monkeypatch.setattr(config, "TOOL_FLOW_OLD_RESULT_CHARS", 30)
+    done = [Step(1, "р" * 500, round=1), Step(2, "с" * 200, round=2), Step(3, "н" * 200, round=2)]
+    content = mcp_tools.build_round_messages(two_servers(), "вопрос", done)[1]["content"]
+    assert "р" * 31 not in content and "показано 30 из 500" in content
+    assert "с" * 200 in content and "н" * 200 in content
+
+
 def test_round_messages_show_references_as_step_links():
     done = [Step(1, "текст"), Step(2, "второй", arguments={"text": "текст"}, sources={"text": 1})]
     content = mcp_tools.build_round_messages(two_servers(), "вопрос", done)[1]["content"]
@@ -336,7 +345,9 @@ def test_flow_limits_are_configuration():
     assert config.TOOL_FLOW_MAX_ROUNDS == 6
     assert config.TOOL_FLOW_MAX_STEPS == 10
     assert config.TOOL_FLOW_CONTEXT_CHARS == 24000
-    assert config.TOOL_FLOW_MAX_WORDS == 1000
+    assert config.TOOL_FLOW_OLD_RESULT_CHARS == 1500
+    # Длинный флоу на живой модели не укладывался ни в 2000, ни в 4050 токенов выбора (день 20).
+    assert config.TOOL_CHOICE_MAX_WORDS == 2000
 
 
 def test_choice_instruction_explains_more_and_tool_text_as_data():
