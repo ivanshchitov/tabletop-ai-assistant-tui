@@ -2509,3 +2509,57 @@ def test_no_tool_leaves_an_empty_chain(monkeypatch):
 
     assert agent.last_tool_chain == ()
     assert agent.last_tool is None
+
+
+# --- маршрутизация по каталогу и флоу из раундов (день 20) ---------------------------
+
+
+def two_servers_agent(monkeypatch, answers=None):
+    """Агент с двумя фейковыми серверами: у второго свой набор инструментов."""
+    first = fake_mcp_spec()._replace(name="первый")
+    second = fake_mcp_spec("--second")._replace(name="второй")
+    registry_of(monkeypatch, first, second)
+    agent, client = make_agent(answers=answers)
+    agent.connect_mcp_servers()
+    return agent, client
+
+
+def test_chain_steps_go_to_the_servers_that_declare_them(monkeypatch):
+    chain = (
+        '{"steps": ['
+        '{"tool": "fake_search", "arguments": {"query": "огонь"}},'
+        '{"tool": "fake_facts", "arguments": {"name": "гоблин"}}'
+        "]}"
+    )
+    agent, _ = two_servers_agent(monkeypatch, answers=[chain, "Ответ"])
+
+    agent.ask("вопрос")
+
+    assert [(step.server, step.tool) for step in agent.last_tool_chain] == [
+        ("первый", "fake_search"),
+        ("второй", "fake_facts"),
+    ]
+    assert all(step.error == "" for step in agent.last_tool_chain)
+
+
+def test_wrong_server_is_rerouted_to_the_declaring_one(monkeypatch):
+    choice = '{"server": "первый", "tool": "fake_note", "arguments": {"text": "заметка"}}'
+    agent, _ = two_servers_agent(monkeypatch, answers=[choice, "Ответ"])
+
+    agent.ask("вопрос")
+
+    (step,) = agent.last_tool_chain
+    assert (step.server, step.rerouted_from, step.error) == ("второй", "первый", "")
+    assert "заметка" in step.text
+
+
+def test_unknown_tool_fails_without_starting_a_process(monkeypatch):
+    agent, _ = two_servers_agent(monkeypatch, answers=['{"tool": "нет_такого"}', "Ответ"])
+    started = []
+    monkeypatch.setattr(tabletop_agent.MCPClient, "call_tool", lambda *a, **k: started.append(a))
+
+    agent.ask("вопрос")
+
+    (step,) = agent.last_tool_chain
+    assert "ни одним" in step.error
+    assert started == []

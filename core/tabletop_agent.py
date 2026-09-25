@@ -200,6 +200,10 @@ class MCPToolResult:
     total: int = 1
     sources: Dict[str, int] = field(default_factory=dict)
     dropped: int = 0
+    # Оркестрация (день 20): раунд выбора, в котором шаг появился, и сервер, названный моделью,
+    # когда маршрутизация по каталогу отправила вызов на другой, объявивший инструмент.
+    round: int = 1
+    rerouted_from: str = ""
 
 
 @dataclass
@@ -763,26 +767,32 @@ class TabletopAgent:
         done: List[MCPToolResult],
         on_phase: Optional[Callable[["RequestPhase"], None]],
     ) -> MCPToolResult:
-        server = choice.server or self._server_of_tool(reports, choice.tool)
+        # Маршрут — по каталогу, а не по слову модели: неверно названный сервер исправляется,
+        # неизвестный или неоднозначный инструмент останавливает шаг до запуска процесса.
+        route = mcp_tools.route(reports, choice.server, choice.tool)
+        if route.error:
+            return MCPToolResult(
+                server=choice.server,
+                tool=choice.tool,
+                arguments=dict(choice.arguments),
+                error=route.error,
+            )
         try:
             arguments, sources = mcp_tools.resolve_references(
                 choice.arguments, [result.text for result in done]
             )
         except mcp_tools.ReferenceFailure as error:
             return MCPToolResult(
-                server=server, tool=choice.tool, arguments=dict(choice.arguments), error=str(error)
+                server=route.server,
+                tool=choice.tool,
+                arguments=dict(choice.arguments),
+                error=str(error),
+                rerouted_from=route.rerouted_from,
             )
-        result = self.call_mcp_tool(server, choice.tool, arguments, on_phase=on_phase)
+        result = self.call_mcp_tool(route.server, choice.tool, arguments, on_phase=on_phase)
         result.sources = sources
+        result.rerouted_from = route.rerouted_from
         return result
-
-    @staticmethod
-    def _server_of_tool(reports: List[MCPReport], tool: str) -> str:
-        """Сервер, объявивший инструмент: модель вправе назвать только имя инструмента."""
-        for report in reports:
-            if any(declared.name == tool for declared in report.tools):
-                return report.spec_name
-        return ""
 
     def mcp_reports(self) -> Tuple[MCPReport, ...]:
         """Снимки подключения, снятые последним обходом реестра; процессов не запускает."""

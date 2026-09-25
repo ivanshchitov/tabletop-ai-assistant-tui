@@ -144,6 +144,39 @@ def parse_choice(text: str) -> Any:
     )
 
 
+@dataclass(frozen=True)
+class Route:
+    """Куда уходит вызов шага: сервер, сервер, названный моделью (если маршрут исправлен), ошибка."""
+
+    server: str
+    rerouted_from: str = ""
+    error: str = ""
+
+
+def route(reports: Iterable[Any], server: str, tool: str) -> Route:
+    """Выбрать сервер шага по каталогу — детерминированно, без обращения к модели.
+
+    Кандидаты — подключённые серверы, объявившие инструмент. Названный моделью кандидат
+    принимается как есть; единственный кандидат исправляет неверно названный сервер; ни одного
+    кандидата или несколько без названного среди них — ошибка шага, процесс не запускается.
+    """
+    candidates = [
+        report.spec_name
+        for report in reports
+        if not report.error and any(declared.name == tool for declared in report.tools)
+    ]
+    if server and server in candidates:
+        return Route(server=server)
+    if not candidates:
+        return Route(server="", error=f"инструмент «{tool}» не объявлен ни одним сервером")
+    if len(candidates) > 1:
+        return Route(
+            server="",
+            error=f"неоднозначно: инструмент «{tool}» объявлен серверами {', '.join(candidates)}",
+        )
+    return Route(server=candidates[0], rerouted_from=server)
+
+
 class ReferenceFailure(ValueError):
     """Аргумент ссылается на шаг, который ещё не выполнен: вызывать инструмент нельзя."""
 

@@ -14,7 +14,9 @@
 - ``--empty`` — объявляет пустой список инструментов (успешное подключение, но без инструментов);
 - ``--garbage`` — печатает мусор вместо протокола (проверка отказа рукопожатия);
 - ``--markup`` — имя и описание инструмента содержат разметкоподобные скобки (проверка
-  экранирования на терминальном слое).
+  экранирования на терминальном слое);
+- ``--second`` — второй сервер с другим набором инструментов (`fake_facts`, `fake_note`):
+  оркестрация дня 20 проверяет маршрутизацию шагов по двум процессам.
 """
 
 import json
@@ -45,6 +47,29 @@ TOOLS = [
                 "second": {"type": "string", "description": "Второй аргумент"},
             },
             "required": ["first"],
+        },
+    },
+]
+
+SECOND_SERVER_NAME = "второй-фейковый-сервер"
+
+SECOND_TOOLS = [
+    {
+        "name": "fake_facts",
+        "description": "Факты о записи по её названию",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"name": {"type": "string", "description": "Название записи"}},
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "fake_note",
+        "description": "Сохраняет заметку и возвращает её",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"text": {"type": "string", "description": "Текст заметки"}},
+            "required": ["text"],
         },
     },
 ]
@@ -91,8 +116,12 @@ def main() -> None:
         sys.stdout.flush()
         return
 
+    server_name = SERVER_NAME
     if "--empty" in flags:
         tools = []
+    elif "--second" in flags:
+        tools = SECOND_TOOLS
+        server_name = SECOND_SERVER_NAME
     elif "--markup" in flags:
         tools = MARKUP_TOOLS
     else:
@@ -121,7 +150,7 @@ def main() -> None:
                     "result": {
                         "protocolVersion": PROTOCOL_VERSION,
                         "capabilities": {"tools": {}},
-                        "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
+                        "serverInfo": {"name": server_name, "version": SERVER_VERSION},
                     },
                 }
             )

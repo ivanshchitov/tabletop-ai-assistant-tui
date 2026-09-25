@@ -206,3 +206,53 @@ def test_chain_message_names_every_step_without_repeating_passed_text():
     # Переданный текст в сообщении один раз — как результат шага 1, а не ещё и в аргументах.
     assert message.count("НАЙДЕНО-ТЕКСТ") == 1
     assert "СВОДКА-ТЕКСТ" in message
+
+
+# --- маршрутизация шага по каталогу (день 20) ---
+
+
+OTHER = MCPTool(name="other_tool", description="Другой инструмент", input_schema={})
+
+
+def two_servers():
+    return [report(ECHO, name="первый"), report(OTHER, name="второй")]
+
+
+def test_route_keeps_the_named_server_that_declares_the_tool():
+    route = mcp_tools.route(two_servers(), "второй", "other_tool")
+    assert (route.server, route.rerouted_from, route.error) == ("второй", "", "")
+
+
+def test_route_finds_the_server_when_none_is_named():
+    route = mcp_tools.route(two_servers(), "", "echo_tool")
+    assert (route.server, route.rerouted_from, route.error) == ("первый", "", "")
+
+
+def test_route_fixes_a_wrong_server_and_remembers_it():
+    route = mcp_tools.route(two_servers(), "второй", "echo_tool")
+    assert (route.server, route.rerouted_from, route.error) == ("первый", "второй", "")
+
+
+def test_route_rejects_a_tool_no_server_declares():
+    route = mcp_tools.route(two_servers(), "первый", "нет_такого")
+    assert route.server == ""
+    assert "нет_такого" in route.error and "ни одним" in route.error
+
+
+def test_route_rejects_an_ambiguous_tool_without_a_matching_server():
+    reports = [report(ECHO, name="первый"), report(ECHO, name="второй"), report(OTHER, name="третий")]
+    route = mcp_tools.route(reports, "третий", "echo_tool")
+    assert route.server == ""
+    assert "неоднозначно" in route.error
+    assert "первый" in route.error and "второй" in route.error
+
+
+def test_route_accepts_an_ambiguous_tool_when_the_server_is_named():
+    reports = [report(ECHO, name="первый"), report(ECHO, name="второй")]
+    route = mcp_tools.route(reports, "второй", "echo_tool")
+    assert (route.server, route.error) == ("второй", "")
+
+
+def test_route_skips_servers_that_failed():
+    reports = [report(ECHO, name="первый", error="не поднялся"), report(OTHER, name="второй")]
+    assert mcp_tools.route(reports, "", "echo_tool").error
