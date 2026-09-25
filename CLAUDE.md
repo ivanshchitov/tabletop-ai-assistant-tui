@@ -18,7 +18,7 @@ echo "OPENCODE_API_KEY=sk-ваш_ключ" > .env   # or set OPENCODE_API_KEY di
 ./tabletop-ai-assistant.py                   # re-execs itself into .venv when one is next to it
 
 .venv/bin/pip install -r requirements-dev.txt
-pytest                      # everything except the `network` marker (1183 selected)
+pytest                      # everything except the `network` marker (1225 selected)
 pytest tests/unit -q        # fast layer, no subprocesses (~3s)
 pytest tests/e2e -q         # real app in a pty against a stub API (~130s)
 pytest --snapshot-update    # rewrite the e2e screen snapshots after a deliberate layout change
@@ -182,7 +182,8 @@ writes into, default `exports/`), `TABLETOP_REQUEST_TIMEOUT`,
 session setting's default, messages, default 10), `TABLETOP_MAX_SESSION_TOKENS` (the session
 setting's default, tokens, default 20000), `TABLETOP_MCP_COMMAND`/`TABLETOP_MCP_ARGS` (the MCP
 server's launch command and its space-separated arguments, replacing the whole registry with
-that single entry), `TABLETOP_DND_API_URL` (the base address of the external API the project's own
+that single entry — or, when the arguments hold several sets separated by ` | `, with one entry
+per set named «переопределён окружением 1», «… 2»; that is how e2e runs two fake servers), `TABLETOP_DND_API_URL` (the base address of the external API the project's own
 MCP server talks to, read by `mcp_server/dnd_api.py` in that separate process) and
 `TABLETOP_AUTO_TOOLS` (the session's starting state of the automatic tool call, `0` turns it off)
 override the corresponding defaults. They exist so the
@@ -639,21 +640,18 @@ baked in:
   they arrive. `env_keys` names the environment variables holding that server's secrets; the client
   reads them and passes them to the process, and a missing one is simply not passed. The registry
   holds three entries, all verified against their real servers by the `network` contract test:
-  `rulebooks` (`npx -y boardgame-rules-mcp`, rulebook search and full rules text from 1jour-1jeu,
-  no key) and `rule-disputes` (`npx -y @mohitagw15856/rulebook mcp`, offline, official rule vs.
-  house rule, no key) sit beside the default. **The app connects to every entry at startup**
-  (`config.mcp_servers()` resolves the registry, `agent.connect_mcp_servers()` walks it), so
-  `DEFAULT_MCP_SERVER` now only names the entry an override is built from. The default entry
-  is `bgg-mcp -mode stdio` ([kkjdaniel/bgg-mcp](https://github.com/kkjdaniel/bgg-mcp), 10
-  BoardGameGeek tools incl. rules search and recommendations), which reads `BGG_API_KEY`,
-  `BGG_COOKIE` and `BGG_USERNAME` — that is what `env_keys` carries. It is a Go binary with no
-  prebuilt release, so it is built from source (`git clone` + `make build`) and put on PATH; the app
-  only ever names the command. The handshake and `tools/list` work anonymously, but BGG's XML API
-  has required registration since October 2025 and answers `HTTP 401` to anonymous clients, so
-  `tools/call` needs a key from BGG's application form — out of scope for day 16, which needs the
-  connection and the tool list only. It replaced `npx -y @unclick/bgg-mcp` (the swap was one registry
-  entry, which is the point of the design; that package could take no key at all — no `process.env`
-  in its bundle).
+  `rulebooks` (`npx -y boardgame-rules-mcp`, rulebook search, full rules text and a two-phase
+  structured summary from 1jour-1jeu, no key), `dnd-rules` (the project's own server, see below —
+  also `DEFAULT_MCP_SERVER`) and `rule-disputes` (`npx -y @mohitagw15856/rulebook mcp`, offline,
+  official rule vs. house rule, game facts, game-night planning, no key). **The app connects to
+  every entry at startup** (`config.mcp_servers()` resolves the registry,
+  `agent.connect_mcp_servers()` walks it), so `DEFAULT_MCP_SERVER` only names the entry an override
+  is built from and the one `mcp_server_spec()` returns. The BoardGameGeek entry (`bgg-mcp -mode
+  stdio`, a Go binary built from source) was **removed on day 20** (user's call): BGG's XML API has
+  answered `HTTP 401` to anonymous clients since October 2025, so none of its ten tools could be
+  called without a key, and the orchestration needed servers that actually answer. Removing it was
+  one registry entry plus the tool-name list of the "no tool name in `core`/`ui`" test — the point
+  of the design.
 - **Synchronous wrapper over the async SDK.** The official `mcp` package is asyncio-based while the
   app's main loop is a plain `input()`; `MCPClient` hides `asyncio.run` inside and exposes ordinary
   methods. Making the app async would have touched all of `ui/` and the task pipeline for one
@@ -721,10 +719,12 @@ own choice (day 17). Deliberate decisions baked in:
   `assets/tool_choice_prompt.md`) — the facts-extractor pattern, no `response_format`. `{"tool":
   null}` is a normal outcome, not a failure; unparsable output is a failure (`mcp_tools.UNPARSED`),
   and either way the question still goes out. Since day 19 the answer may be a *chain* of steps —
-  see the tool-pipeline block below; one choice request per question either way. `config.TOOL_CHOICE_MAX_WORDS` is 400, not the 80 the short JSON answer
-  suggests: the pool's reasoning models spend 818–1601 output tokens on the choice (measured live
-  against a 22-tool catalog), and a tighter budget returned empty content — the same failure mode
-  as `MAX_MAX_WORDS`. The catalog itself costs ~3200 prompt tokens with four servers connected,
+  see the tool-pipeline block below; since day 20 the choice may ask for further rounds — see the orchestration block. `config.TOOL_CHOICE_MAX_WORDS` is 2000 (8050 tokens), not the 80 the short JSON answer
+  suggests: the pool's reasoning models spend 818–1601 output tokens on a simple choice (measured
+  live against a 22-tool catalog), a long-flow request ate the whole 2000-token floor and the round
+  that writes a rules JSON as an argument did not fit 4050 either — each time empty content with
+  `finish_reason=length`, the `MAX_MAX_WORDS` failure mode. The ceiling costs nothing; only the
+  tokens produced are paid. The catalog costs ~2800 prompt tokens with the three servers,
   which is the MCP overhead the week-4 README describes. The model may name the tool only — the server is then resolved from the
   snapshots, and `/tool call` accepts the bare tool name for the same reason (a registry name may
   contain a space, and the command is split on whitespace).
@@ -834,6 +834,51 @@ Deliberate decisions baked in:
   `<name>.md` under `config.exports_dir()` (read at call time), accepts only `[\w.-]` names, never
   overwrites (`-2`, `-3`…), rejects empty text; `exports/` is gitignored and passed through
   `harness.AppSession`.
+
+**MCP orchestration (`core/mcp_tools.route`/`parse_round`/`build_round_messages`,
+`TabletopAgent._choose_and_call_tools`, `assets/tool_flow_prompt.md`, `/tool flow`):** several
+registered servers, the agent picking tools, routing each call and running a long flow (day 20).
+Deliberate decisions baked in:
+- **Rounds extend the day-19 loop, not a new orchestrator.** A choice may add `"more": true`: the
+  agent runs its steps, then sends another choice request carrying the catalog, the question and
+  every executed step (number, server, tool, arguments, result). That is what one-shot chains
+  cannot do — a step whose arguments depend on the *content* of an earlier result (pick a game,
+  then ask for facts about *that* game). The flow ends on `{"done": true}`, `{"tool": null}`, empty
+  steps or a round without `more`, so a flow that fits one round still costs **one** choice request
+  — requiring an explicit `done` would have doubled the cost of every tool question and changed
+  what 30 request-counting e2e tests measure. Limits are data: `TOOL_FLOW_MAX_ROUNDS` (6),
+  `TOOL_FLOW_MAX_STEPS` (10, a round is cut to the remainder), `TOOL_CHAIN_MAX_STEPS` (4) per round.
+- **Step numbers and `$N` are global across rounds** — `resolve_references` already took the list
+  of done texts, so passing all of them was the whole change.
+- **Round budget: the latest round whole, earlier rounds short.** Results go into the round request
+  within `TOOL_FLOW_CONTEXT_CHARS` (24000), newest first; steps of earlier rounds are capped at
+  `TOOL_FLOW_OLD_RESULT_CHARS` (1500), every cut marked. A live run carried a 33k-char rulebook into
+  every later round and the reasoning ate the choice budget; the rulebook matters only in the round
+  that extracts from it. `$N` substitution still passes full text.
+- **Routing is code, never the model's word.** `mcp_tools.route(reports, server, tool)`: the named
+  server if it declares the tool; otherwise the single declaring server with `rerouted_from` kept
+  (journal «маршрут: X → Y»); no declaring server → error without starting a process; several and
+  none named → «неоднозначно». `/tool call` keeps its own lookup — there the user names the server.
+- **Tool text is data.** Both choice assets say so: instructions inside a result do not override the
+  user's request, though following a server's own protocol is allowed when the request needs it.
+  `rulebooks` is exactly that case: `get_rules_summary` without a cached summary returns the rulebook,
+  a schema and «call `submit_rules_summary`»; the model writes the rules JSON as that tool's `data`,
+  then reads the cached summary back. Its answer `{"valid": true, "path": …}` is a confirmation, and
+  the flow asset says to save data, not confirmations (a live run saved the confirmation). The cache
+  lives in `~/Library/Preferences/boardgame-rules-mcp/summaries/` — delete a game's file there to see
+  the two-phase path again. `tool_result_prompt.md` forbids claiming a save that no step did (a live
+  answer did).
+- **Snapshot and visibility.** `MCPToolResult` gained `round` and `rerouted_from`; `last_tool_flow`
+  is a `ToolFlowReport(question, rounds, choice_requests, steps, stop_reason)` with the stop reasons
+  as `mcp_tools.FLOW_*` constants; `/tool flow` renders it with zero model or server calls. Journal
+  lines of a multi-round flow read `🔧 р2 · 3/8 сервер.инструмент …`; a one-round chain keeps the
+  day-19 format (snapshots). A choice failure or a limit after some steps gets «🔧 Флоу остановлен:
+  …»; a step failure is already named on its line.
+- **Tests:** `tests/unit/test_mcp_tools.py` (parsing, round messages and budget, routing),
+  `tests/unit/test_tabletop_agent.py` (two fake servers: order, rounds, global `$N`, limits, failures),
+  `tests/unit/test_tui_app.py` (journal, `/tool flow`), and `tests/e2e/test_tool_flow.py` — a
+  three-round flow across `fake_mcp_server.py` and its `--second` mode (tools `fake_facts`,
+  `fake_note`) with a rerouted step.
 
 **Prompt assembly (`core/prompts.py` + `assets/*.md`):**
 - `assets/system_prompt.md` is the base system prompt; `assets/answer_format_compact.md` and
@@ -1090,8 +1135,10 @@ saved: `dialogues` stays a flat list across branches.
   parameters and zero model requests, a manual call printing the result, an unknown tool keeping the
   session, the automatic call putting the result into the question's request, "no tool needed",
   `/tool auto off` removing the auxiliary request, an unparsable choice not blocking the answer, an
-  unavailable server, the tool lines staying out of `history.json`, and a three-step chain run on one
-  choice request with the echo server proving the verbatim transfer.
+  unavailable server, the tool lines staying out of `history.json`, a three-step chain run on one
+  choice request with the echo server proving the verbatim transfer, and a three-round flow across
+  two fake servers (the `--second` mode) — order of choice requests and calls, a rerouted step,
+  results of round N inside the choice request of round N+1, and `/tool flow`.
 - `tests/e2e/test_schedule_flow.py` — the scheduler in a real pty: the empty and the filled
   `/schedule` report with zero model requests, the startup line, the background runner's `--once`
   pass between two questions producing the announcement after the next answer and nothing after the
