@@ -12,4 +12,4 @@
 
 ## 3. Закрытие
 
-- [ ] 3.1 Полный `pytest`, архив, `CLAUDE.md`/`README.md`, коммит
+- [x] 3.1 Полный `pytest`, архив, `CLAUDE.md`/`README.md`, коммит

@@ -18,7 +18,7 @@ echo "OPENCODE_API_KEY=sk-ваш_ключ" > .env   # or set OPENCODE_API_KEY di
 ./tabletop-ai-assistant.py                   # re-execs itself into .venv when one is next to it
 
 .venv/bin/pip install -r requirements-dev.txt
-pytest                      # everything except the `network` marker (1230 selected)
+pytest                      # everything except the `network` marker (1237 selected)
 pytest tests/unit -q        # fast layer, no subprocesses (~3s)
 pytest tests/e2e -q         # real app in a pty against a stub API (~130s)
 pytest --snapshot-update    # rewrite the e2e screen snapshots after a deliberate layout change
@@ -860,7 +860,9 @@ Deliberate decisions baked in:
   within `TOOL_FLOW_CONTEXT_CHARS` (24000), newest first; steps of earlier rounds are capped at
   `TOOL_FLOW_OLD_RESULT_CHARS` (1500), every cut marked. A live run carried a 33k-char rulebook into
   every later round and the reasoning ate the choice budget; the rulebook matters only in the round
-  that extracts from it. `$N` substitution still passes full text.
+  that extracts from it. `$N` substitution still passes full text. The *answer* request caps each
+  step at `TOOL_ANSWER_RESULT_CHARS` (6000, marked): a flow cut after `get_rules_summary` sent the raw
+  33k rulebook to the answer model, whose reasoning ate the whole `max_tokens` (empty content).
 - **Routing is code, never the model's word.** `mcp_tools.route(reports, server, tool)`: the named
   server if it declares the tool; otherwise the single declaring server with `rerouted_from` kept
   (journal «маршрут: X → Y»); no declaring server → error without starting a process; several and
@@ -975,8 +977,10 @@ HTTP headers are latin-1 encoded,
 so a key typed in a Cyrillic keyboard layout used to blow up with `UnicodeEncodeError` from deep
 inside `requests` — a traceback instead of a message. `ui/tui_app.py`'s `_ensure_api_key()` runs the
 same check, including on the key that came from `.env`, so the problem surfaces at startup rather
-than after the first question. Retries on timeout with exponential backoff (`config.MAX_RETRIES`), but not
-on connection errors (treated as a persistent network problem, not transient). `is_valid_json_answer()`
+than after the first question. Retries on timeout and on 502/503/504 (`TRANSIENT_STATUSES` — a
+live 503 from OpenCode Zen cut the day-20 demo flow) with exponential backoff (`config.MAX_RETRIES`),
+but not on connection errors (treated as a persistent network problem, not transient) or other HTTP
+errors. `is_valid_json_answer()`
 is used only when `AnswerFormat.JSON` is active, to warn the user client-side if the model didn't
 actually return valid JSON — it doesn't block or alter the displayed answer.
 `ask()` and the newer `ask_with_usage()` share one private `_request()` (HTTP call, retries, error
