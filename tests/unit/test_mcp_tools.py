@@ -256,3 +256,90 @@ def test_route_accepts_an_ambiguous_tool_when_the_server_is_named():
 def test_route_skips_servers_that_failed():
     reports = [report(ECHO, name="первый", error="не поднялся"), report(OTHER, name="второй")]
     assert mcp_tools.route(reports, "", "echo_tool").error
+
+
+# --- флоу из раундов (день 20) ---
+
+
+def test_round_without_more_ends_the_flow():
+    parsed = mcp_tools.parse_round('{"steps": [{"tool": "echo_tool", "arguments": {"text": "a"}}]}')
+    assert [step.tool for step in parsed.steps] == ["echo_tool"]
+    assert parsed.more is False
+    assert parsed.dropped == 0
+
+
+def test_round_with_more_asks_for_the_next_round():
+    parsed = mcp_tools.parse_round('{"steps": [{"tool": "echo_tool", "arguments": {}}], "more": true}')
+    assert parsed.more is True
+
+
+def test_single_tool_with_more():
+    parsed = mcp_tools.parse_round('{"tool": "echo_tool", "arguments": {}, "more": true}')
+    assert [step.tool for step in parsed.steps] == ["echo_tool"]
+    assert parsed.more is True
+
+
+def test_done_null_tool_and_empty_steps_end_the_flow():
+    assert mcp_tools.parse_round('{"done": true}') is None
+    assert mcp_tools.parse_round('{"tool": null}') is None
+    assert mcp_tools.parse_round('{"steps": [], "more": true}') is None
+
+
+def test_unparsable_round_is_a_failure():
+    assert mcp_tools.parse_round("не JSON") is mcp_tools.UNPARSED
+
+
+def test_parse_chain_keeps_its_old_shape():
+    steps, dropped = mcp_tools.parse_chain('{"steps": [{"tool": "echo_tool"}], "more": true}')
+    assert [step.tool for step in steps] == ["echo_tool"] and dropped == 0
+
+
+class Step:
+    """Выполненный шаг в том виде, в каком его видит запрос раунда."""
+
+    def __init__(self, step, text, server="первый", tool="echo_tool", arguments=None, sources=None):
+        self.step, self.text, self.server, self.tool = step, text, server, tool
+        self.arguments = arguments or {"text": "x"}
+        self.sources = sources or {}
+
+
+def test_round_messages_carry_question_catalog_and_done_steps():
+    done = [Step(1, "результат первого"), Step(2, "результат второго", server="второй", tool="other_tool")]
+    messages = mcp_tools.build_round_messages(two_servers(), "вопрос про гоблина", done)
+    system, user = messages
+    assert system["role"] == "system" and "done" in system["content"]
+    content = user["content"]
+    assert "вопрос про гоблина" in content
+    assert "echo_tool" in content and "other_tool" in content
+    assert "Шаг 1" in content and "результат первого" in content
+    assert "Шаг 2" in content and "второй" in content and "результат второго" in content
+    # Номер следующего шага назван явно: ссылки $N сквозные через раунды.
+    assert "3" in content.split("Шаг 2")[-1]
+
+
+def test_round_messages_keep_the_newest_result_whole(monkeypatch):
+    monkeypatch.setattr(config, "TOOL_FLOW_CONTEXT_CHARS", 100)
+    done = [Step(1, "с" * 80), Step(2, "н" * 90)]
+    content = mcp_tools.build_round_messages(two_servers(), "вопрос", done)[1]["content"]
+    assert "н" * 90 in content
+    assert "с" * 11 not in content
+    assert "сокращено" in content and "80" in content
+
+
+def test_round_messages_show_references_as_step_links():
+    done = [Step(1, "текст"), Step(2, "второй", arguments={"text": "текст"}, sources={"text": 1})]
+    content = mcp_tools.build_round_messages(two_servers(), "вопрос", done)[1]["content"]
+    assert "text=← шаг 1" in content
+
+
+def test_flow_limits_are_configuration():
+    assert config.TOOL_FLOW_MAX_ROUNDS == 6
+    assert config.TOOL_FLOW_MAX_STEPS == 10
+    assert config.TOOL_FLOW_CONTEXT_CHARS == 24000
+    assert config.TOOL_FLOW_MAX_WORDS == 1000
+
+
+def test_choice_instruction_explains_more_and_tool_text_as_data():
+    instruction = mcp_tools.choice_instruction()
+    assert '"more": true' in instruction
+    assert "данные" in instruction

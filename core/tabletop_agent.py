@@ -207,6 +207,21 @@ class MCPToolResult:
 
 
 @dataclass
+class ToolFlowReport:
+    """Снимок последнего флоу инструментов (день 20): для отчёта `/tool flow`.
+
+    Вопрос, число раундов и запросов выбора, шаги в порядке вызова и причина завершения —
+    терминальный слой рендерит снимок и не читает внутренности агента.
+    """
+
+    question: str
+    rounds: int
+    choice_requests: int
+    steps: Tuple[MCPToolResult, ...]
+    stop_reason: str
+
+
+@dataclass
 class TaskQueueEntry:
     """Строка очереди задач для отчёта: цель, статус, место в работе и объём артефакта."""
 
@@ -351,6 +366,7 @@ class TabletopAgent:
         # для журнальных строк интерфейса и запроса; живут один обмен, в лог и в историю
         # не попадают.
         self._last_tool_chain: Tuple[MCPToolResult, ...] = ()
+        self._last_tool_flow: Optional[ToolFlowReport] = None
         # Решение маршрута последней реплики — для журнальной строки интерфейса.
         self._last_routing: Tuple[memory_layers.MemoryRecord, ...] = ()
         # Лог ходов сессии: пары user/assistant успешных обменов, append-only. system в логе
@@ -417,6 +433,11 @@ class TabletopAgent:
     def last_tool(self) -> Optional[MCPToolResult]:
         """Снимок последнего вызова инструмента MCP: None — инструмент не вызывался."""
         return self._last_tool_chain[-1] if self._last_tool_chain else None
+
+    @property
+    def last_tool_flow(self) -> Optional[ToolFlowReport]:
+        """Снимок последнего флоу инструментов; None — выбора в сессии ещё не было."""
+        return self._last_tool_flow
 
     @property
     def last_tool_chain(self) -> Tuple[MCPToolResult, ...]:
@@ -720,45 +741,105 @@ class TabletopAgent:
         question: str,
         on_phase: Optional[Callable[["RequestPhase"], None]],
     ) -> Tuple[MCPToolResult, ...]:
-        """Выбрать цепочку инструментов моделью и выполнить её — до отправки вопроса.
+        """Выбрать и выполнить флоу инструментов моделью — до отправки вопроса.
 
         Вспомогательный запрос устроен как извлекатель фактов: инструкция из ассета, разбор
-        ответа на стороне приложения, расход в общий журнал сессии. Запрос один на всю
-        цепочку: шаги выполняются без новых обращений к модели, а результат шага N доходит до
-        следующего подстановкой ссылки `$N`, а не пересказом. Любой сбой — ошибка запроса,
-        неразобранный ответ, неизвестное имя, отказ сервера, неверная ссылка — снимок с
-        `error`: цепочка на нём останавливается, вопрос уходит с тем, что успело выполниться.
+        ответа на стороне приложения, расход в общий журнал сессии. Шаги раунда выполняются без
+        новых обращений к модели, а результат шага N доходит до следующего подстановкой ссылки
+        `$N`, а не пересказом. Следующий раунд — новый запрос выбора с результатами выполненных
+        шагов — идёт только по явному `"more": true` (день 20), в пределах раундов и шагов из
+        конфигурации: без пометки флоу стоит одного запроса выбора, как цепочка дня 19. Любой
+        сбой — ошибка запроса, неразобранный ответ, неизвестный инструмент, отказ сервера,
+        неверная ссылка — завершает флоу: вопрос уходит с тем, что успело выполниться.
         """
         reports = [report for report in self._mcp_reports if not report.error and report.tools]
         if not reports:
             return ()
-        self._signal(on_phase, RequestPhase.TOOL_CHOICE)
-        try:
-            meta = self.client.ask_with_usage_messages(
-                mcp_tools.build_choice_messages(reports, question),
-                max_tokens=config.max_tokens_for_words(config.TOOL_CHOICE_MAX_WORDS),
-                temperature=None,
-                model=self.config.model,
-            )
-        except APIError as error:
-            return (MCPToolResult(server="", tool="", error=f"выбор инструмента не удался: {error}"),)
-        self._last_result = meta
-        self._ledger.record(meta)
-        parsed = mcp_tools.parse_chain(meta.content)
-        if parsed is mcp_tools.UNPARSED:
-            return (MCPToolResult(server="", tool="", error="ответ выбора инструмента не разобран"),)
-        if parsed is None:
-            return ()
-        steps, dropped = parsed
         done: List[MCPToolResult] = []
-        for number, choice in enumerate(steps, start=1):
-            result = self._run_chain_step(reports, choice, done, on_phase)
-            result.step, result.total, result.dropped = number, len(steps), dropped
-            done.append(result)
-            # Текст отказа — не данные: следующий шаг получил бы его на вход как результат.
-            if result.error:
+        planned = 0
+        rounds = 0
+        stop = mcp_tools.FLOW_DONE
+        messages = mcp_tools.build_choice_messages(reports, question)
+        max_words = config.TOOL_CHOICE_MAX_WORDS
+        while True:
+            rounds += 1
+            self._signal(on_phase, RequestPhase.TOOL_CHOICE)
+            try:
+                meta = self.client.ask_with_usage_messages(
+                    messages,
+                    max_tokens=config.max_tokens_for_words(max_words),
+                    temperature=None,
+                    model=self.config.model,
+                )
+            except APIError as error:
+                failure = f"выбор инструмента не удался: {error}"
+                if not done:
+                    return self._flow_failed(question, rounds, failure)
+                stop = mcp_tools.FLOW_CHOICE_FAILED.format(round=rounds, error=failure)
                 break
+            self._last_result = meta
+            self._ledger.record(meta)
+            parsed = mcp_tools.parse_round(meta.content)
+            if parsed is mcp_tools.UNPARSED:
+                failure = "ответ выбора инструмента не разобран"
+                if not done:
+                    return self._flow_failed(question, rounds, failure)
+                stop = mcp_tools.FLOW_CHOICE_FAILED.format(round=rounds, error=failure)
+                break
+            if parsed is None:
+                stop = mcp_tools.FLOW_DONE if done else mcp_tools.FLOW_NO_TOOL
+                break
+            room = config.TOOL_FLOW_MAX_STEPS - len(done)
+            steps = parsed.steps[:room]
+            dropped = parsed.dropped + len(parsed.steps) - len(steps)
+            planned += len(steps)
+            failed = False
+            for choice in steps:
+                result = self._run_chain_step(reports, choice, done, on_phase)
+                result.step, result.round, result.dropped = len(done) + 1, rounds, dropped
+                done.append(result)
+                # Текст отказа — не данные: следующий шаг получил бы его на вход как результат.
+                if result.error:
+                    failed = True
+                    break
+            if failed:
+                stop = mcp_tools.FLOW_STEP_FAILED.format(number=len(done))
+                break
+            if dropped and len(done) >= config.TOOL_FLOW_MAX_STEPS:
+                stop = mcp_tools.FLOW_STEPS_LIMIT.format(limit=config.TOOL_FLOW_MAX_STEPS)
+                break
+            if not parsed.more:
+                break
+            if len(done) >= config.TOOL_FLOW_MAX_STEPS:
+                stop = mcp_tools.FLOW_STEPS_LIMIT.format(limit=config.TOOL_FLOW_MAX_STEPS)
+                break
+            if rounds >= config.TOOL_FLOW_MAX_ROUNDS:
+                stop = mcp_tools.FLOW_ROUNDS_LIMIT.format(limit=config.TOOL_FLOW_MAX_ROUNDS)
+                break
+            messages = mcp_tools.build_round_messages(reports, question, done)
+            max_words = config.TOOL_FLOW_MAX_WORDS
+        for result in done:
+            result.total = planned
+        self._last_tool_flow = ToolFlowReport(
+            question=question,
+            rounds=rounds,
+            choice_requests=rounds,
+            steps=tuple(done),
+            stop_reason=stop,
+        )
         return tuple(done)
+
+    def _flow_failed(self, question: str, rounds: int, failure: str) -> Tuple[MCPToolResult, ...]:
+        """Сбой первого же выбора: прежний снимок-ошибка, флоу без шагов."""
+        result = MCPToolResult(server="", tool="", error=failure)
+        self._last_tool_flow = ToolFlowReport(
+            question=question,
+            rounds=rounds,
+            choice_requests=rounds,
+            steps=(),
+            stop_reason=mcp_tools.FLOW_CHOICE_FAILED.format(round=rounds, error=failure),
+        )
+        return (result,)
 
     def _run_chain_step(
         self,

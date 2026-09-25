@@ -22,6 +22,7 @@ from . import config
 
 TOOL_CHOICE_ASSET = "tool_choice_prompt.md"
 TOOL_RESULT_ASSET = "tool_result_prompt.md"
+TOOL_FLOW_ASSET = "tool_flow_prompt.md"
 
 CHOICE_USER_TEMPLATE = (
     "Доступные инструменты:\n{catalog}\n\n---\n\nВопрос пользователя:\n{question}"
@@ -37,6 +38,21 @@ CHAIN_MESSAGE_TEMPLATE = (
     "(шагов: {count}).\n\n{steps}\n\n{instruction}"
 )
 CHAIN_STEP_TEMPLATE = "Шаг {number}: инструмент «{tool}» сервера «{server}», аргументы: {arguments}.\n{text}"
+
+ROUND_USER_TEMPLATE = (
+    "Доступные инструменты:\n{catalog}\n\n---\n\nВопрос пользователя:\n{question}\n\n---\n\n"
+    "Выполненные шаги ({count}):\n\n{steps}\n\n---\n\nПервый шаг этого раунда получит номер {next}."
+)
+ROUND_STEP_TEMPLATE = "Шаг {number}: инструмент «{tool}» сервера «{server}», аргументы: {arguments}.\n{text}"
+CLIPPED_NOTE = "\n… сокращено: показано {shown} из {total} симв."
+
+# Причины завершения флоу — для снимка и отчёта `/tool flow`.
+FLOW_NO_TOOL = "инструменты не понадобились"
+FLOW_DONE = "модель завершила флоу"
+FLOW_ROUNDS_LIMIT = "исчерпан предел раундов ({limit})"
+FLOW_STEPS_LIMIT = "исчерпан предел шагов ({limit})"
+FLOW_STEP_FAILED = "сбой шага {number}"
+FLOW_CHOICE_FAILED = "сбой выбора в раунде {round}: {error}"
 
 NO_ARGUMENTS = "без аргументов"
 # Ссылка на результат выполненного шага: аргумент, целиком равный «$N».
@@ -71,6 +87,12 @@ UNPARSED = _Unparsed()
 def choice_instruction() -> str:
     """Инструкция выбора инструмента из ассета assets/tool_choice_prompt.md."""
     return (config.ASSETS_DIR / TOOL_CHOICE_ASSET).read_text(encoding="utf-8").strip()
+
+
+@lru_cache(maxsize=None)
+def flow_instruction() -> str:
+    """Инструкция следующего раунда выбора из ассета assets/tool_flow_prompt.md."""
+    return (config.ASSETS_DIR / TOOL_FLOW_ASSET).read_text(encoding="utf-8").strip()
 
 
 @lru_cache(maxsize=None)
@@ -123,6 +145,77 @@ def build_choice_messages(reports: Iterable[Any], question: str) -> List[Dict[st
             ),
         },
     ]
+
+
+def build_round_messages(
+    reports: Iterable[Any], question: str, done: Iterable[Any]
+) -> List[Dict[str, str]]:
+    """Запрос следующего раунда: инструкция выбора и раунда, каталог, вопрос, выполненные шаги.
+
+    Шаг — объект с полями `step`, `server`, `tool`, `arguments`, `sources`, `text`. Результаты
+    укладываются в `TOOL_FLOW_CONTEXT_CHARS` от нового шага к старому: свежий результат — то,
+    с чем модель работает сейчас, поэтому режутся старые. Подстановку `$N` бюджет не трогает.
+    """
+    done = list(done)
+    budget = config.TOOL_FLOW_CONTEXT_CHARS
+    shown: Dict[int, str] = {}
+    for step in reversed(done):
+        take = min(len(step.text), budget)
+        budget -= take
+        text = step.text[:take]
+        if take < len(step.text):
+            text += CLIPPED_NOTE.format(shown=take, total=len(step.text))
+        shown[step.step] = text
+    blocks = [
+        ROUND_STEP_TEMPLATE.format(
+            number=step.step,
+            tool=step.tool,
+            server=step.server,
+            arguments=render_arguments(step.arguments, step.sources),
+            text=shown[step.step],
+        )
+        for step in done
+    ]
+    return [
+        {"role": "system", "content": choice_instruction() + "\n\n" + flow_instruction()},
+        {
+            "role": "user",
+            "content": ROUND_USER_TEMPLATE.format(
+                catalog=render_catalog(reports),
+                question=question,
+                count=len(blocks),
+                steps="\n\n".join(blocks),
+                next=len(done) + 1,
+            ),
+        },
+    ]
+
+
+@dataclass(frozen=True)
+class RoundChoice:
+    """Ответ раунда выбора: шаги в пределах потолка, сколько отброшено, нужен ли ещё раунд."""
+
+    steps: Tuple[ToolChoice, ...]
+    dropped: int
+    more: bool
+
+
+def parse_round(text: str) -> Any:
+    """Разобрать ответ раунда: `RoundChoice`, None (флоу завершён) или `UNPARSED`.
+
+    `{"done": true}`, `{"tool": null}` и пустой список шагов завершают флоу; следующий раунд
+    нужен только при явном `"more": true` — без пометки флоу стоит одного запроса выбора.
+    """
+    data = _first_json_object(text or "")
+    if data is None:
+        return UNPARSED
+    if data.get("done") is True:
+        return None
+    chain = parse_chain(text)
+    if chain is None or chain is UNPARSED:
+        return chain
+    steps, dropped = chain
+    return RoundChoice(steps=steps, dropped=dropped, more=data.get("more") is True)
 
 
 def parse_choice(text: str) -> Any:

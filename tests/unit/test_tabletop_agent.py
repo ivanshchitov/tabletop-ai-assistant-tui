@@ -10,7 +10,7 @@ from core import context_strategies as strategies
 from core.usage import estimate_tokens
 from core.answer_settings import AnswerFormat, AnswerSettings, ContextStrategy
 from core.api_client import AnswerMeta, APIError
-from core import memory_layers
+from core import mcp_tools, memory_layers
 from core.history_manager import HistoryManager
 from core.long_term_memory import LongTermMemory
 from core import task_state
@@ -2563,3 +2563,133 @@ def test_unknown_tool_fails_without_starting_a_process(monkeypatch):
     (step,) = agent.last_tool_chain
     assert "ни одним" in step.error
     assert started == []
+
+
+ROUND_1 = '{"steps": [{"tool": "fake_search", "arguments": {"query": "огонь"}}], "more": true}'
+ROUND_2 = '{"steps": [{"tool": "fake_facts", "arguments": {"name": "гоблин"}}], "more": true}'
+ROUND_3 = '{"steps": [{"tool": "fake_note", "arguments": {"text": "$2"}}]}'
+
+
+def test_flow_runs_rounds_across_two_servers_in_order(monkeypatch):
+    agent, client = two_servers_agent(monkeypatch, answers=[ROUND_1, ROUND_2, ROUND_3, "Ответ"])
+
+    meta = agent.ask("найди, узнай и запиши")
+
+    chain = agent.last_tool_chain
+    assert [(s.step, s.round, s.server, s.tool) for s in chain] == [
+        (1, 1, "первый", "fake_search"),
+        (2, 2, "второй", "fake_facts"),
+        (3, 3, "второй", "fake_note"),
+    ]
+    # Три запроса выбора и сам вопрос.
+    assert len(client.calls) == 4
+    assert meta.content == "Ответ"
+    flow = agent.last_tool_flow
+    assert (flow.rounds, flow.choice_requests, flow.stop_reason) == (3, 3, mcp_tools.FLOW_DONE)
+    assert flow.question == "найди, узнай и запиши"
+    assert flow.steps == chain
+
+
+def test_next_round_request_carries_previous_results(monkeypatch):
+    agent, client = two_servers_agent(monkeypatch, answers=[ROUND_1, ROUND_2, ROUND_3, "Ответ"])
+
+    agent.ask("вопрос")
+
+    first = agent.last_tool_chain[0]
+    second_choice = client.calls[1]["messages"][-1]["content"]
+    assert first.text in second_choice
+    assert "Шаг 1" in second_choice
+    # Раунды со второго получают более широкий выход: модель может писать данные в аргументах.
+    assert client.calls[1]["max_tokens"] == config.max_tokens_for_words(config.TOOL_FLOW_MAX_WORDS)
+    assert client.calls[0]["max_tokens"] == config.max_tokens_for_words(config.TOOL_CHOICE_MAX_WORDS)
+
+
+def test_references_cross_rounds(monkeypatch):
+    agent, _ = two_servers_agent(monkeypatch, answers=[ROUND_1, ROUND_2, ROUND_3, "Ответ"])
+
+    agent.ask("вопрос")
+
+    _, second, third = agent.last_tool_chain
+    assert third.arguments["text"] == second.text
+    assert third.sources == {"text": 2}
+
+
+def test_chain_without_more_costs_one_choice_request(monkeypatch):
+    agent, client = two_servers_agent(monkeypatch, answers=[CHAIN.replace("fake_echo", "fake_note").replace('"first"', '"text"').replace(', "second": "fire-spells"', ""), "Ответ"])
+
+    agent.ask("вопрос")
+
+    assert len(client.calls) == 2
+    assert all(step.round == 1 for step in agent.last_tool_chain)
+    assert agent.last_tool_flow.stop_reason == mcp_tools.FLOW_DONE
+
+
+def test_model_ends_the_flow_with_done(monkeypatch):
+    agent, client = two_servers_agent(monkeypatch, answers=[ROUND_1, '{"done": true}', "Ответ"])
+
+    agent.ask("вопрос")
+
+    assert [s.tool for s in agent.last_tool_chain] == ["fake_search"]
+    assert len(client.calls) == 3
+    assert agent.last_tool_flow.stop_reason == mcp_tools.FLOW_DONE
+
+
+def test_flow_stops_at_the_round_limit(monkeypatch):
+    monkeypatch.setattr(config, "TOOL_FLOW_MAX_ROUNDS", 2)
+    agent, client = two_servers_agent(monkeypatch, answers=[ROUND_1, ROUND_1, ROUND_1, "Ответ"])
+
+    agent.ask("вопрос")
+
+    flow = agent.last_tool_flow
+    assert flow.choice_requests == 2
+    assert flow.stop_reason == mcp_tools.FLOW_ROUNDS_LIMIT.format(limit=2)
+    assert len(client.calls) == 3
+
+
+def test_flow_stops_at_the_step_limit(monkeypatch):
+    monkeypatch.setattr(config, "TOOL_FLOW_MAX_STEPS", 3)
+    two = '{"steps": [{"tool": "fake_search", "arguments": {}}, {"tool": "fake_search", "arguments": {}}], "more": true}'
+    agent, _ = two_servers_agent(monkeypatch, answers=[two, two, "Ответ"])
+
+    agent.ask("вопрос")
+
+    chain = agent.last_tool_chain
+    assert len(chain) == 3
+    assert chain[-1].dropped == 1
+    assert agent.last_tool_flow.stop_reason == mcp_tools.FLOW_STEPS_LIMIT.format(limit=3)
+
+
+def test_failed_next_round_choice_keeps_done_steps(monkeypatch):
+    agent, client = two_servers_agent(monkeypatch, answers=[ROUND_1, "не JSON", "Ответ"])
+
+    meta = agent.ask("вопрос")
+
+    assert meta.content == "Ответ"
+    assert [s.tool for s in agent.last_tool_chain] == ["fake_search"]
+    assert agent.last_tool_flow.stop_reason.startswith("сбой выбора в раунде 2")
+    system_contents = [m["content"] for m in client.calls[-1]["messages"] if m["role"] == "system"]
+    assert any("fake_search" in content for content in system_contents)
+
+
+def test_failed_step_stops_the_flow(monkeypatch):
+    broken = '{"steps": [{"tool": "нет_такого", "arguments": {}}], "more": true}'
+    agent, client = two_servers_agent(monkeypatch, answers=[ROUND_1, broken, "Ответ"])
+
+    agent.ask("вопрос")
+
+    assert len(client.calls) == 3
+    assert agent.last_tool_flow.stop_reason == mcp_tools.FLOW_STEP_FAILED.format(number=2)
+
+
+def test_no_tool_flow_snapshot(monkeypatch):
+    agent, _ = two_servers_agent(monkeypatch, answers=[NO_CHOICE, "Ответ"])
+
+    agent.ask("вопрос")
+
+    flow = agent.last_tool_flow
+    assert (flow.rounds, flow.steps, flow.stop_reason) == (1, (), mcp_tools.FLOW_NO_TOOL)
+
+
+def test_flow_snapshot_is_empty_before_any_question(monkeypatch):
+    agent, _ = two_servers_agent(monkeypatch)
+    assert agent.last_tool_flow is None
