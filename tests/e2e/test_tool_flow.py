@@ -10,6 +10,7 @@ import json
 
 import pytest
 
+from .harness import FAKE_MCP_SERVER
 from .stub_api import answer
 
 pytestmark = [pytest.mark.e2e, pytest.mark.pty]
@@ -191,3 +192,52 @@ def test_chain_runs_automatically_and_passes_data(app, stub, history_file):
 
     stored = json.loads(history_file.read_text(encoding="utf-8"))
     assert "fake_search" not in json.dumps(stored, ensure_ascii=False)
+
+
+# --- оркестрация нескольких серверов (день 20) ---
+
+
+FIRST = "переопределён окружением 1"
+SECOND = "переопределён окружением 2"
+FLOW = [
+    json.dumps({"steps": [{"tool": "fake_search", "arguments": {"query": "огонь"}}], "more": True}, ensure_ascii=False),
+    # Модель назвала не тот сервер: маршрут исправляется по каталогу.
+    json.dumps(
+        {"steps": [{"server": FIRST, "tool": "fake_facts", "arguments": {"name": "гоблин"}}], "more": True},
+        ensure_ascii=False,
+    ),
+    json.dumps({"steps": [{"tool": "fake_note", "arguments": {"text": "$2"}}]}, ensure_ascii=False),
+]
+FLOW_STEP_1 = "фейковый вызов fake_search(query=огонь)"
+FLOW_STEP_2 = "фейковый вызов fake_facts(name=гоблин)"
+FLOW_STEP_3 = f"фейковый вызов fake_note(text={FLOW_STEP_2})"
+
+
+def test_flow_runs_rounds_across_two_servers(app, stub):
+    """Три раунда выбора, два сервера: порядок вызовов, маршрут и передача данных между раундами."""
+    stub.sequence(*(answer(text) for text in FLOW), answer("Итог по флоу."))
+    with app(auto_tools=True, mcp_args=f"{FAKE_MCP_SERVER} | {FAKE_MCP_SERVER} --second") as session:
+        session.wait_for("MCP: 2/2")
+        session.wait_for_prompt()
+        session.send_line("Найди, узнай подробности о найденном и запиши заметку")
+        text = session.wait_for("Токены:")
+        session.send_line("/tool flow")
+        report = session.wait_for("Итог: модель завершила флоу")
+        session.send_line("/exit")
+        session.wait_exit()
+
+    flat = " ".join(text.split())
+    # Порядок и серверы: раунд 1 — первый сервер, раунды 2 и 3 — второй.
+    assert flat.index(f"🔧 р1 · 1/3 {FIRST}.fake_search") < flat.index(f"🔧 р2 · 2/3 {SECOND}.fake_facts")
+    assert flat.index(f"🔧 р2 · 2/3 {SECOND}.fake_facts") < flat.index(f"🔧 р3 · 3/3 {SECOND}.fake_note")
+    assert f"маршрут: {FIRST} → {SECOND}" in flat
+    assert f"text ← шаг 2: {len(FLOW_STEP_2)} симв." in flat
+    # Три запроса выбора и вопрос; второй выбор видел результат шага 1, третий — шага 2.
+    assert stub.call_count == 4
+    assert FLOW_STEP_1 in stub.payload_at(1)["messages"][-1]["content"]
+    assert FLOW_STEP_2 in stub.payload_at(2)["messages"][-1]["content"]
+    systems = [m["content"] for m in stub.payload_at(3)["messages"] if m["role"] == "system"]
+    assert any(FLOW_STEP_3 in content for content in systems)
+    flat_report = " ".join(report.split())
+    assert "Раундов: 3, запросов выбора: 3, шагов: 3" in flat_report
+    assert f"Серверы: {FIRST}, {SECOND}" in flat_report
