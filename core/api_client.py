@@ -40,6 +40,10 @@ API_KEY_CHARSET_ERROR = (
 )
 
 
+# Статусы временной недоступности: повторяются, как таймаут.
+TRANSIENT_STATUSES = frozenset({502, 503, 504})
+
+
 class APIError(Exception):
     """Ошибка при обращении к API."""
 
@@ -108,6 +112,12 @@ class APIClient:
 
             if response.status_code == 401:
                 raise APIError("Неверный API-ключ.")
+            # Временная недоступность сервиса — переходный сбой, как таймаут: живой 503 от
+            # OpenCode Zen посреди флоу инструментов оборвал демо дня 20. Последняя попытка
+            # отдаёт ошибку со статусом, как прочие HTTP-ошибки.
+            if response.status_code in TRANSIENT_STATUSES and attempt < config.MAX_RETRIES - 1:
+                time.sleep(2**attempt)
+                continue
             try:
                 response.raise_for_status()
             except requests.exceptions.HTTPError as exc:

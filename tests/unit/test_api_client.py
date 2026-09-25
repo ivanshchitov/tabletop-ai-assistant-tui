@@ -230,6 +230,25 @@ def test_http_error_is_not_retried(client, no_sleep):
 
 
 @responses.activate
+@pytest.mark.parametrize("status", [502, 503, 504])
+def test_temporary_unavailability_is_retried_until_success(client, no_sleep, status):
+    """Временная недоступность сервиса — переходный сбой, как таймаут (живой 503 на демо дня 20)."""
+    responses.add(responses.POST, config.API_URL, json={}, status=status)
+    responses.add(responses.POST, config.API_URL, json=_completion("ok"), status=200)
+    assert client.ask("system", "user") == "ok"
+    assert len(responses.calls) == 2
+
+
+@responses.activate
+def test_temporary_unavailability_gives_up_after_max_retries(client, no_sleep):
+    for _ in range(config.MAX_RETRIES):
+        responses.add(responses.POST, config.API_URL, json={}, status=503)
+    with pytest.raises(APIError, match="503"):
+        client.ask("system", "user")
+    assert len(responses.calls) == config.MAX_RETRIES
+
+
+@responses.activate
 def test_request_timeout_value_is_passed(client):
     captured = {}
 
