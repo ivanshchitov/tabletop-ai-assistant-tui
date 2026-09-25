@@ -243,6 +243,26 @@ def test_mcp_registry_is_not_empty():
     assert config.DEFAULT_MCP_SERVER in config.MCP_SERVERS
 
 
+def test_mcp_registry_has_no_boardgamegeek():
+    """BGG без ключа отвечает 401 на вызов и в оркестрации дня 20 не участвует."""
+    assert list(config.MCP_SERVERS) == ["rulebooks", "dnd-rules", "rule-disputes"]
+    assert config.DEFAULT_MCP_SERVER == "dnd-rules"
+    assert not any("bgg" in spec.command for spec in config.MCP_SERVERS.values())
+
+
+def test_mcp_servers_override_with_several_argument_sets(monkeypatch):
+    """Наборы аргументов через « | » дают по записи на набор — несколько поддельных серверов в e2e."""
+    monkeypatch.setenv("TABLETOP_MCP_COMMAND", "python3")
+    monkeypatch.setenv("TABLETOP_MCP_ARGS", "fake.py | fake.py --second")
+    servers = config.mcp_servers()
+    assert [spec.args for spec in servers] == [("fake.py",), ("fake.py", "--second")]
+    assert all(spec.command == "python3" for spec in servers)
+    assert [spec.name for spec in servers] == [
+        f"{config.MCP_OVERRIDE_NAME} 1",
+        f"{config.MCP_OVERRIDE_NAME} 2",
+    ]
+
+
 def test_mcp_specs_are_complete():
     """Описание сервера — данные: замена сервера должна стоить одну запись реестра."""
     for name, spec in config.MCP_SERVERS.items():

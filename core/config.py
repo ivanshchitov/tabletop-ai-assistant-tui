@@ -239,14 +239,6 @@ class MCPServerSpec(NamedTuple):
 
 
 MCP_SERVERS = {
-    "boardgamegeek": MCPServerSpec(
-        name="boardgamegeek",
-        transport="stdio",
-        command="bgg-mcp",
-        args=("-mode", "stdio"),
-        env_keys=("BGG_API_KEY", "BGG_COOKIE", "BGG_USERNAME"),
-        description="BoardGameGeek: поиск, детали, правила, рекомендации, коллекции, цены",
-    ),
     "rulebooks": MCPServerSpec(
         name="rulebooks",
         transport="stdio",
@@ -280,7 +272,9 @@ MCP_SERVERS = {
         description="Спорные правила офлайн: официальное против домашнего, факты об играх, план вечера",
     ),
 }
-DEFAULT_MCP_SERVER = "boardgamegeek"
+# BoardGameGeek (bgg-mcp) убран в день 20: без ключа BGG его вызовы отвечают 401, а оркестрации
+# хватает рулбуков, спорных правил и собственного сервера. По умолчанию — собственный сервер.
+DEFAULT_MCP_SERVER = "dnd-rules"
 # Запись реестра, чьи инструменты ставит и выполняет планировщик: собственный сервер проекта.
 # Фоновый исполнитель расписания обращается прямо к ней, а не к разрешённому реестру, — иначе
 # переопределение TABLETOP_MCP_COMMAND (подмена серверов приложения) увело бы и его.
@@ -302,19 +296,26 @@ def mcp_servers() -> Tuple[MCPServerSpec, ...]:
     command = os.getenv("TABLETOP_MCP_COMMAND")
     if not command:
         return tuple(MCP_SERVERS[name] for name in MCP_SERVERS)
-    args = tuple(os.getenv("TABLETOP_MCP_ARGS", "").split())
-    override = MCP_SERVERS[DEFAULT_MCP_SERVER]._replace(
-        name=MCP_OVERRIDE_NAME,
+    # Наборы аргументов через « | » — по записи на набор с той же командой: так e2e поднимает
+    # несколько поддельных серверов. Один набор — прежняя единственная запись с прежним именем.
+    argument_sets = [part.split() for part in os.getenv("TABLETOP_MCP_ARGS", "").split(" | ")]
+    base = MCP_SERVERS[DEFAULT_MCP_SERVER]._replace(
         command=command,
-        args=args,
         env_keys=(),
         description="сервер задан переменными окружения",
     )
-    return (override,)
+    if len(argument_sets) == 1:
+        return (base._replace(name=MCP_OVERRIDE_NAME, args=tuple(argument_sets[0])),)
+    return tuple(
+        base._replace(name=f"{MCP_OVERRIDE_NAME} {number}", args=tuple(args))
+        for number, args in enumerate(argument_sets, start=1)
+    )
 
 
 def mcp_server_spec() -> MCPServerSpec:
-    """Первый сервер разрешённого реестра — одиночный случай `mcp_servers()`."""
+    """Сервер по умолчанию, а при переопределении окружением — первая его запись."""
+    if not os.getenv("TABLETOP_MCP_COMMAND"):
+        return MCP_SERVERS[DEFAULT_MCP_SERVER]
     return mcp_servers()[0]
 
 

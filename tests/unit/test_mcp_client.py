@@ -83,10 +83,14 @@ def test_tool_names_are_not_hardcoded_in_the_app():
     roots = [Path(__file__).resolve().parents[2] / name for name in ("core", "ui")]
     sources = [path.read_text(encoding="utf-8") for root in roots for path in root.glob("*.py")]
     for name in (
-        "bgg_search",
-        "bgg_game_details",
-        "bgg_top_games",
-        "bgg_user_collection",
+        # BoardGameGeek убран из реестра (день 20); его место в проверке заняли
+        # инструменты оставшихся чужих серверов — рулбуков и спорных правил.
+        "search_rulebook",
+        "get_rules_summary",
+        "submit_rules_summary",
+        "plan_game_night",
+        "get_game_facts",
+        "list_contested_rules",
         # Свой сервер проекта — такой же чужой процесс: его инструменты тоже приходят
         # по протоколу, а не из кода приложения.
         "dnd_sections",
