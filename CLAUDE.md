@@ -89,7 +89,8 @@ openspec archive <change-id> --yes        # non-interactive: without --yes the C
   deltas: `agent`, `question-answering`, `answer-settings`, `api-integration`,
   `history-persistence`, `terminal-ui`, `settings-screen`, `configuration`, `context-strategies`,
   `memory-model`, `user-profile`, `task-state`, `agent-invariants`, `test-infrastructure`,
-  `model-selection`, `mcp-integration`, `scheduled-jobs`, `tool-pipeline`.
+  `model-selection`, `mcp-integration`, `scheduled-jobs`, `tool-pipeline`,
+  `rules-document-index`.
   It records deliberate decisions worth knowing before touching related code: the JSON format's
   refusal reply is a machine-readable `{"error": ...}` object rather than the verbatim refusal
   phrase used by free/compact (not a bug to fix), and `AnswerSettings` is session-only by design —
@@ -139,8 +140,8 @@ than repeating it):
 - Archiving rewrites `openspec/specs/` only, so the full `pytest` run belongs *before* it; after it
   `openspec validate --all --strict` is the whole check.
 - A new on-disk state file means a new `TABLETOP_*` environment switch **and** a pass-through in
-  `tests/e2e/harness.AppSession`: without both, any run — a test run included — reads and writes the
-  real file in the repo root (`history.json`, `memory.json`).
+`tests/e2e/harness.AppSession`: without both, any run — a test run included — reads and writes the
+real file in the repo root (`history.json`, `memory.json`, `.rules-index.sqlite3`).
 - Screen recording captures the user's whole screen, so the demo terminal window must be one the
   script creates itself and addresses by window id — never by index; other windows must not be
   closed, focused or moved.
@@ -153,7 +154,8 @@ than repeating it):
 
 Three packages: `core/` (agent, settings, prompts, API client, memory layers and stores, the user
 profile, the invariants table and its answer check, the task state machine and its pipeline, context
-strategies and the compression logic, the MCP client and the pure part of the tool choice — no
+strategies and the compression logic, the MCP client and the pure part of the tool choice, local
+PDF rules indexing and retrieval — no
 `rich`/terminal dependency), `mcp_server/` (the project's **own** MCP server — a separate process,
 outside `core/` and `ui/`, see the MCP block below) and `ui/`
 (`tui_app.py`, `keyboard.py`, `commands_screen.py`, `settings_screen.py`, `branches_screen.py`,
@@ -177,7 +179,9 @@ entry point (the schedule's background runner, see the scheduler block) and repe
 **Environment switches (`core/config.py`):** `OPENCODE_API_URL`, `TABLETOP_HISTORY_FILE`,
 `TABLETOP_MEMORY_FILE`, `TABLETOP_PROFILE_FILE`, `TABLETOP_TASK_FILE`, `TABLETOP_TASKS_DIR`,
 `TABLETOP_SCHEDULE_FILE`, `TABLETOP_EXPORTS_DIR` (the directory the own server's save-to-file tool
-writes into, default `exports/`), `TABLETOP_REQUEST_TIMEOUT`,
+writes into, default `exports/`), `TABLETOP_RULES_DOCUMENTS_DIR` (PDF corpus directory, default
+`docs/rules/`), `TABLETOP_RULES_INDEX_FILE` (local SQLite index, default `.rules-index.sqlite3`),
+`TABLETOP_REQUEST_TIMEOUT`,
 `TABLETOP_TYPING_DELAY` (the last one read in `ui/tui_app.py`), `TABLETOP_COMPRESS_AFTER` (the
 session setting's default, messages, default 10), `TABLETOP_MAX_SESSION_TOKENS` (the session
 setting's default, tokens, default 20000), `TABLETOP_MCP_COMMAND`/`TABLETOP_MCP_ARGS` (the MCP

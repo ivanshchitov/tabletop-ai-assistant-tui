@@ -21,6 +21,7 @@ from . import (
     mcp_tools,
     memory_layers,
     prompts,
+    rules_index,
     task_pipeline,
     task_state,
 )
@@ -367,6 +368,8 @@ class TabletopAgent:
         # не попадают.
         self._last_tool_chain: Tuple[MCPToolResult, ...] = ()
         self._last_tool_flow: Optional[ToolFlowReport] = None
+        self._last_rules_sources: Tuple[rules_index.SearchResult, ...] = ()
+        self._rules_context: Optional[str] = None
         # Решение маршрута последней реплики — для журнальной строки интерфейса.
         self._last_routing: Tuple[memory_layers.MemoryRecord, ...] = ()
         # Лог ходов сессии: пары user/assistant успешных обменов, append-only. system в логе
@@ -445,6 +448,11 @@ class TabletopAgent:
         return self._last_tool_chain
 
     @property
+    def last_rules_sources(self) -> Tuple[rules_index.SearchResult, ...]:
+        """Фрагменты документов правил, использованные в последнем ответе."""
+        return self._last_rules_sources
+
+    @property
     def auto_tools(self) -> bool:
         """Включён ли автоматический выбор инструмента перед вопросом (в пределах сессии)."""
         return self.config.auto_tools
@@ -513,6 +521,8 @@ class TabletopAgent:
         self._last_tool_chain = (
             self._choose_and_call_tools(question, on_phase) if self.config.auto_tools else ()
         )
+        self._last_rules_sources = tuple(rules_index.search(rules_index.index_path(), question))
+        self._rules_context = rules_index.context_message(self._last_rules_sources)
         skip = self._prepare_context(question, user_prompt, on_phase)
         self._signal(on_phase, RequestPhase.REQUEST)
         messages = self._build_messages(user_prompt, skip)
@@ -1276,6 +1286,8 @@ class TabletopAgent:
         tool_result = self._tool_result_message()
         if tool_result is not None:
             messages.append(tool_result)
+        if self._rules_context is not None:
+            messages.append({"role": "system", "content": self._rules_context})
         messages.extend(self._view_turns(skip))
         messages.append({"role": "user", "content": user_prompt})
         return messages

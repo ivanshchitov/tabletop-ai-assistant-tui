@@ -61,6 +61,8 @@ class AppSession:
         task_file: Optional[Path] = None,
         tasks_dir: Optional[Path] = None,
         schedule_file: Optional[Path] = None,
+        rules_documents_dir: Optional[Path] = None,
+        rules_index_file: Optional[Path] = None,
         exports_dir: Optional[Path] = None,
         mcp_command: Optional[str] = None,
         mcp_args: Optional[str] = None,
@@ -126,6 +128,10 @@ class AppSession:
             # Планировщик — свой файл: без переопределения прогон читал бы и писал реальный
             # schedule.json репозитория, а фоновый исполнитель выполнял бы чужие задания.
             env["TABLETOP_SCHEDULE_FILE"] = str(schedule_file)
+        if rules_documents_dir is not None:
+            env["TABLETOP_RULES_DOCUMENTS_DIR"] = str(rules_documents_dir)
+        if rules_index_file is not None:
+            env["TABLETOP_RULES_INDEX_FILE"] = str(rules_index_file)
         if exports_dir is not None:
             # Выгрузки цепочки инструментов — свой каталог: без переопределения сохранение в
             # файл писало бы в реальный exports/ репозитория.

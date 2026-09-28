@@ -225,6 +225,7 @@ task.json
 tasks/
 schedule.json
 exports/
+.rules-index.sqlite3*
 
 # Solve-challenge-task: screen recordings and README drafts
 videos/

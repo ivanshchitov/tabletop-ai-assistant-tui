@@ -10,7 +10,7 @@ from core import context_strategies as strategies
 from core.usage import estimate_tokens
 from core.answer_settings import AnswerFormat, AnswerSettings, ContextStrategy
 from core.api_client import AnswerMeta, APIError
-from core import mcp_tools, memory_layers
+from core import mcp_tools, memory_layers, rules_index
 from core.history_manager import HistoryManager
 from core.long_term_memory import LongTermMemory
 from core import task_state
@@ -123,6 +123,22 @@ def test_first_ask_sends_system_and_user_only():
     assert [m["role"] for m in messages] == ["system", "user"]
     assert "Tabletop AI Assistant" in messages[0]["content"]
     assert "Первый вопрос" in messages[1]["content"]
+
+
+def test_rules_index_context_is_added_to_answer_and_sources_are_exposed(monkeypatch):
+    source = rules_index.SearchResult(
+        "catan.pdf", "CATAN", "Строительство", "catan.pdf:structural:2",
+        "A road costs one brick and one lumber.", 0.8, "structural"
+    )
+    monkeypatch.setattr(rules_index, "search", lambda *_args, **_kwargs: [source])
+    agent, client = make_agent()
+
+    agent.ask("Сколько ресурсов стоит дорога в CATAN?")
+
+    messages = client.calls[0]["messages"]
+    context = next(message["content"] for message in messages if "A road costs" in message["content"])
+    assert "catan.pdf:structural:2" in context
+    assert agent.last_rules_sources == (source,)
 
 
 def test_second_ask_carries_previous_exchange():

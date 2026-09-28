@@ -7,7 +7,7 @@ from typing import List, Optional
 
 import pytest
 
-from core import config, context_compressor, context_strategies
+from core import config, context_compressor, context_strategies, rules_index
 from core.answer_settings import AnswerFormat, AnswerSettings, ContextStrategy
 from core.api_client import AnswerMeta, APIError
 from core import tabletop_agent
@@ -665,6 +665,63 @@ def test_status_bar_hint_lists_only_exit_and_commands(make_app, recording_consol
     assert "Команды: /exit, /commands, /settings" not in output
     assert "/clear" not in output.split("Команды: ")[-1]
     assert "/context" not in output.split("Команды: ")[-1]
+
+
+def test_rules_status_and_index_commands_do_not_call_model(make_app, recording_console, monkeypatch, tmp_path):
+    documents = tmp_path / "rules"
+    documents.mkdir()
+    (documents / "one.pdf").write_bytes(b"fixture")
+    monkeypatch.setattr(config, "RULES_DOCUMENTS_DIR", documents)
+    monkeypatch.setattr(config, "RULES_INDEX_FILE", tmp_path / "index.sqlite3")
+    report = rules_index.IndexReport(1, 423, {"fixed": 10, "structural": 12}, 120000)
+    monkeypatch.setattr(rules_index, "build_index", lambda *_args: report)
+    client = FakeClient()
+
+    make_app(["/rules", "/rules index", "/exit"], client).run()
+
+    assert "Индекс правил: не создан" in recording_console.text
+    assert "Индекс готов: 1 файла, 423 страниц текста" in recording_console.text
+    assert client.calls == []
+
+
+def test_rules_compare_shows_both_strategies_without_model_call(
+    make_app, recording_console, monkeypatch, tmp_path
+):
+    result = rules_index.SearchResult(
+        "catan.pdf", "CATAN", "Building", "catan.pdf:structural:2",
+        "Build a road.", 0.8, "structural"
+    )
+    monkeypatch.setattr(rules_index, "index_exists", lambda _path: True)
+    monkeypatch.setattr(rules_index, "compare", lambda *_args, **_kwargs: {"fixed": [result], "structural": [result]})
+    monkeypatch.setattr(rules_index, "strategy_stats", lambda _path: {
+        "fixed": {"chunks": 12, "average_chars": 1300},
+        "structural": {"chunks": 10, "average_chars": 1500},
+    })
+    client = FakeClient()
+
+    make_app(["/rules compare road building", "/exit"], client).run()
+
+    assert "Фиксированный размер: 12 чанков" in recording_console.text
+    assert "По разделам: 10 чанков" in recording_console.text
+    assert "catan.pdf:structural:2" in recording_console.text
+    assert client.calls == []
+
+
+def test_answer_prints_the_rules_sources_used_by_the_agent(
+    make_app, recording_console, monkeypatch
+):
+    result = rules_index.SearchResult(
+        "catan.pdf", "CATAN", "Building", "catan.pdf:structural:2",
+        "Build a road.", 0.8, "structural"
+    )
+    monkeypatch.setattr(rules_index, "search", lambda *_args, **_kwargs: [result])
+    client = FakeClient(answers=["Строительство дороги требует ресурсы."])
+
+    make_app(["Как строить дорогу в CATAN?", "/exit"], client).run()
+
+    assert "Источники правил:" in recording_console.text
+    assert "CATAN — Building (catan.pdf:structural:2)" in recording_console.text
+    assert any("Build a road." in message["content"] for message in client.calls[0]["messages"])
 
 
 # --- /models: панель выбора модели ----------------------------------------------------------

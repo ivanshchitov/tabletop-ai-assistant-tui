@@ -209,6 +209,16 @@ DEFAULT_MAX_SESSION_TOKENS = int(os.getenv("TABLETOP_MAX_SESSION_TOKENS", "20000
 DEFAULT_HISTORY_FILE = BASE_DIR / "history.json"
 HISTORY_FILE = Path(os.getenv("TABLETOP_HISTORY_FILE", str(DEFAULT_HISTORY_FILE)))
 
+# Корпус правил — проверяемые исходные документы, которые пользователь индексирует явно.
+DEFAULT_RULES_DOCUMENTS_DIR = BASE_DIR / "docs" / "rules"
+RULES_DOCUMENTS_DIR = Path(
+    os.getenv("TABLETOP_RULES_DOCUMENTS_DIR", str(DEFAULT_RULES_DOCUMENTS_DIR))
+)
+DEFAULT_RULES_INDEX_FILE = BASE_DIR / ".rules-index.sqlite3"
+RULES_INDEX_FILE = Path(
+    os.getenv("TABLETOP_RULES_INDEX_FILE", str(DEFAULT_RULES_INDEX_FILE))
+)
+
 # Планировщик заданий: отложенные и периодические вызовы инструментов собственного MCP-сервера.
 # Задания, журнал их прогонов и накопленные ими данные живут своим файлом — их пишет серверный
 # процесс, а приложение только читает. Путь выводится из расположения кода, как у прочих файлов
