@@ -109,6 +109,18 @@ def exports_dir(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def rules_documents_dir(tmp_path: Path) -> Path:
+    """Каталог документов правил на каждый прогон, чтобы не читать корпус пользователя."""
+    return tmp_path / "rules"
+
+
+@pytest.fixture
+def rules_index_file(tmp_path: Path) -> Path:
+    """Индекс правил на каждый прогон: e2e не читает и не меняет файл проекта."""
+    return tmp_path / "rules-index.sqlite3"
+
+
+@pytest.fixture
 def app(
     stub,
     history_file,
@@ -118,6 +130,8 @@ def app(
     tasks_dir,
     schedule_file,
     exports_dir,
+    rules_documents_dir,
+    rules_index_file,
     tui_display,
     request,
 ):
@@ -140,6 +154,8 @@ def app(
             task_file=task_file,
             tasks_dir=tasks_dir,
             schedule_file=schedule_file,
+            rules_documents_dir=rules_documents_dir,
+            rules_index_file=rules_index_file,
             exports_dir=exports_dir,
             **kwargs,
         )
@@ -156,7 +172,8 @@ def app(
 
 @pytest.fixture
 def live_app(
-    history_file, memory_file, profile_file, task_file, tasks_dir, schedule_file, tui_display, request
+    history_file, memory_file, profile_file, task_file, tasks_dir, schedule_file,
+    rules_documents_dir, rules_index_file, tui_display, request
 ):
     """Сессия против настоящего OpenCode Zen — без stub-сервера и с реальным ключом.
 
@@ -181,6 +198,8 @@ def live_app(
             task_file=task_file,
             tasks_dir=tasks_dir,
             schedule_file=schedule_file,
+            rules_documents_dir=rules_documents_dir,
+            rules_index_file=rules_index_file,
             api_url=None,
             **kwargs,
         )

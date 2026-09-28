@@ -19,7 +19,7 @@ from rich.panel import Panel
 from rich.rule import Rule
 from rich.text import Text
 
-from core import config, mcp_tools, memory_layers, user_profile
+from core import config, mcp_tools, memory_layers, rules_index, user_profile
 from core.answer_settings import AnswerFormat, AnswerSettings, ContextStrategy
 from core.api_client import (
     API_KEY_CHARSET_ERROR,
@@ -366,7 +366,73 @@ class TabletopAITUI:
         if command == "/schedule":
             self._print_schedule_report()
             return True
+        if command == "/rules":
+            self._handle_rules(user_input)
+            return True
         return False
+
+    def _handle_rules(self, user_input: str) -> None:
+        """Статус, явная индексация и сравнение локального корпуса правил."""
+        parts = user_input.split(maxsplit=2)
+        subcommand = parts[1] if len(parts) > 1 else ""
+        documents = rules_index.corpus_dir()
+        database = rules_index.index_path()
+        if subcommand == "index":
+            self.console.print("[bold cyan]Индексация документов правил...[/bold cyan]")
+            try:
+                report = rules_index.build_index(documents, database)
+            except rules_index.RulesIndexError as exc:
+                self.console.print("[bold red]Индекс не создан: {}[/bold red]".format(escape(str(exc))))
+                return
+            self.console.print(
+                "[bold green]Индекс готов:[/bold green] {} файла, {} страниц текста, "
+                "{} слов; чанки — фиксированные {}, структурные {}. Файл: {}".format(
+                    report.files,
+                    report.pages,
+                    report.words,
+                    report.chunks["fixed"],
+                    report.chunks["structural"],
+                    database,
+                )
+            )
+            return
+        if subcommand == "compare":
+            query = parts[2].strip() if len(parts) > 2 else ""
+            if not query:
+                self.console.print("Использование: /rules compare <вопрос по правилам>")
+                return
+            if not rules_index.index_exists(database):
+                self.console.print("Индекс ещё не создан. Сначала выполните /rules index.")
+                return
+            results = rules_index.compare(database, query, limit=2)
+            stats = rules_index.strategy_stats(database)
+            labels = {"fixed": "Фиксированный размер", "structural": "По разделам"}
+            for strategy in ("fixed", "structural"):
+                info = stats[strategy]
+                self.console.print(
+                    "[bold cyan]{}[/bold cyan]: {} чанков, средний размер {:.0f} знаков".format(
+                        labels[strategy], info["chunks"], info["average_chars"]
+                    )
+                )
+                for result in results[strategy]:
+                    self.console.print(
+                        "  [dim]{:.3f} | {} — {} ({})[/dim] {}".format(
+                            result.score,
+                            escape(result.title),
+                            escape(result.section),
+                            escape(result.chunk_id),
+                            escape(result.text[:240]),
+                        )
+                    )
+            return
+        if subcommand:
+            self.console.print("Подкоманды: /rules index | /rules compare <вопрос>")
+            return
+        state = "готов" if rules_index.index_exists(database) else "не создан"
+        documents_count = len(list(documents.glob("*.pdf"))) if documents.is_dir() else 0
+        self.console.print("[bold cyan]Индекс правил: {}[/bold cyan]".format(state))
+        self.console.print("Документы: {} PDF в {}".format(documents_count, documents))
+        self.console.print("Команды: /rules index | /rules compare <вопрос>")
 
     def _open_commands_screen(self) -> None:
         """Панель команд: ↑/↓ — выбор, Enter — выполнить выбранную команду, Esc — отмена.
@@ -597,6 +663,7 @@ class TabletopAITUI:
         answer = meta.content
         self.console.print("[bold magenta]Tabletop AI Assistant:[/bold magenta]")
         self._print_typing(answer)
+        self._print_rules_sources()
         # Отказ приложения — не ответ модели: судить его по формату модели нечестно.
         if (
             self.settings.format == AnswerFormat.JSON
@@ -619,6 +686,18 @@ class TabletopAITUI:
         self._print_usage_meta(meta)
         self._print_schedule_line()
         self.console.rule(style="dim")
+
+    def _print_rules_sources(self) -> None:
+        sources = self.agent.last_rules_sources
+        if not sources:
+            return
+        self.console.print("[bold cyan]Источники правил:[/bold cyan]")
+        for source in sources:
+            self.console.print(
+                "  {} — {} ({})".format(
+                    escape(source.title), escape(source.section), escape(source.chunk_id)
+                )
+            )
 
     def _print_usage_report(self) -> None:
         """Отчёт /usage: последний запрос, итоги сессии и расход сохранённой истории.
