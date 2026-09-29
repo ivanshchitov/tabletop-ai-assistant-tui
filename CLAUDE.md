@@ -18,7 +18,7 @@ echo "OPENCODE_API_KEY=sk-ваш_ключ" > .env   # or set OPENCODE_API_KEY di
 ./tabletop-ai-assistant.py                   # re-execs itself into .venv when one is next to it
 
 .venv/bin/pip install -r requirements-dev.txt
-pytest                      # everything except the `network` marker (1237 selected)
+pytest                      # everything except the `network` marker
 pytest tests/unit -q        # fast layer, no subprocesses (~3s)
 pytest tests/e2e -q         # real app in a pty against a stub API (~130s)
 pytest --snapshot-update    # rewrite the e2e screen snapshots after a deliberate layout change
@@ -38,6 +38,10 @@ the fixture warns you when the flag would do nothing.
 `pytest` is configured in `pyproject.toml`; there is no linter or formatter in this repo. The
 default `addopts` deselects `-m network`, so nothing ever calls the real OpenCode Zen unless
 asked.
+When the real `.rules-index.sqlite3` exists, isolate unit tests from it with
+`TABLETOP_RULES_INDEX_FILE=/private/tmp/tabletop-test-missing.sqlite3 pytest -q`; the e2e
+fixture overrides this path with its own temporary index. Otherwise unrelated agent tests see
+an extra rules context message and fail.
 
 **Testing the terminal is the hard part**, and both halves of the solution are load-bearing:
 - Anything touching `ui/keyboard.py` needs a real TTY — piping input via plain `subprocess`
@@ -175,6 +179,13 @@ parents up (`Path(__file__).resolve().parent.parent`) rather than one — it has
 `profile.json`, `schedule.json` and `exports/` actually live. `tabletop-scheduler.py` is the second root
 entry point (the schedule's background runner, see the scheduler block) and repeats the same
 `os.execv` trick for the same reason.
+
+The local rules index is built only by `/rules index`. `TabletopAgent.rag_enabled` defaults to
+`True` for each session; `/rules mode off|on` toggles retrieval for subsequent answers without
+changing the index or saved history. When disabled, `ask()` skips `rules_index.search` and clears
+`last_rules_sources`, so the UI cannot attribute an answer to stale sources. The 10-question
+reference set is `docs/rag-control-questions.md`; its answer comparison belongs to the recorded
+demo, not to a new agent command.
 
 **Environment switches (`core/config.py`):** `OPENCODE_API_URL`, `TABLETOP_HISTORY_FILE`,
 `TABLETOP_MEMORY_FILE`, `TABLETOP_PROFILE_FILE`, `TABLETOP_TASK_FILE`, `TABLETOP_TASKS_DIR`,

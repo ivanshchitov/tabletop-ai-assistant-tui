@@ -34,17 +34,31 @@ def test_rules_index_and_retrieval_work_only_after_explicit_indexing(
     assert stub.call_count == 0
 
     stub.always(answer("Ответ на основе правил CATAN."))
+    session.send_line("/rules mode off")
+    session.wait_on_screen("Режим RAG: выключен")
+    session.send_line("Сколько ресурсов стоит дорога в CATAN?")
+    session.wait_on_screen("Ответ на основе правил CATAN.")
+    assert "Источники правил:" not in session.read_for(0.1)
+    without_rag = "\n".join(
+        message["content"] for message in stub.requests[0]["payload"]["messages"]
+    )
+    assert "To build" not in without_rag
+
+    session.send_line("/clear")
+    session.wait_on_screen("История диалога очищена")
+    session.send_line("/rules mode on")
+    session.wait_on_screen("Режим RAG: включён")
     session.send_line("Сколько ресурсов стоит дорога в CATAN?")
     session.wait_on_screen("Ответ на основе правил CATAN.")
     session.wait_on_screen("Источники правил:")
     session.wait_on_screen("Catan Rulebook")
     session.wait_on_screen("catan-rules.pdf:structural:")
     request_content = "\n".join(
-        message["content"] for message in stub.requests[0]["payload"]["messages"]
+        message["content"] for message in stub.requests[1]["payload"]["messages"]
     )
     assert "To build" in request_content
 
     session.send_line("/exit")
     session.wait_exit()
 
-    assert stub.call_count == 1
+    assert stub.call_count == 2
