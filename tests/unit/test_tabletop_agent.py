@@ -141,6 +141,38 @@ def test_rules_index_context_is_added_to_answer_and_sources_are_exposed(monkeypa
     assert agent.last_rules_sources == (source,)
 
 
+def test_rules_mode_off_skips_search_and_clears_sources_before_next_answer(monkeypatch):
+    source = rules_index.SearchResult(
+        "catan.pdf", "CATAN", "Building", "catan.pdf:structural:2",
+        "A road costs one brick and one lumber.", 0.8, "structural"
+    )
+    searches = []
+
+    def search(*args):
+        searches.append(args)
+        return [source]
+
+    monkeypatch.setattr(rules_index, "search", search)
+    agent, client = make_agent()
+
+    agent.ask("Сколько стоит дорога в CATAN?")
+    assert agent.last_rules_sources == (source,)
+    agent.rag_enabled = False
+    agent.ask("Сколько стоит дорога в CATAN?")
+
+    assert len(searches) == 1
+    assert agent.last_rules_sources == ()
+    assert not any(
+        "A road costs one brick" in message["content"]
+        for message in client.calls[1]["messages"]
+    )
+
+    agent.rag_enabled = True
+    agent.ask("Сколько стоит дорога в CATAN?")
+    assert len(searches) == 2
+    assert agent.last_rules_sources == (source,)
+
+
 def test_second_ask_carries_previous_exchange():
     agent, client = make_agent()
     agent.ask("Первый вопрос")

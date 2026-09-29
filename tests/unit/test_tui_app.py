@@ -684,6 +684,19 @@ def test_rules_status_and_index_commands_do_not_call_model(make_app, recording_c
     assert client.calls == []
 
 
+def test_rules_mode_reports_changes_and_rejects_invalid_value(make_app, recording_console):
+    client = FakeClient()
+
+    make_app(["/rules", "/rules mode off", "/rules", "/rules mode invalid", "/rules", "/rules mode on", "/exit"], client).run()
+
+    output = recording_console.text
+    assert "Режим RAG: включён" in output
+    assert "Режим RAG: выключен" in output
+    assert "Использование: /rules mode on|off" in output
+    assert output.count("Режим RAG: выключен") >= 2
+    assert client.calls == []
+
+
 def test_rules_compare_shows_both_strategies_without_model_call(
     make_app, recording_console, monkeypatch, tmp_path
 ):

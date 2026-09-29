@@ -377,6 +377,15 @@ class TabletopAITUI:
         subcommand = parts[1] if len(parts) > 1 else ""
         documents = rules_index.corpus_dir()
         database = rules_index.index_path()
+        if subcommand == "mode":
+            if len(parts) != 3 or parts[2] not in ("on", "off"):
+                self.console.print("Использование: /rules mode on|off")
+                return
+            self.agent.rag_enabled = parts[2] == "on"
+            self.console.print(
+                "Режим RAG: {}".format("включён" if self.agent.rag_enabled else "выключен")
+            )
+            return
         if subcommand == "index":
             self.console.print("[bold cyan]Индексация документов правил...[/bold cyan]")
             try:
@@ -426,13 +435,14 @@ class TabletopAITUI:
                     )
             return
         if subcommand:
-            self.console.print("Подкоманды: /rules index | /rules compare <вопрос>")
+            self.console.print("Подкоманды: /rules index | /rules compare <вопрос> | /rules mode on|off")
             return
         state = "готов" if rules_index.index_exists(database) else "не создан"
         documents_count = len(list(documents.glob("*.pdf"))) if documents.is_dir() else 0
         self.console.print("[bold cyan]Индекс правил: {}[/bold cyan]".format(state))
+        self.console.print("Режим RAG: {}".format("включён" if self.agent.rag_enabled else "выключен"))
         self.console.print("Документы: {} PDF в {}".format(documents_count, documents))
-        self.console.print("Команды: /rules index | /rules compare <вопрос>")
+        self.console.print("Команды: /rules index | /rules compare <вопрос> | /rules mode on|off")
 
     def _open_commands_screen(self) -> None:
         """Панель команд: ↑/↓ — выбор, Enter — выполнить выбранную команду, Esc — отмена.

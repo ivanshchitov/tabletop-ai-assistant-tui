@@ -370,6 +370,7 @@ class TabletopAgent:
         self._last_tool_flow: Optional[ToolFlowReport] = None
         self._last_rules_sources: Tuple[rules_index.SearchResult, ...] = ()
         self._rules_context: Optional[str] = None
+        self.rag_enabled = True
         # Решение маршрута последней реплики — для журнальной строки интерфейса.
         self._last_routing: Tuple[memory_layers.MemoryRecord, ...] = ()
         # Лог ходов сессии: пары user/assistant успешных обменов, append-only. system в логе
@@ -521,7 +522,10 @@ class TabletopAgent:
         self._last_tool_chain = (
             self._choose_and_call_tools(question, on_phase) if self.config.auto_tools else ()
         )
-        self._last_rules_sources = tuple(rules_index.search(rules_index.index_path(), question))
+        self._last_rules_sources = (
+            tuple(rules_index.search(rules_index.index_path(), question))
+            if self.rag_enabled else ()
+        )
         self._rules_context = rules_index.context_message(self._last_rules_sources)
         skip = self._prepare_context(question, user_prompt, on_phase)
         self._signal(on_phase, RequestPhase.REQUEST)
