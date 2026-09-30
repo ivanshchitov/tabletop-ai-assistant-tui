@@ -3,6 +3,7 @@
 import os
 import sys
 import time
+from dataclasses import replace
 from typing import List, Optional
 
 try:
@@ -19,7 +20,7 @@ from rich.panel import Panel
 from rich.rule import Rule
 from rich.text import Text
 
-from core import config, mcp_tools, memory_layers, rules_index, user_profile
+from core import config, mcp_tools, memory_layers, rules_index, rules_retrieval, user_profile
 from core.answer_settings import AnswerFormat, AnswerSettings, ContextStrategy
 from core.api_client import (
     API_KEY_CHARSET_ERROR,
@@ -372,7 +373,7 @@ class TabletopAITUI:
         return False
 
     def _handle_rules(self, user_input: str) -> None:
-        """Статус, явная индексация и сравнение локального корпуса правил."""
+        """Индекс, режим и настройки поиска, снимок последнего отбора."""
         parts = user_input.split(maxsplit=2)
         subcommand = parts[1] if len(parts) > 1 else ""
         documents = rules_index.corpus_dir()
@@ -385,6 +386,30 @@ class TabletopAITUI:
             self.console.print(
                 "Режим RAG: {}".format("включён" if self.agent.rag_enabled else "выключен")
             )
+            return
+        if subcommand == "retrieval":
+            mode = parts[2] if len(parts) == 3 else ""
+            try:
+                self.agent.config.retrieval = replace(self.agent.config.retrieval, mode=mode)
+            except rules_retrieval.RetrievalError:
+                self.console.print("Использование: /rules retrieval baseline|enhanced")
+                return
+            self._print_rules_settings(self.agent.config.retrieval)
+            return
+        if subcommand == "tune":
+            values = parts[2] if len(parts) == 3 else ""
+            try:
+                updated = rules_retrieval.parse_tuning(self.agent.config.retrieval, values)
+            except rules_retrieval.RetrievalError as exc:
+                self.console.print(
+                    "[bold yellow]Настройки поиска не изменены: {}[/bold yellow]".format(escape(str(exc)))
+                )
+                return
+            self.agent.config.retrieval = updated
+            self._print_rules_settings(updated)
+            return
+        if subcommand == "trace":
+            self._print_rules_trace()
             return
         if subcommand == "index":
             self.console.print("[bold cyan]Индексация документов правил...[/bold cyan]")
@@ -435,14 +460,82 @@ class TabletopAITUI:
                     )
             return
         if subcommand:
-            self.console.print("Подкоманды: /rules index | /rules compare <вопрос> | /rules mode on|off")
+            self._print_rules_usage()
             return
         state = "готов" if rules_index.index_exists(database) else "не создан"
         documents_count = len(list(documents.glob("*.pdf"))) if documents.is_dir() else 0
         self.console.print("[bold cyan]Индекс правил: {}[/bold cyan]".format(state))
         self.console.print("Режим RAG: {}".format("включён" if self.agent.rag_enabled else "выключен"))
         self.console.print("Документы: {} PDF в {}".format(documents_count, documents))
-        self.console.print("Команды: /rules index | /rules compare <вопрос> | /rules mode on|off")
+        self._print_rules_settings(self.agent.config.retrieval)
+        self._print_rules_usage()
+
+    def _print_rules_usage(self) -> None:
+        self.console.print(
+            "Команды: /rules index | /rules compare <вопрос> | /rules mode on|off | "
+            "/rules retrieval baseline|enhanced | "
+            "/rules tune before=<K> after=<K> threshold=<T> | /rules trace"
+        )
+
+    def _print_rules_settings(self, settings: rules_retrieval.RetrievalSettings) -> None:
+        self.console.print("Режим поиска: {}".format(settings.mode.value))
+        self.console.print(
+            "Кандидаты: {}; итоговый top-K: {}; порог: {:g}{}".format(
+                settings.before, settings.after, settings.threshold,
+                " (в baseline не применяется)" if settings.mode is rules_retrieval.RetrievalMode.BASELINE else "",
+            )
+        )
+
+    def _print_rules_trace(self) -> None:
+        report = self.agent.rules_report()
+        if report is None:
+            self.console.print("[dim]Поиска правил ещё не было.[/dim]")
+            return
+        self.console.print("[bold cyan]Последний поиск правил[/bold cyan]")
+        self._print_rules_settings(report.settings)
+        self.console.print("Вопрос: {}".format(escape(report.question)))
+        self.console.print("Поисковый запрос: {}".format(escape(report.query) or "—"))
+        states = {
+            "disabled": "RAG выключен",
+            "no_index": "индекс не создан",
+            "no_candidates": "кандидатов нет",
+            "rewrite_failed": "переписывание не удалось",
+            "rerank_failed": "оценка не удалась",
+            "no_matches": "все кандидаты ниже порога",
+            "ok": "поиск выполнен",
+        }
+        self.console.print("Состояние: {}".format(states[report.status]))
+        if report.error:
+            self.console.print("[yellow]{}[/yellow]".format(escape(report.error)))
+        dispositions = {
+            "selected": "выбран",
+            "below_threshold": "ниже порога",
+            "top_k": "за top-K",
+            "not_evaluated": "не оценён",
+        }
+        for number, decision in enumerate(report.selection.decisions, 1):
+            result = decision.result
+            relevance = decision.relevance
+            self.console.print(
+                "  {}. {} — {} ({}) | cosine={:.3f} | релевантность={} | {}".format(
+                    number, escape(result.source), escape(result.section), escape(result.chunk_id),
+                    result.score, "{:.3f}".format(relevance.score) if relevance else "—",
+                    dispositions[decision.disposition],
+                )
+            )
+            if relevance:
+                self.console.print("     {}".format(escape(relevance.reason)))
+        self.console.print(
+            "[bold]Итог: фрагментов — {}; кандидатов — {}[/bold]".format(
+                len(report.selection.results), len(report.selection.decisions)
+            )
+        )
+        for result in report.selection.results:
+            self.console.print("  {} — {} ({})".format(
+                escape(result.title), escape(result.section), escape(result.chunk_id)
+            ))
+        if not report.selection.results:
+            self.console.print("[dim]Ответ без источников RAG.[/dim]")
 
     def _open_commands_screen(self) -> None:
         """Панель команд: ↑/↓ — выбор, Enter — выполнить выбранную команду, Esc — отмена.
@@ -645,6 +738,10 @@ class TabletopAITUI:
                     status.update("● Суммаризация...")
                 elif phase is RequestPhase.FACTS_UPDATE:
                     status.update("● Обновление фактов...")
+                elif phase is RequestPhase.RULES_REWRITE:
+                    status.update("● Переписывание запроса правил...")
+                elif phase is RequestPhase.RULES_RERANK:
+                    status.update("● Оценка фрагментов правил...")
                 elif phase is RequestPhase.TOOL_CHOICE:
                     status.update("● Выбор инструмента...")
                 elif phase is RequestPhase.MCP_TOOL:
@@ -698,6 +795,13 @@ class TabletopAITUI:
         self.console.rule(style="dim")
 
     def _print_rules_sources(self) -> None:
+        report = self.agent.rules_report()
+        if report is not None and report.error:
+            self.console.print(
+                "[bold yellow]Поиск правил не удался: {}; ответ без источников RAG.[/bold yellow]".format(
+                    escape(report.error)
+                )
+            )
         sources = self.agent.last_rules_sources
         if not sources:
             return

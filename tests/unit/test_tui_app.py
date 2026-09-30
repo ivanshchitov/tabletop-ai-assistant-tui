@@ -667,78 +667,76 @@ def test_status_bar_hint_lists_only_exit_and_commands(make_app, recording_consol
     assert "/context" not in output.split("Команды: ")[-1]
 
 
-def test_rules_status_and_index_commands_do_not_call_model(make_app, recording_console, monkeypatch, tmp_path):
-    documents = tmp_path / "rules"
-    documents.mkdir()
-    (documents / "one.pdf").write_bytes(b"fixture")
-    monkeypatch.setattr(config, "RULES_DOCUMENTS_DIR", documents)
-    monkeypatch.setattr(config, "RULES_INDEX_FILE", tmp_path / "index.sqlite3")
-    report = rules_index.IndexReport(1, 423, {"fixed": 10, "structural": 12}, 120000)
-    monkeypatch.setattr(rules_index, "build_index", lambda *_args: report)
+def test_invalid_rules_mode_preserves_disabled_retrieval(make_app):
     client = FakeClient()
-
-    make_app(["/rules", "/rules index", "/exit"], client).run()
-
-    assert "Индекс правил: не создан" in recording_console.text
-    assert "Индекс готов: 1 файла, 423 страниц текста" in recording_console.text
-    assert client.calls == []
-
-
-def test_rules_mode_reports_changes_and_rejects_invalid_value(make_app, recording_console):
-    client = FakeClient()
-
-    make_app(["/rules", "/rules mode off", "/rules", "/rules mode invalid", "/rules", "/rules mode on", "/exit"], client).run()
-
-    output = recording_console.text
-    assert "Режим RAG: включён" in output
-    assert "Режим RAG: выключен" in output
-    assert "Использование: /rules mode on|off" in output
-    assert output.count("Режим RAG: выключен") >= 2
-    assert client.calls == []
-
-
-def test_rules_compare_shows_both_strategies_without_model_call(
-    make_app, recording_console, monkeypatch, tmp_path
-):
-    result = rules_index.SearchResult(
-        "catan.pdf", "CATAN", "Building", "catan.pdf:structural:2",
-        "Build a road.", 0.8, "structural"
-    )
-    monkeypatch.setattr(rules_index, "index_exists", lambda _path: True)
-    monkeypatch.setattr(rules_index, "compare", lambda *_args, **_kwargs: {"fixed": [result], "structural": [result]})
-    monkeypatch.setattr(rules_index, "strategy_stats", lambda _path: {
-        "fixed": {"chunks": 12, "average_chars": 1300},
-        "structural": {"chunks": 10, "average_chars": 1500},
-    })
-    client = FakeClient()
-
-    make_app(["/rules compare road building", "/exit"], client).run()
-
-    assert "Фиксированный размер: 12 чанков" in recording_console.text
-    assert "По разделам: 10 чанков" in recording_console.text
-    assert "catan.pdf:structural:2" in recording_console.text
-    assert client.calls == []
-
-
-def test_answer_prints_the_rules_sources_used_by_the_agent(
-    make_app, recording_console, monkeypatch
-):
-    result = rules_index.SearchResult(
-        "catan.pdf", "CATAN", "Building", "catan.pdf:structural:2",
-        "Build a road.", 0.8, "structural"
-    )
-    monkeypatch.setattr(rules_index, "search", lambda *_args, **_kwargs: [result])
-    monkeypatch.setattr(rules_index, "index_exists", lambda _path: True)
-    client = FakeClient(answers=["Строительство дороги требует ресурсы."])
-
-    # Проверяем печать источников; одношаговый путь теперь явно называется baseline.
-    app = make_app(["Как строить дорогу в CATAN?", "/exit"], client)
-    app.agent.config.retrieval = rules_retrieval.RetrievalSettings(mode="baseline")
+    app = make_app(["/rules mode off", "/rules mode invalid", "/exit"], client)
     app.run()
 
-    assert "Источники правил:" in recording_console.text
-    assert "CATAN — Building (catan.pdf:structural:2)" in recording_console.text
-    assert any("Build a road." in message["content"] for message in client.calls[0]["messages"])
+    assert app.agent.rag_enabled is False
+    assert client.calls == []
+
+
+def test_rules_retrieval_commands_change_only_session_settings(make_app, history):
+    client = FakeClient()
+    app = make_app([
+        "/rules retrieval baseline",
+        "/rules tune before=4 after=2 threshold=0.75",
+        "/rules retrieval enhanced",
+        "/clear",
+        "/exit",
+    ], client)
+    app.run()
+
+    assert app.agent.config.retrieval == rules_retrieval.RetrievalSettings(
+        mode="enhanced", before=4, after=2, threshold=0.75
+    )
+    assert app.agent.rag_enabled is True
+    assert app.agent.session_usage.requests == 0
+    assert client.calls == []
+    assert history.dialogues == []
+
+
+@pytest.mark.parametrize("command", [
+    "/rules tune before=4 threshold=nan",
+    "/rules retrieval invalid",
+])
+def test_invalid_rules_commands_preserve_every_setting(make_app, history, command):
+    client = FakeClient()
+    app = make_app([command, "/exit"], client)
+    previous = rules_retrieval.RetrievalSettings(
+        mode="baseline", before=8, after=3, threshold=0.4
+    )
+    app.agent.config.retrieval = previous
+    app.run()
+
+    assert app.agent.config.retrieval is previous
+    assert client.calls == []
+    assert history.dialogues == []
+
+
+def test_failed_rules_rerank_is_visible_and_cannot_attribute_raw_sources(
+    make_app, recording_console, monkeypatch, history
+):
+    result = rules_index.SearchResult(
+        "catan.pdf", "CATAN", "Road", "catan:structural:1",
+        "A road requires brick and lumber.", 0.8, "structural",
+    )
+    monkeypatch.setattr(rules_index, "index_exists", lambda _path: True)
+    monkeypatch.setattr(rules_index, "search", lambda *_args, **_kwargs: [result])
+    client = FakeClient(answers=[
+        '{"query": "CATAN road"}',
+        "not JSON [/dim]",
+        "Нужны кирпич и дерево.",
+    ])
+    app = make_app(["Сколько стоит дорога?", "/rules trace", "/exit"], client)
+    app.run()
+
+    assert "без источников RAG" in recording_console.text
+    assert "не содержит JSON" in recording_console.text
+    assert "Источники правил:" not in recording_console.text
+    assert app.agent.last_rules_sources == ()
+    assert history.dialogues[0]["answer"] == "Нужны кирпич и дерево."
+    assert len(history.dialogues) == 1
 
 
 # --- /models: панель выбора модели ----------------------------------------------------------

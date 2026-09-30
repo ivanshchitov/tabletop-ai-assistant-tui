@@ -1,6 +1,7 @@
 """Интеграция локального корпуса правил с запуском TUI."""
 
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -82,3 +83,79 @@ def test_rules_index_and_retrieval_work_only_after_explicit_indexing(
     session.wait_exit()
 
     assert stub.call_count == 4  # один ответ без RAG, затем rewrite + rerank + ответ
+
+
+def test_rules_controls_trace_and_reranking_use_actual_terminal_and_http(
+    app, stub, rules_documents_dir, rules_index_file, history_file
+):
+    rules_documents_dir.mkdir(parents=True)
+    source = Path(__file__).resolve().parents[2] / "docs" / "rules" / "catan-rules.pdf"
+    shutil.copyfile(source, rules_documents_dir / source.name)
+    rules_index.build_index(rules_documents_dir, rules_index_file)
+    session = app(rows=50)
+    session.wait_for_prompt()
+    session.send_line("/rules trace")
+    session.wait_on_screen("Поиска правил ещё не было")
+    session.send_line("/rules retrieval baseline")
+    session.wait_on_screen("Режим поиска: baseline")
+    session.send_line("/rules tune before=4 after=1 threshold=0.6")
+    session.wait_on_screen("Кандидаты: 4; итоговый top-K: 1; порог: 0.6")
+    assert stub.call_count == 0
+
+    stub.sequence(answer("Базовый ответ: кирпич и дерево."))
+    question = "Сколько ресурсов стоит дорога в CATAN?"
+    session.send_line(question)
+    session.wait_on_screen("Базовый ответ: кирпич и дерево.")
+    session.send_line("/rules trace")
+    session.wait_on_screen("Итог: фрагментов — 1; кандидатов — 4")
+    assert stub.call_count == 1
+    session.send_line("/clear")
+    session.wait_on_screen("История диалога очищена")
+    session.send_line("/rules retrieval enhanced")
+    session.wait_on_screen("Режим поиска: enhanced")
+
+    query = "CATAN road resources [/dim]"
+    candidates = rules_index.search(rules_index_file, query, limit=4, minimum_score=-1.0)
+    stub.sequence(
+        answer(json.dumps({"query": query})),
+        answer(json.dumps({"results": [
+            {"id": 1, "score": 0.1, "reason": "Wrong topic [/dim]"},
+            {"id": 2, "score": 0.9, "reason": "Road cost"},
+            {"id": 3, "score": 0.8, "reason": "Related cost"},
+            {"id": 4, "score": 0.6, "reason": "Related building"},
+        ]})),
+        answer("Улучшенный ответ: кирпич и дерево."),
+    )
+    session.send_line(question)
+    session.wait_on_screen("Улучшенный ответ: кирпич и дерево.")
+    session.send_line("/rules trace")
+    session.wait_on_screen("Wrong topic [/dim]")
+    session.wait_on_screen("ниже порога")
+    session.wait_on_screen("за top-K")
+    session.wait_on_screen("CATAN road resources [/dim]")
+    session.wait_on_screen("Итог: фрагментов — 1; кандидатов — 4")
+    context = "\n".join(
+        message["content"] for message in stub.requests[3]["payload"]["messages"]
+    )
+    assert re.search(re.escape(candidates[1].chunk_id) + r"(?!\d)", context)
+    assert not re.search(re.escape(candidates[0].chunk_id) + r"(?!\d)", context)
+    assert not re.search(re.escape(candidates[2].chunk_id) + r"(?!\d)", context)
+    assert question in context
+    assert query not in context
+
+    session.send_line("/rules tune before=2 after=3")
+    session.wait_on_screen("Настройки поиска не изменены")
+    session.send_line("/rules tune before=6 after=2 threshold=0.95")
+    session.wait_on_screen("Кандидаты: 6; итоговый top-K: 2; порог: 0.95")
+    session.send_line("/rules trace")
+    session.wait_on_screen("Кандидаты: 4; итоговый top-K: 1; порог: 0.6")
+    session.send_line("/rules")
+    session.wait_on_screen("Кандидаты: 6; итоговый top-K: 2; порог: 0.95")
+    session.send_line("/exit")
+    session.wait_exit()
+
+    assert stub.call_count == 4
+    records = json.loads(history_file.read_text())["dialogues"]
+    assert [(row["question"], row["answer"]) for row in records] == [
+        (question, "Улучшенный ответ: кирпич и дерево.")
+    ]
