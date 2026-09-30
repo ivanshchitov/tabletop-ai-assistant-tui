@@ -180,12 +180,36 @@ parents up (`Path(__file__).resolve().parent.parent`) rather than one — it has
 entry point (the schedule's background runner, see the scheduler block) and repeats the same
 `os.execv` trick for the same reason.
 
-The local rules index is built only by `/rules index`. `TabletopAgent.rag_enabled` defaults to
-`True` for each session; `/rules mode off|on` toggles retrieval for subsequent answers without
-changing the index or saved history. When disabled, `ask()` skips `rules_index.search` and clears
-`last_rules_sources`, so the UI cannot attribute an answer to stale sources. The 10-question
-reference set is `docs/rag-control-questions.md`; its answer comparison belongs to the recorded
-demo, not to a new agent command.
+**Local rules retrieval (`core/rules_index.py`, `core/rules_retrieval.py`, `/rules`):** the index
+is built only by `/rules index`; startup never rebuilds it. `TabletopAgent.rag_enabled` defaults
+to `True`; `/rules mode off|on` disables/enables the whole retrieval path without changing the
+index or history. Off and missing-index paths make no auxiliary model requests. Every question
+clears stale `last_rules_sources` and replaces the retrieval report before doing any work.
+- Session-only `AgentConfig.retrieval` holds immutable `RetrievalSettings`: mode `enhanced`,
+  `before=20` (1..30), `after=3` (1..10 and no greater than before), finite `threshold=0.6` (0..1).
+  `/rules retrieval baseline|enhanced` changes the mode; `/rules tune` applies partial parameters
+  atomically. An invalid field preserves the whole previous settings object.
+- `baseline` searches the original question, keeps the first `after` results and never uses the
+  relevance threshold or an auxiliary request. `enhanced` rewrites the query into English,
+  searches up to `before` candidates and asks the selected session model to rate every candidate.
+  Both paths deliberately disable the index's cosine cutoff: the second-stage threshold is a
+  model relevance score, not cosine similarity. Stable descending score order, score >= threshold,
+  then final top-K; source text and identifiers are never rewritten.
+- `assets/rules_query_prompt.md` and `assets/rules_rerank_prompt.md` treat questions/chunks as data
+  and require JSON parsed client-side. Empty rewrite, incomplete/duplicate/unknown candidate IDs,
+  non-finite or out-of-range scores, invalid JSON and API errors stop retrieval with a visible
+  diagnostic: answer without RAG, never fall back to raw candidates. Successful auxiliary requests
+  still enter the ledger when their content fails validation; existing invariant retries remain
+  separate answer requests. Original question and final answer alone enter dialogue history.
+- `agent.rules_report()` is the frozen `RetrievalReport` consumed by `/rules trace`: original and
+  search queries, settings used, cosine/relevance scores, reasons, selected/discarded candidates,
+  final sources and failure status. Tuning and `/clear` preserve the completed snapshot; the next
+  question replaces it. The terminal must not read agent internals or make model calls for reports.
+  All external query, reason, source and error text is escaped before Rich rendering.
+- Day 22's RAG on/off set remains `docs/rag-control-questions.md`. Day 23's baseline/enhanced
+  protocol is `docs/rag-reranking-questions.md`: same model/settings, `/clear` before every question,
+  CATAN/Ticket to Ride plus absent-from-corpus Azul. Read actual passed text to evaluate relevance,
+  context support and factual correctness independently; model scores are not quality proof.
 
 **Environment switches (`core/config.py`):** `OPENCODE_API_URL`, `TABLETOP_HISTORY_FILE`,
 `TABLETOP_MEMORY_FILE`, `TABLETOP_PROFILE_FILE`, `TABLETOP_TASK_FILE`, `TABLETOP_TASKS_DIR`,
@@ -1101,6 +1125,14 @@ saved: `dialogues` stays a flat list across branches.
   replacing `sys.stdin` (it reads lines, not `input()`), and in e2e by sending a line only after the
   app's own question is on screen — the echoed answer appears before the next question is ready, so
   waiting on the echo loses an answer.
+- `tests/unit/test_rules_retrieval.py` covers strict rewrite/rating JSON, atomic settings,
+  score boundaries, threshold selection and stable top-K. Rules cases in `test_tabletop_agent.py`
+  cover both modes, auxiliary ledger spend, failures without raw fallback, unchanged source text,
+  stale-source clearing and report lifetime; command/error cases are in `test_tui_app.py`.
+- `tests/e2e/test_rules_index.py` runs the real app in a PTY with a temporary PDF index and HTTP
+  stub. It checks RAG off/on, actual baseline/enhanced request contexts, candidate exclusion,
+  threshold/top-K dispositions, atomic invalid tuning, immutable trace after tuning, literal Rich
+  markup in external data, and original-question/final-answer-only history.
 - `tests/unit/test_keyboard.py` — the only unit file that needs a pty (see above).
 - `tests/unit/test_mcp_client.py` and `tests/fake_mcp_server.py` — the MCP client against a local
   stdio server run by the test interpreter: handshake, tool list with input schemas, an empty list
