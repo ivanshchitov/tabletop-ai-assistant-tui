@@ -8,7 +8,7 @@
 снимок состояния контекста: агент ничего не печатает, ошибки API отдаёт исключением.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -22,6 +22,7 @@ from . import (
     memory_layers,
     prompts,
     rules_index,
+    rules_retrieval,
     task_pipeline,
     task_state,
 )
@@ -59,6 +60,8 @@ class RequestPhase(Enum):
     # второе — чужой процесс; ждать приходится и там, и там, подписи разные.
     TOOL_CHOICE = "tool_choice"
     MCP_TOOL = "mcp_tool"
+    RULES_REWRITE = "rules_rewrite"
+    RULES_RERANK = "rules_rerank"
 
 
 @dataclass
@@ -289,6 +292,7 @@ class AgentConfig:
     # не сохраняется, выключается командой `/tool auto off`. Значение по умолчанию берётся из
     # конфигурации, поэтому его можно снять на весь запуск переменной окружения.
     auto_tools: bool = field(default_factory=lambda: config.AUTO_TOOLS)
+    retrieval: rules_retrieval.RetrievalSettings = field(default_factory=rules_retrieval.RetrievalSettings)
 
     # Плоский доступ на чтение к параметрам настроек ответа.
     @property
@@ -371,6 +375,7 @@ class TabletopAgent:
         self._last_rules_sources: Tuple[rules_index.SearchResult, ...] = ()
         self._rules_context: Optional[str] = None
         self.rag_enabled = True
+        self._last_rules_report: Optional[rules_retrieval.RetrievalReport] = None
         # Решение маршрута последней реплики — для журнальной строки интерфейса.
         self._last_routing: Tuple[memory_layers.MemoryRecord, ...] = ()
         # Лог ходов сессии: пары user/assistant успешных обменов, append-only. system в логе
@@ -453,6 +458,10 @@ class TabletopAgent:
         """Фрагменты документов правил, использованные в последнем ответе."""
         return self._last_rules_sources
 
+    def rules_report(self) -> Optional[rules_retrieval.RetrievalReport]:
+        """Снимок последнего поиска, без повторного поиска или обращения к модели."""
+        return self._last_rules_report
+
     @property
     def auto_tools(self) -> bool:
         """Включён ли автоматический выбор инструмента перед вопросом (в пределах сессии)."""
@@ -513,6 +522,9 @@ class TabletopAgent:
         старейшие ходы в резюме, извлекатель обновляет блок фактов. Сбой вспомогательного
         запроса стратегии фактов вопрос не отменяет — он уходит с прежним блоком.
         """
+        self._last_rules_sources = ()
+        self._rules_context = None
+        self._last_rules_report = None
         user_prompt = prompts.build_user_prompt(question, self.config.settings)
         # Маршрут слоёв считается до сборки запроса: запись, сделанная текущей репликой, должна
         # быть видна модели уже в этом запросе. Запросов к модели маршрут не делает.
@@ -522,10 +534,8 @@ class TabletopAgent:
         self._last_tool_chain = (
             self._choose_and_call_tools(question, on_phase) if self.config.auto_tools else ()
         )
-        self._last_rules_sources = (
-            tuple(rules_index.search(rules_index.index_path(), question))
-            if self.rag_enabled else ()
-        )
+        self._last_rules_report = self._retrieve_rules(question, on_phase)
+        self._last_rules_sources = self._last_rules_report.selection.results
         self._rules_context = rules_index.context_message(self._last_rules_sources)
         skip = self._prepare_context(question, user_prompt, on_phase)
         self._signal(on_phase, RequestPhase.REQUEST)
@@ -550,6 +560,86 @@ class TabletopAgent:
         self._last_result = meta
         self._ledger.record(meta)
         return meta
+
+    def _ask_rules(
+        self,
+        messages: List[Dict[str, str]],
+        max_words: int,
+        phase: RequestPhase,
+        on_phase: Optional[Callable[[RequestPhase], None]],
+    ) -> AnswerMeta:
+        self._signal(on_phase, phase)
+        meta = self.client.ask_with_usage_messages(
+            messages,
+            max_tokens=config.max_tokens_for_words(max_words),
+            temperature=None,
+            model=self.config.model,
+        )
+        self._last_result = meta
+        self._ledger.record(meta)
+        return meta
+
+    def _retrieve_rules(
+        self,
+        question: str,
+        on_phase: Optional[Callable[[RequestPhase], None]],
+    ) -> rules_retrieval.RetrievalReport:
+        settings = self.config.retrieval
+        report = rules_retrieval.RetrievalReport(question, "", settings, "disabled")
+        if not self.rag_enabled:
+            return report
+        database = rules_index.index_path()
+        if not rules_index.index_exists(database):
+            return replace(report, status="no_index")
+        if settings.mode is rules_retrieval.RetrievalMode.ENHANCED:
+            try:
+                meta = self._ask_rules(
+                    rules_retrieval.build_query_messages(question),
+                    config.RULES_QUERY_MAX_WORDS,
+                    RequestPhase.RULES_REWRITE,
+                    on_phase,
+                )
+                # Даже непригодный JSON имеет реально потраченные токены.
+                report = replace(report, rewrite_meta=meta)
+                report = replace(report, query=rules_retrieval.parse_query(meta.content))
+            except (APIError, rules_retrieval.RetrievalError) as exc:
+                return replace(report, status="rewrite_failed", error=str(exc))
+        else:
+            report = replace(report, query=question)
+        candidates = tuple(rules_index.search(
+            database, report.query, limit=settings.before, minimum_score=-1.0
+        ))
+        if not candidates:
+            return replace(report, status="no_candidates")
+        if settings.mode is rules_retrieval.RetrievalMode.BASELINE:
+            selection = rules_retrieval.Selection(
+                tuple(
+                    rules_retrieval.CandidateDecision(
+                        result, None, "selected" if index < settings.after else "top_k"
+                    )
+                    for index, result in enumerate(candidates)
+                ),
+                candidates[:settings.after],
+            )
+            return replace(report, status="ok", selection=selection)
+        report = replace(report, selection=rules_retrieval.Selection(
+            tuple(rules_retrieval.CandidateDecision(result, None, "not_evaluated") for result in candidates)
+        ))
+        try:
+            meta = self._ask_rules(
+                rules_retrieval.build_rerank_messages(question, report.query, candidates),
+                config.RULES_RERANK_MAX_WORDS,
+                RequestPhase.RULES_RERANK,
+                on_phase,
+            )
+            report = replace(report, rerank_meta=meta)
+            ratings = rules_retrieval.parse_ratings(meta.content, len(candidates))
+            selection = rules_retrieval.select_candidates(candidates, ratings, settings)
+        except (APIError, rules_retrieval.RetrievalError) as exc:
+            return replace(report, status="rerank_failed", error=str(exc))
+        return replace(
+            report, status="ok" if selection.results else "no_matches", selection=selection
+        )
 
     def _enforce_invariants(
         self,

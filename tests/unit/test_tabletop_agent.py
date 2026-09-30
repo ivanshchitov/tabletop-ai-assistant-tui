@@ -1,6 +1,7 @@
 """Агент: память диалога, стратегии контекста и пересылка LLM."""
 
 import json
+import sqlite3
 from pathlib import Path
 from typing import List, Optional
 
@@ -10,7 +11,7 @@ from core import context_strategies as strategies
 from core.usage import estimate_tokens
 from core.answer_settings import AnswerFormat, AnswerSettings, ContextStrategy
 from core.api_client import AnswerMeta, APIError
-from core import mcp_tools, memory_layers, rules_index
+from core import mcp_tools, memory_layers, rules_index, rules_retrieval
 from core.history_manager import HistoryManager
 from core.long_term_memory import LongTermMemory
 from core import task_state
@@ -54,6 +55,8 @@ class FakeAgentClient:
         if self.error is not None:
             raise self.error
         content = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
+        if isinstance(content, Exception):
+            raise content
         if self.usages:
             prompt, completion, cost = self.usages.pop(0) if len(self.usages) > 1 else self.usages[0]
         else:
@@ -89,6 +92,7 @@ def isolated_history(tmp_path, monkeypatch):
     monkeypatch.setattr(
         tabletop_agent, "ScheduleStore", lambda: ScheduleStore(tmp_path / "schedule.json")
     )
+    monkeypatch.setattr(config, "RULES_INDEX_FILE", tmp_path / "rules-index.sqlite3")
 
 
 def make_agent(client=None, answers=None, history=None, usages=None, **kwargs) -> tuple:
@@ -131,7 +135,10 @@ def test_rules_index_context_is_added_to_answer_and_sources_are_exposed(monkeypa
         "A road costs one brick and one lumber.", 0.8, "structural"
     )
     monkeypatch.setattr(rules_index, "search", lambda *_args, **_kwargs: [source])
+    monkeypatch.setattr(rules_index, "index_exists", lambda _path: True)
     agent, client = make_agent()
+    # Новый контракт: одношаговый поиск теперь выбирается явно как baseline.
+    agent.config.retrieval = rules_retrieval.RetrievalSettings(mode="baseline")
 
     agent.ask("Сколько ресурсов стоит дорога в CATAN?")
 
@@ -148,12 +155,14 @@ def test_rules_mode_off_skips_search_and_clears_sources_before_next_answer(monke
     )
     searches = []
 
-    def search(*args):
+    def search(*args, **kwargs):
         searches.append(args)
         return [source]
 
     monkeypatch.setattr(rules_index, "search", search)
+    monkeypatch.setattr(rules_index, "index_exists", lambda _path: True)
     agent, client = make_agent()
+    agent.config.retrieval = rules_retrieval.RetrievalSettings(mode="baseline")
 
     agent.ask("Сколько стоит дорога в CATAN?")
     assert agent.last_rules_sources == (source,)
@@ -171,6 +180,257 @@ def test_rules_mode_off_skips_search_and_clears_sources_before_next_answer(monke
     agent.ask("Сколько стоит дорога в CATAN?")
     assert len(searches) == 2
     assert agent.last_rules_sources == (source,)
+
+
+@pytest.fixture
+def small_rules_corpus(tmp_path, monkeypatch):
+    documents = tmp_path / "rules"
+    documents.mkdir()
+    pages = {
+        "catan.pdf": ("CATAN", "Building\nIn CATAN, a road costs one brick and one lumber."),
+        "dnd.pdf": ("D&D", "Travel\nIn D&D, traveling on roads depends on difficult terrain."),
+        "ticket.pdf": ("Ticket to Ride", "Locomotives\nA face-up locomotive is your only card for that turn."),
+    }
+    for name in pages:
+        (documents / name).write_bytes(b"PDF fixture")
+    monkeypatch.setattr(
+        rules_index, "read_pdf",
+        lambda path: (pages[path.name][0], [rules_index.PageText(1, pages[path.name][1])]),
+    )
+    database = rules_index.index_path()
+    rules_index.build_index(documents, database)
+    return database
+
+
+RULES_QUERY = "CATAN road building resource cost"
+
+
+def rules_ratings(database, *, before=20, scores=None):
+    """Модельные оценки задаются по источнику; id берутся из реального первого этапа."""
+    scores = scores if scores is not None else {"catan.pdf": 0.95, "dnd.pdf": 0.1, "ticket.pdf": 0.2}
+    found = rules_index.search(database, RULES_QUERY, limit=before, minimum_score=-1.0)
+    return json.dumps({"results": [
+        {"id": number, "score": scores[item.source], "reason": "Relevance for road cost"}
+        for number, item in enumerate(found, 1)
+    ]})
+
+
+def test_enhanced_rules_send_only_filtered_context_and_preserve_original_history(small_rules_corpus):
+    question = "Сколько ресурсов стоит дорога в CATAN?"
+    agent, client = make_agent(
+        answers=[json.dumps({"query": RULES_QUERY}), rules_ratings(small_rules_corpus), "Кирпич и дерево."],
+        usages=[(100, 20, 0.001), (300, 50, 0.002), (400, 30, 0.003)],
+        model=config.AVAILABLE_MODELS[1],
+    )
+    agent.auto_tools = False
+    agent.settings = agent.settings.with_temperature(1.1)
+    phases = []
+
+    answer = agent.ask(question, on_phase=phases.append)
+
+    assert len(client.calls) == 3
+    assert phases == [RequestPhase.RULES_REWRITE, RequestPhase.RULES_RERANK, RequestPhase.REQUEST]
+    evaluation = json.loads(client.calls[1]["messages"][-1]["content"])
+    assert evaluation["question"] == question
+    assert evaluation["query"] == RULES_QUERY
+    assert {item["source"] for item in evaluation["candidates"]} == {"catan.pdf", "dnd.pdf", "ticket.pdf"}
+    final = client.calls[2]["messages"]
+    context = "\n".join(message["content"] for message in final if message["role"] == "system")
+    assert "one brick and one lumber" in context
+    assert "difficult terrain" not in context
+    assert "face-up locomotive" not in context
+    assert question in final[-1]["content"]
+    assert RULES_QUERY not in final[-1]["content"]
+    assert [item.source for item in agent.last_rules_sources] == ["catan.pdf"]
+    assert agent.history.dialogues[0]["question"] == question
+    assert agent.history.dialogues[0]["answer"] == "Кирпич и дерево."
+    assert "Relevance for road cost" not in agent.history.path.read_text()
+    assert agent.session_usage.requests == 3
+    assert agent.session_usage.prompt_tokens == 800
+    assert agent.session_usage.completion_tokens == 100
+    assert agent.session_usage.cost_usd == pytest.approx(0.006)
+    assert agent.last_result is answer
+    assert [call["model"] for call in client.calls] == [config.AVAILABLE_MODELS[1]] * 3
+    assert [call["temperature"] for call in client.calls] == [None, None, 1.1]
+    report = agent.rules_report()
+    assert report.rewrite_meta.prompt_tokens == 100
+    assert report.rerank_meta.prompt_tokens == 300
+    assert report.query == RULES_QUERY
+    assert report.status == "ok"
+
+
+def test_rules_first_and_final_top_k_bound_the_actual_context(small_rules_corpus):
+    agent, client = make_agent(answers=[
+        json.dumps({"query": RULES_QUERY}),
+        rules_ratings(small_rules_corpus, before=2, scores={"catan.pdf": 0.9, "dnd.pdf": 0.8, "ticket.pdf": 0.7}),
+        "Ответ.",
+    ])
+    agent.config.retrieval = rules_retrieval.RetrievalSettings(before=2, after=1, threshold=0.6)
+
+    agent.ask("Сколько стоит дорога в CATAN?")
+
+    report = agent.rules_report()
+    assert len(report.selection.decisions) == 2
+    assert len(report.selection.results) == 1
+    assert [item.source for item in agent.last_rules_sources] == ["catan.pdf"]
+    assert {decision.disposition for decision in report.selection.decisions} == {"selected", "top_k"}
+    context = "\n".join(message["content"] for message in client.calls[-1]["messages"])
+    assert "one brick and one lumber" in context
+    assert "difficult terrain" not in context
+    assert "face-up locomotive" not in context
+
+
+def test_baseline_rules_use_both_limits_but_ignore_model_threshold(small_rules_corpus):
+    agent, client = make_agent(answers=["Ответ."])
+    agent.config.retrieval = rules_retrieval.RetrievalSettings(
+        mode="baseline", before=2, after=2, threshold=1.0
+    )
+    phases = []
+
+    agent.ask(RULES_QUERY, on_phase=phases.append)
+
+    assert len(client.calls) == 1
+    assert phases == [RequestPhase.REQUEST]
+    assert len(agent.last_rules_sources) == 2
+    report = agent.rules_report()
+    assert report.query == RULES_QUERY
+    assert len(report.selection.decisions) == 2
+    assert all(decision.relevance is None for decision in report.selection.decisions)
+    assert all(item.score < 1.0 for item in agent.last_rules_sources)
+    assert agent.session_usage.requests == 1
+
+
+@pytest.mark.parametrize("disabled", ["mode", "missing_index"])
+def test_rules_off_or_missing_index_clear_previous_context_without_auxiliary_calls(small_rules_corpus, disabled):
+    agent, client = make_agent(answers=[
+        json.dumps({"query": RULES_QUERY}), rules_ratings(small_rules_corpus), "Первый ответ.", "Второй ответ.",
+    ])
+    agent.ask("Сколько стоит дорога в CATAN?")
+    assert [item.source for item in agent.last_rules_sources] == ["catan.pdf"]
+    if disabled == "mode":
+        agent.rag_enabled = False
+    else:
+        small_rules_corpus.unlink()
+    phases = []
+
+    agent.ask("Другой вопрос по настольным играм", on_phase=phases.append)
+
+    assert len(client.calls) == 4
+    assert phases == [RequestPhase.REQUEST]
+    assert agent.last_rules_sources == ()
+    assert agent.rules_report().status == ("disabled" if disabled == "mode" else "no_index")
+    assert agent.rules_report().selection.results == ()
+    assert not any(
+        "one brick and one lumber" in message["content"]
+        for message in client.calls[-1]["messages"]
+    )
+
+
+def test_rules_missing_index_does_not_consume_rewrite_response():
+    agent, client = make_agent(answers=["Обычный ответ."])
+
+    answer = agent.ask("Сколько стоит дорога в CATAN?")
+
+    assert answer.content == "Обычный ответ."
+    assert len(client.calls) == 1
+    assert agent.rules_report().status == "no_index"
+    assert agent.last_rules_sources == ()
+
+
+def test_rules_empty_first_stage_skips_reranker(small_rules_corpus):
+    with sqlite3.connect(str(small_rules_corpus)) as connection:
+        connection.execute("DELETE FROM chunks WHERE strategy='structural'")
+    agent, client = make_agent(answers=[json.dumps({"query": RULES_QUERY}), "Обычный ответ."])
+    phases = []
+
+    answer = agent.ask("Сколько стоит дорога в CATAN?", on_phase=phases.append)
+
+    assert answer.content == "Обычный ответ."
+    assert len(client.calls) == 2
+    assert phases == [RequestPhase.RULES_REWRITE, RequestPhase.REQUEST]
+    assert agent.rules_report().status == "no_candidates"
+    assert agent.last_rules_sources == ()
+
+
+def test_rules_empty_second_stage_does_not_fall_back_to_candidates(small_rules_corpus):
+    agent, client = make_agent(answers=[
+        json.dumps({"query": RULES_QUERY}),
+        rules_ratings(small_rules_corpus, scores={"catan.pdf": 0.1, "dnd.pdf": 0.1, "ticket.pdf": 0.1}),
+        "Обычный ответ.",
+    ])
+
+    agent.ask("Сколько стоит дорога в CATAN?")
+
+    assert agent.rules_report().status == "no_matches"
+    assert agent.last_rules_sources == ()
+    assert all(decision.disposition == "below_threshold" for decision in agent.rules_report().selection.decisions)
+    assert not any("one brick and one lumber" in message["content"] for message in client.calls[-1]["messages"])
+
+
+@pytest.mark.parametrize("stage,bad_response,new_calls,new_spend", [
+    ("rewrite", APIError("rewrite unavailable"), 2, 1),
+    ("rewrite", "", 2, 2),
+    ("rewrite", "{}", 2, 2),
+    ("rerank", APIError("reranker unavailable"), 3, 2),
+    ("rerank", '{"results": []}', 3, 3),
+    ("rerank", '{"results": [{"id": 1, "score": 0.9, "reason": "a"}, {"id": 1, "score": 0.8, "reason": "b"}, {"id": 3, "score": 0.7, "reason": "c"}]}', 3, 3),
+])
+def test_rules_auxiliary_failure_drops_old_context_and_accounts_successful_spend(
+    small_rules_corpus, stage, bad_response, new_calls, new_spend
+):
+    replies = [json.dumps({"query": RULES_QUERY}), rules_ratings(small_rules_corpus), "Первый ответ."]
+    if stage == "rerank":
+        replies.append(json.dumps({"query": RULES_QUERY}))
+    replies.extend([bad_response, "Второй ответ."])
+    agent, client = make_agent(answers=replies)
+    agent.ask("Первый вопрос о дороге в CATAN")
+    assert agent.last_rules_sources
+
+    answer = agent.ask("Второй вопрос о дороге в CATAN")
+
+    assert answer.content == "Второй ответ."
+    assert agent.last_result is answer
+    assert len(client.calls) == 3 + new_calls
+    assert agent.session_usage.requests == 3 + new_spend
+    assert agent.last_rules_sources == ()
+    report = agent.rules_report()
+    assert report.status == stage + "_failed"
+    assert report.error
+    assert report.selection.results == ()
+    if stage == "rerank":
+        assert len(report.selection.decisions) == 3
+        assert all(decision.disposition == "not_evaluated" for decision in report.selection.decisions)
+    assert not any("one brick and one lumber" in message["content"] for message in client.calls[-1]["messages"])
+    assert [row["answer"] for row in agent.history.dialogues] == ["Первый ответ.", "Второй ответ."]
+
+
+def test_rules_snapshot_keeps_completed_parameters_after_tuning_and_clear(small_rules_corpus):
+    agent, _ = make_agent(answers=[
+        json.dumps({"query": RULES_QUERY}), rules_ratings(small_rules_corpus), "Ответ.",
+    ])
+    agent.ask("Сколько стоит дорога в CATAN?")
+    report = agent.rules_report()
+
+    agent.config.retrieval = rules_retrieval.parse_tuning(agent.config.retrieval, "threshold=0.9 after=1")
+    agent.reset()
+
+    assert agent.rules_report() is report
+    assert report.settings.threshold == 0.6
+    assert report.settings.after == 3
+    assert agent.config.retrieval.threshold == 0.9
+    assert agent.config.retrieval.after == 1
+
+
+def test_rules_failed_final_answer_does_not_save_auxiliary_text_as_dialogue(small_rules_corpus):
+    agent, _ = make_agent(answers=[
+        json.dumps({"query": RULES_QUERY}), rules_ratings(small_rules_corpus), APIError("answer unavailable"),
+    ])
+
+    with pytest.raises(APIError, match="answer unavailable"):
+        agent.ask("Сколько стоит дорога в CATAN?")
+
+    assert agent.history.dialogues == []
+    assert agent.session_usage.requests == 2
 
 
 def test_second_ask_carries_previous_exchange():

@@ -1,7 +1,10 @@
 """Интеграция локального корпуса правил с запуском TUI."""
 
+import json
 import shutil
 from pathlib import Path
+
+from core import rules_index
 
 from .stub_api import answer
 
@@ -48,17 +51,34 @@ def test_rules_index_and_retrieval_work_only_after_explicit_indexing(
     session.wait_on_screen("История диалога очищена")
     session.send_line("/rules mode on")
     session.wait_on_screen("Режим RAG: включён")
+    # Новый контракт: RAG по умолчанию использует rewrite и модельный второй этап.
+    query = "CATAN road building resource cost"
+    candidates = rules_index.search(rules_index_file, query, limit=20, minimum_score=-1.0)
+    assert any("To build" in candidate.text for candidate in candidates)
+    ratings = {"results": [
+        {
+            "id": number,
+            "score": 0.9 if "To build" in candidate.text else 0.1,
+            "reason": "Building rule" if "To build" in candidate.text else "Not the requested rule",
+        }
+        for number, candidate in enumerate(candidates, 1)
+    ]}
+    stub.sequence(
+        answer(json.dumps({"query": query})),
+        answer(json.dumps(ratings)),
+        answer("Ответ на основе правил CATAN."),
+    )
     session.send_line("Сколько ресурсов стоит дорога в CATAN?")
     session.wait_on_screen("Ответ на основе правил CATAN.")
     session.wait_on_screen("Источники правил:")
     session.wait_on_screen("Catan Rulebook")
     session.wait_on_screen("catan-rules.pdf:structural:")
     request_content = "\n".join(
-        message["content"] for message in stub.requests[1]["payload"]["messages"]
+        message["content"] for message in stub.requests[3]["payload"]["messages"]
     )
     assert "To build" in request_content
 
     session.send_line("/exit")
     session.wait_exit()
 
-    assert stub.call_count == 2
+    assert stub.call_count == 4  # один ответ без RAG, затем rewrite + rerank + ответ

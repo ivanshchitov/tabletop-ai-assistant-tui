@@ -4,9 +4,18 @@ import json
 import math
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import Optional, Sequence, Tuple
+from functools import lru_cache
+from typing import Dict, List, Optional, Sequence, Tuple, TYPE_CHECKING
+
+from . import config
 
 from .rules_index import SearchResult
+
+if TYPE_CHECKING:
+    from .api_client import AnswerMeta
+
+QUERY_ASSET = "rules_query_prompt.md"
+RERANK_ASSET = "rules_rerank_prompt.md"
 
 
 class RetrievalError(ValueError):
@@ -74,6 +83,8 @@ class RetrievalReport:
     status: str
     selection: Selection = Selection()
     error: Optional[str] = None
+    rewrite_meta: Optional["AnswerMeta"] = None
+    rerank_meta: Optional["AnswerMeta"] = None
 
 
 def parse_tuning(settings: RetrievalSettings, text: str) -> RetrievalSettings:
@@ -168,3 +179,39 @@ def select_candidates(
         for index, result in enumerate(candidates)
     )
     return Selection(decisions, tuple(candidates[index] for index in ranked))
+
+
+@lru_cache(maxsize=None)
+def _instruction(path) -> str:
+    return path.read_text(encoding="utf-8").strip()
+
+
+def build_query_messages(question: str) -> List[Dict[str, str]]:
+    return [
+        {"role": "system", "content": _instruction(config.ASSETS_DIR / QUERY_ASSET)},
+        {"role": "user", "content": json.dumps({"question": question}, ensure_ascii=False)},
+    ]
+
+
+def build_rerank_messages(
+    question: str, query: str, candidates: Sequence[SearchResult]
+) -> List[Dict[str, str]]:
+    payload = {
+        "question": question,
+        "query": query,
+        "candidates": [
+            {
+                "id": number,
+                "source": result.source,
+                "title": result.title,
+                "section": result.section,
+                "chunk_id": result.chunk_id,
+                "text": result.text,
+            }
+            for number, result in enumerate(candidates, 1)
+        ],
+    }
+    return [
+        {"role": "system", "content": _instruction(config.ASSETS_DIR / RERANK_ASSET)},
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+    ]

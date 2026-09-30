@@ -445,7 +445,7 @@ core/                      # Настройки, промпты, API-клиен�
   api_client.py                # APIClient — запросы к API массивом сообщений, retry с backoff, ask_with_usage (время/токены/стоимость)
   usage.py                      # estimate_cost, estimate_tokens, SessionLedger — стоимость, оценка токенов, накопитель сессии
   rules_index.py                # Извлечение PDF, два способа разбиения, локальные эмбеддинги, SQLite-поиск и сравнение
-  rules_retrieval.py            # Чистый второй этап RAG: проверка настроек/ответов модели, порог, top-K и снимок отбора
+  rules_retrieval.py            # Протоколы rewrite/rerank, проверка настроек и ответов модели, порог, top-K и снимок отбора
   tabletop_agent.py             # TabletopAgent — агент: конфиг (настройки/модель/стратегия),
                                  #  стек ходов сессии (append-only) и память стратегии (резюме, факты, ветки),
                                  #  слои памяти (краткосрочная — лог, рабочая — конверт истории, долговременная — свой файл),
@@ -485,6 +485,7 @@ tests/                      # Тесты
 assets/                    # system_prompt.md, answer_format_*.md, summary_prompt.md, facts_prompt.md, memory_prompt.md,
                            #  profile_prompt.md, invariants_prompt.md, task_prompt.md, task_plan_prompt.md, task_execute_prompt.md,
                            #  task_validate_prompt.md, tool_choice_prompt.md, tool_flow_prompt.md, tool_result_prompt.md
+                           #  rules_query_prompt.md, rules_rerank_prompt.md
 openspec/                  # Спецификации и активные изменения (OpenSpec)
 docs/rules/                # PDF правил игр и SOURCES.md с издательскими источниками
 docs/rag-control-questions.md # 10 вопросов, ожидания и источники для сравнения режимов

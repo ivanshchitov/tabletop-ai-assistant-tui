@@ -7,7 +7,7 @@ from typing import List, Optional
 
 import pytest
 
-from core import config, context_compressor, context_strategies, rules_index
+from core import config, context_compressor, context_strategies, rules_index, rules_retrieval
 from core.answer_settings import AnswerFormat, AnswerSettings, ContextStrategy
 from core.api_client import AnswerMeta, APIError
 from core import tabletop_agent
@@ -728,9 +728,13 @@ def test_answer_prints_the_rules_sources_used_by_the_agent(
         "Build a road.", 0.8, "structural"
     )
     monkeypatch.setattr(rules_index, "search", lambda *_args, **_kwargs: [result])
+    monkeypatch.setattr(rules_index, "index_exists", lambda _path: True)
     client = FakeClient(answers=["Строительство дороги требует ресурсы."])
 
-    make_app(["Как строить дорогу в CATAN?", "/exit"], client).run()
+    # Проверяем печать источников; одношаговый путь теперь явно называется baseline.
+    app = make_app(["Как строить дорогу в CATAN?", "/exit"], client)
+    app.agent.config.retrieval = rules_retrieval.RetrievalSettings(mode="baseline")
+    app.run()
 
     assert "Источники правил:" in recording_console.text
     assert "CATAN — Building (catan.pdf:structural:2)" in recording_console.text
