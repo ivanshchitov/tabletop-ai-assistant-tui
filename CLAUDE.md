@@ -94,7 +94,7 @@ openspec archive <change-id> --yes        # non-interactive: without --yes the C
   `history-persistence`, `terminal-ui`, `settings-screen`, `configuration`, `context-strategies`,
   `memory-model`, `user-profile`, `task-state`, `agent-invariants`, `test-infrastructure`,
   `model-selection`, `mcp-integration`, `scheduled-jobs`, `tool-pipeline`,
-  `rules-document-index`.
+  `rules-document-index`, `rules-retrieval`.
   It records deliberate decisions worth knowing before touching related code: the JSON format's
   refusal reply is a machine-readable `{"error": ...}` object rather than the verbatim refusal
   phrase used by free/compact (not a bug to fix), and `AnswerSettings` is session-only by design —
