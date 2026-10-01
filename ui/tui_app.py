@@ -767,6 +767,7 @@ class TabletopAITUI:
         self._print_compression_line()
         self._print_facts_line()
         rejected = self._print_invariants_lines()
+        no_context = self._print_citations_lines()
         answer = meta.content
         self.console.print("[bold magenta]Tabletop AI Assistant:[/bold magenta]")
         self._print_typing(answer)
@@ -790,7 +791,10 @@ class TabletopAITUI:
                     "сгенерирован (finish_reason=length). Попробуйте вопрос проще или "
                     "модель слабее в рассуждениях.[/bold yellow]"
                 )
-        self._print_usage_meta(meta)
+        # Режим «не знаю» по слабому контексту модель не вызывал — строки метрик нет:
+        # показывать нули или чужой расход было бы враньём.
+        if not no_context:
+            self._print_usage_meta(meta)
         self._print_schedule_line()
         self.console.rule(style="dim")
 
@@ -808,8 +812,11 @@ class TabletopAITUI:
         self.console.print("[bold cyan]Источники правил:[/bold cyan]")
         for source in sources:
             self.console.print(
-                "  {} — {} ({})".format(
-                    escape(source.title), escape(source.section), escape(source.chunk_id)
+                "  {} — {} ({}) — {}".format(
+                    escape(source.title),
+                    escape(source.section),
+                    escape(source.chunk_id),
+                    escape(source.source),
                 )
             )
 
@@ -1528,6 +1535,36 @@ class TabletopAITUI:
             f"[dim]Контекст сжат: {report.messages} сообщений "
             f"({report.exchanges} обменов) → резюме[/dim]"
         )
+
+    def _print_citations_lines(self) -> bool:
+        """Строки об источниках и цитатах последнего ответа; True — сработал режим «не знаю».
+
+        Как у инвариантов, журналируется только отклонение от нормы: подтверждённые источники
+        и цитаты не заслуживают строки на каждый ответ. `no_context` означает, что модель за
+        ответом не вызывалась — тогда строка метрик ниже не печатается. В history.json строки
+        не попадают.
+        """
+        check = self.agent.last_citations
+        if check is None:
+            return False
+        if check.no_context:
+            self.console.print(
+                "[bold yellow]🔎 Слабый контекст: источники ниже порога — отвечаю «не знаю» "
+                "и прошу уточнить вопрос.[/bold yellow]"
+            )
+            return True
+        if not check.violations:
+            return False
+        first = "; ".join(escape(violation) for violation in check.violations)
+        self.console.print(
+            f"[bold yellow]🔎 Ответ не подтверждён источниками RAG («{first}») — "
+            "повторный запрос.[/bold yellow]"
+        )
+        if check.replaced:
+            self.console.print(
+                "[bold yellow]🔎 Ответ заменён: цитаты не подтвердились — «не знаю».[/bold yellow]"
+            )
+        return False
 
     def _print_invariants_lines(self) -> bool:
         """Строки о нарушении инвариантов последним ответом — и только о нарушении.

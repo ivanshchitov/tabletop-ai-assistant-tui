@@ -10,6 +10,15 @@ from core import rules_index
 from .stub_api import answer
 
 
+def _cited_answer(text: str, chunk) -> str:
+    """Ответ свободного формата с дословной цитатой из переданного чанка и названным источником."""
+    return (
+        f"{text}\n\n"
+        f"Цитаты:\n- \"{chunk.text[:60]}\"\n"
+        f"Источники:\n- {chunk.source}, раздел {chunk.section} ({chunk.chunk_id})."
+    )
+
+
 def test_rules_index_and_retrieval_work_only_after_explicit_indexing(
     app, stub, rules_documents_dir, rules_index_file
 ):
@@ -64,10 +73,18 @@ def test_rules_index_and_retrieval_work_only_after_explicit_indexing(
         }
         for number, candidate in enumerate(candidates, 1)
     ]}
+    chosen = next(candidate for candidate in candidates if "To build" in candidate.text)
+    # Свободный формат: ответ обязан нести источники и дословную цитату из переданного чанка
+    # (add-rag-citations), иначе приложение повторит запрос и заменит ответ.
+    cited = (
+        "Ответ на основе правил CATAN.\n\n"
+        f"Цитаты:\n- \"{chosen.text[:60]}\"\n"
+        f"Источники:\n- {chosen.source}, раздел {chosen.section} ({chosen.chunk_id})."
+    )
     stub.sequence(
         answer(json.dumps({"query": query})),
         answer(json.dumps(ratings)),
-        answer("Ответ на основе правил CATAN."),
+        answer(cited),
     )
     session.send_line("Сколько ресурсов стоит дорога в CATAN?")
     session.wait_on_screen("Ответ на основе правил CATAN.")
@@ -102,8 +119,12 @@ def test_rules_controls_trace_and_reranking_use_actual_terminal_and_http(
     session.wait_on_screen("Кандидаты: 4; итоговый top-K: 1; порог: 0.6")
     assert stub.call_count == 0
 
-    stub.sequence(answer("Базовый ответ: кирпич и дерево."))
     question = "Сколько ресурсов стоит дорога в CATAN?"
+    baseline_picks = rules_index.search(
+        rules_index_file, question, limit=4, minimum_score=-1.0
+    )[:1]
+    baseline_cited = _cited_answer("Базовый ответ: кирпич и дерево.", baseline_picks[0])
+    stub.sequence(answer(baseline_cited))
     session.send_line(question)
     session.wait_on_screen("Базовый ответ: кирпич и дерево.")
     session.send_line("/rules trace")
@@ -116,6 +137,7 @@ def test_rules_controls_trace_and_reranking_use_actual_terminal_and_http(
 
     query = "CATAN road resources [/dim]"
     candidates = rules_index.search(rules_index_file, query, limit=4, minimum_score=-1.0)
+    enhanced_cited = _cited_answer("Улучшенный ответ: кирпич и дерево.", candidates[1])
     stub.sequence(
         answer(json.dumps({"query": query})),
         answer(json.dumps({"results": [
@@ -124,7 +146,7 @@ def test_rules_controls_trace_and_reranking_use_actual_terminal_and_http(
             {"id": 3, "score": 0.8, "reason": "Related cost"},
             {"id": 4, "score": 0.6, "reason": "Related building"},
         ]})),
-        answer("Улучшенный ответ: кирпич и дерево."),
+        answer(enhanced_cited),
     )
     session.send_line(question)
     session.wait_on_screen("Улучшенный ответ: кирпич и дерево.")
@@ -157,5 +179,76 @@ def test_rules_controls_trace_and_reranking_use_actual_terminal_and_http(
     assert stub.call_count == 4
     records = json.loads(history_file.read_text())["dialogues"]
     assert [(row["question"], row["answer"]) for row in records] == [
-        (question, "Улучшенный ответ: кирпич и дерево.")
+        (question, enhanced_cited)
     ]
+
+
+def test_unconfirmed_citation_is_replaced_by_disclaimer_on_screen(
+    app, stub, rules_documents_dir, rules_index_file, history_file
+):
+    rules_documents_dir.mkdir(parents=True)
+    source = Path(__file__).resolve().parents[2] / "docs" / "rules" / "catan-rules.pdf"
+    shutil.copyfile(source, rules_documents_dir / source.name)
+    rules_index.build_index(rules_documents_dir, rules_index_file)
+    session = app(rows=50)
+    session.wait_for_prompt()
+
+    question = "Сколько ресурсов стоит дорога в CATAN?"
+    candidates = rules_index.search(rules_index_file, "CATAN road", limit=20, minimum_score=-1.0)
+    ratings = {"results": [
+        {"id": number, "score": 0.9 if number == 1 else 0.1, "reason": "pick" if number == 1 else "no"}
+        for number in range(1, len(candidates) + 1)
+    ]}
+    # Ответ без источников и цитат — приложение повторит запрос и заменит его на «не знаю».
+    stub.sequence(
+        answer(json.dumps({"query": "CATAN road"})),
+        answer(json.dumps(ratings)),
+        answer("Дорога стоит кирпич и дерево."),
+        answer("Дорога стоит кирпич и дерево."),
+    )
+    session.send_line(question)
+    session.wait_on_screen("не подтверждён источниками RAG")
+    session.wait_on_screen("Ответ заменён")
+    session.wait_on_screen("Уточните")
+
+    session.send_line("/exit")
+    session.wait_exit()
+
+    assert stub.call_count == 4  # rewrite + rerank + ответ + повтор
+    records = json.loads(history_file.read_text())["dialogues"]
+    assert len(records) == 1
+    assert records[0]["answer"].startswith("Не знаю")
+    assert "Дорога стоит кирпич и дерево." not in records[0]["answer"]
+
+
+def test_low_relevance_mode_answers_disclaimer_and_trace_shows_no_matches(
+    app, stub, rules_documents_dir, rules_index_file
+):
+    rules_documents_dir.mkdir(parents=True)
+    source = Path(__file__).resolve().parents[2] / "docs" / "rules" / "catan-rules.pdf"
+    shutil.copyfile(source, rules_documents_dir / source.name)
+    rules_index.build_index(rules_documents_dir, rules_index_file)
+    session = app(rows=50)
+    session.wait_for_prompt()
+
+    question = "Как начисляются очки за плитку в Azul?"
+    candidates = rules_index.search(rules_index_file, "Azul tile scoring", limit=20, minimum_score=-1.0)
+    ratings = {"results": [
+        {"id": number, "score": 0.1, "reason": "другая игра"}
+        for number in range(1, len(candidates) + 1)
+    ]}
+    stub.sequence(
+        answer(json.dumps({"query": "Azul tile scoring"})),
+        answer(json.dumps(ratings)),
+    )
+    session.send_line(question)
+    session.wait_on_screen("Слабый контекст")
+    session.wait_on_screen("Уточните")
+    session.send_line("/rules trace")
+    session.wait_on_screen("Итог: фрагментов — 0")
+
+    session.send_line("/exit")
+    session.wait_exit()
+
+    # Запроса ответа к модели не было: только переписывание и отбор.
+    assert stub.call_count == 2

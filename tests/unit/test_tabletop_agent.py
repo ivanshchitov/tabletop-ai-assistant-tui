@@ -11,7 +11,7 @@ from core import context_strategies as strategies
 from core.usage import estimate_tokens
 from core.answer_settings import AnswerFormat, AnswerSettings, ContextStrategy
 from core.api_client import AnswerMeta, APIError
-from core import mcp_tools, memory_layers, rules_index, rules_retrieval
+from core import mcp_tools, memory_layers, rules_citations, rules_index, rules_retrieval
 from core.history_manager import HistoryManager
 from core.long_term_memory import LongTermMemory
 from core import task_state
@@ -106,6 +106,17 @@ def user_contents(messages) -> List[str]:
     return [m["content"] for m in messages if m["role"] == "user"]
 
 
+def retrieval_only(agent) -> None:
+    """Отключает путь обязательных цитат (add-rag-citations) для тестов механики RAG.
+
+    Смена контракта: в свободном формате ответ с непустыми источниками теперь обязан нести
+    источники и дословные цитаты и иначе повторяется. Тесты ниже проверяют поиск, отбор и
+    расход, а не формирование цитат, поэтому берут формат со своим контрактом (JSON), где
+    проверка цитат намеренно не выполняется.
+    """
+    agent.settings = agent.settings.with_format(AnswerFormat.JSON)
+
+
 def sans_invariants(messages):
     """Запрос без системного сообщения инвариантов.
 
@@ -137,6 +148,7 @@ def test_rules_index_context_is_added_to_answer_and_sources_are_exposed(monkeypa
     monkeypatch.setattr(rules_index, "search", lambda *_args, **_kwargs: [source])
     monkeypatch.setattr(rules_index, "index_exists", lambda _path: True)
     agent, client = make_agent()
+    retrieval_only(agent)
     # Новый контракт: одношаговый поиск теперь выбирается явно как baseline.
     agent.config.retrieval = rules_retrieval.RetrievalSettings(mode="baseline")
 
@@ -162,6 +174,7 @@ def test_rules_mode_off_skips_search_and_clears_sources_before_next_answer(monke
     monkeypatch.setattr(rules_index, "search", search)
     monkeypatch.setattr(rules_index, "index_exists", lambda _path: True)
     agent, client = make_agent()
+    retrieval_only(agent)
     agent.config.retrieval = rules_retrieval.RetrievalSettings(mode="baseline")
 
     agent.ask("Сколько стоит дорога в CATAN?")
@@ -223,6 +236,7 @@ def test_enhanced_rules_send_only_filtered_context_and_preserve_original_history
         model=config.AVAILABLE_MODELS[1],
     )
     agent.auto_tools = False
+    retrieval_only(agent)
     agent.settings = agent.settings.with_temperature(1.1)
     phases = []
 
@@ -265,6 +279,7 @@ def test_rules_first_and_final_top_k_bound_the_actual_context(small_rules_corpus
         rules_ratings(small_rules_corpus, before=2, scores={"catan.pdf": 0.9, "dnd.pdf": 0.8, "ticket.pdf": 0.7}),
         "Ответ.",
     ])
+    retrieval_only(agent)
     agent.config.retrieval = rules_retrieval.RetrievalSettings(before=2, after=1, threshold=0.6)
 
     agent.ask("Сколько стоит дорога в CATAN?")
@@ -282,6 +297,7 @@ def test_rules_first_and_final_top_k_bound_the_actual_context(small_rules_corpus
 
 def test_baseline_rules_use_both_limits_but_ignore_model_threshold(small_rules_corpus):
     agent, client = make_agent(answers=["Ответ."])
+    retrieval_only(agent)
     agent.config.retrieval = rules_retrieval.RetrievalSettings(
         mode="baseline", before=2, after=2, threshold=1.0
     )
@@ -305,6 +321,7 @@ def test_rules_off_or_missing_index_clear_previous_context_without_auxiliary_cal
     agent, client = make_agent(answers=[
         json.dumps({"query": RULES_QUERY}), rules_ratings(small_rules_corpus), "Первый ответ.", "Второй ответ.",
     ])
+    retrieval_only(agent)
     agent.ask("Сколько стоит дорога в CATAN?")
     assert [item.source for item in agent.last_rules_sources] == ["catan.pdf"]
     if disabled == "mode":
@@ -341,6 +358,7 @@ def test_rules_empty_first_stage_skips_reranker(small_rules_corpus):
     with sqlite3.connect(str(small_rules_corpus)) as connection:
         connection.execute("DELETE FROM chunks WHERE strategy='structural'")
     agent, client = make_agent(answers=[json.dumps({"query": RULES_QUERY}), "Обычный ответ."])
+    retrieval_only(agent)
     phases = []
 
     answer = agent.ask("Сколько стоит дорога в CATAN?", on_phase=phases.append)
@@ -353,18 +371,134 @@ def test_rules_empty_first_stage_skips_reranker(small_rules_corpus):
 
 
 def test_rules_empty_second_stage_does_not_fall_back_to_candidates(small_rules_corpus):
+    # Смена контракта (add-rag-citations): при no_matches в enhanced модель за ответом не
+    # вызывается вовсе — приложение само отвечает «не знаю» и просит уточнить.
     agent, client = make_agent(answers=[
         json.dumps({"query": RULES_QUERY}),
         rules_ratings(small_rules_corpus, scores={"catan.pdf": 0.1, "dnd.pdf": 0.1, "ticket.pdf": 0.1}),
-        "Обычный ответ.",
     ])
 
-    agent.ask("Сколько стоит дорога в CATAN?")
+    answer = agent.ask("Сколько стоит дорога в CATAN?")
 
+    assert answer.content == rules_citations.disclaimer_text()
     assert agent.rules_report().status == "no_matches"
     assert agent.last_rules_sources == ()
     assert all(decision.disposition == "below_threshold" for decision in agent.rules_report().selection.decisions)
-    assert not any("one brick and one lumber" in message["content"] for message in client.calls[-1]["messages"])
+    # Запросов ровно два — переписывание и отбор; запроса ответа с фрагментами нет.
+    assert len(client.calls) == 2
+
+
+# --- день 24: обязательные источники и цитаты ----------------------------------------------
+
+CITATIONS_ANSWER = (
+    "Дорога стоит одну кирпичную и одну деревянную карту.\n\n"
+    "Цитаты:\n- \"A road costs one brick and one lumber.\"\n"
+    "Источники:\n- catan.pdf, раздел Building (catan.pdf:structural:2)."
+)
+
+
+def verified_source_agent(monkeypatch, answers):
+    """Агент с одним подтверждаемым фрагментом: sources (baseline) подменены явно."""
+    source = rules_index.SearchResult(
+        "catan.pdf", "CATAN", "Building", "catan.pdf:structural:2",
+        "A road costs one brick and one lumber.", 0.8, "structural",
+    )
+    monkeypatch.setattr(rules_index, "search", lambda *_args, **_kwargs: [source])
+    monkeypatch.setattr(rules_index, "index_exists", lambda _path: True)
+    agent, client = make_agent(answers=answers)
+    agent.config.retrieval = rules_retrieval.RetrievalSettings(mode="baseline")
+    return agent, client, source
+
+
+def test_citations_instruction_is_added_and_confirmed_answer_needs_no_retry(monkeypatch):
+    agent, client, _ = verified_source_agent(monkeypatch, [CITATIONS_ANSWER])
+
+    answer = agent.ask("Сколько ресурсов стоит дорога в CATAN?")
+
+    assert answer.content == CITATIONS_ANSWER
+    assert len(client.calls) == 1
+    messages = client.calls[0]["messages"]
+    assert any(rules_citations.citations_instruction() in m["content"] for m in messages if m["role"] == "system")
+    assert agent.last_citations is not None and agent.last_citations.confirmed
+    assert agent.history.dialogues[0]["answer"] == CITATIONS_ANSWER
+
+
+def test_unconfirmed_citation_is_retried_then_replaced(monkeypatch):
+    agent, client, _ = verified_source_agent(
+        monkeypatch, ["Дорога стоит кирпич и дерево.", "Дорога стоит кирпич и дерево."]
+    )
+
+    answer = agent.ask("Сколько ресурсов стоит дорога в CATAN?")
+
+    assert len(client.calls) == 2
+    retry = client.calls[1]["messages"]
+    assert retry[-1]["role"] == "user"
+    assert rules_citations.NO_SOURCE_MARKER in retry[-1]["content"]
+    assert answer.content == rules_citations.disclaimer_text()
+    check = agent.last_citations
+    assert check is not None and check.retried and check.replaced
+    # В историю и в лог идёт только показанный пользователю текст.
+    assert agent.history.dialogues[0]["answer"] == rules_citations.disclaimer_text()
+    stored = agent.history.path.read_text()
+    assert "Дорога стоит кирпич и дерево." not in stored
+
+
+def test_clean_retry_after_violation_is_accepted(monkeypatch):
+    agent, client, _ = verified_source_agent(
+        monkeypatch, ["Дорога стоит кирпич и дерево.", CITATIONS_ANSWER]
+    )
+
+    answer = agent.ask("Сколько ресурсов стоит дорога в CATAN?")
+
+    assert answer.content == CITATIONS_ANSWER
+    assert len(client.calls) == 2
+    check = agent.last_citations
+    assert check is not None and check.retried and not check.replaced
+
+
+@pytest.mark.parametrize("fmt", [AnswerFormat.JSON, AnswerFormat.COMPACT])
+def test_formats_with_own_contract_skip_citation_instruction_and_check(monkeypatch, fmt):
+    agent, client, _ = verified_source_agent(monkeypatch, ['{"error": "Некорректный формат вопроса"}'])
+    agent.settings = agent.settings.with_format(fmt)
+
+    answer = agent.ask("Сколько ресурсов стоит дорога в CATAN?")
+
+    assert answer.content == '{"error": "Некорректный формат вопроса"}'
+    assert len(client.calls) == 1
+    messages = client.calls[0]["messages"]
+    assert not any(rules_citations.citations_instruction() in m["content"] for m in messages)
+    assert agent.last_citations is None
+
+
+def test_low_relevance_answers_disclaimer_without_model_request(small_rules_corpus):
+    agent, client = make_agent(answers=[
+        json.dumps({"query": RULES_QUERY}),
+        rules_ratings(small_rules_corpus, scores={"catan.pdf": 0.1, "dnd.pdf": 0.1, "ticket.pdf": 0.1}),
+    ])
+
+    answer = agent.ask("Сколько стоит дорога в CATAN?")
+
+    assert answer.content == rules_citations.disclaimer_text()
+    assert len(client.calls) == 2  # rewrite + rerank, но не ответ
+    assert agent.rules_report().status == "no_matches"
+    assert agent.last_citations is not None and agent.last_citations.replaced
+    assert agent.history.dialogues[0]["answer"] == rules_citations.disclaimer_text()
+
+
+def test_baseline_low_relevance_keeps_answering_with_model(small_rules_corpus):
+    answer_text = (
+        "В CATAN дорога стоит кирпич и дерево. "
+        "Цитата: «a road costs one brick and one lumber». Источник: catan.pdf."
+    )
+    agent, client = make_agent(answers=[answer_text])
+    agent.config.retrieval = rules_retrieval.RetrievalSettings(mode="baseline", threshold=1.0)
+
+    answer = agent.ask(RULES_QUERY)
+
+    assert answer.content == answer_text
+    assert len(client.calls) == 1
+    assert agent.last_citations is not None and agent.last_citations.confirmed
+    assert agent.rules_report().status == "ok"
 
 
 @pytest.mark.parametrize("stage,bad_response,new_calls,new_spend", [
@@ -383,6 +517,7 @@ def test_rules_auxiliary_failure_drops_old_context_and_accounts_successful_spend
         replies.append(json.dumps({"query": RULES_QUERY}))
     replies.extend([bad_response, "Второй ответ."])
     agent, client = make_agent(answers=replies)
+    retrieval_only(agent)
     agent.ask("Первый вопрос о дороге в CATAN")
     assert agent.last_rules_sources
 

@@ -7,7 +7,7 @@ from typing import List, Optional
 
 import pytest
 
-from core import config, context_compressor, context_strategies, rules_index, rules_retrieval
+from core import config, context_compressor, context_strategies, rules_citations, rules_index, rules_retrieval
 from core.answer_settings import AnswerFormat, AnswerSettings, ContextStrategy
 from core.api_client import AnswerMeta, APIError
 from core import tabletop_agent
@@ -739,8 +739,70 @@ def test_failed_rules_rerank_is_visible_and_cannot_attribute_raw_sources(
     assert len(history.dialogues) == 1
 
 
-# --- /models: панель выбора модели ----------------------------------------------------------
+def test_rules_sources_line_names_file_section_and_chunk_id(
+    make_app, recording_console, monkeypatch, history
+):
+    result = rules_index.SearchResult(
+        "catan.pdf", "CATAN", "Road", "catan:structural:1",
+        "A road requires brick and lumber.", 0.8, "structural",
+    )
+    monkeypatch.setattr(rules_index, "index_exists", lambda _path: True)
+    monkeypatch.setattr(rules_index, "search", lambda *_args, **_kwargs: [result])
+    answer_text = (
+        "Кирпич и дерево. Цитата: \"A road requires brick and lumber\". "
+        "Источник: catan.pdf (catan:structural:1)."
+    )
+    app = make_app(["Сколько стоит дорога?", "/exit"], FakeClient(answers=[answer_text]))
+    app.agent.config.retrieval = rules_retrieval.RetrievalSettings(mode="baseline")
+    app.agent.rag_enabled = True
+    app.run()
 
+    assert "Источники правил:" in recording_console.text
+    assert "CATAN — Road (catan:structural:1) — catan.pdf" in recording_console.text
+
+
+def test_low_relevance_shows_disclaimer_without_metrics(
+    make_app, recording_console, monkeypatch, history
+):
+    result = rules_index.SearchResult(
+        "catan.pdf", "CATAN", "Road", "catan:structural:1",
+        "A road requires brick and lumber.", 0.2, "structural",
+    )
+    monkeypatch.setattr(rules_index, "index_exists", lambda _path: True)
+    monkeypatch.setattr(rules_index, "search", lambda *_args, **_kwargs: [result])
+    ratings = '{"results": [{"id": 1, "score": 0.2, "reason": "weak"}]}'
+    client = FakeClient(answers=['{"query": "CATAN road"}', ratings])
+    app = make_app(["Сколько стоит дорога?", "/exit"], client)
+    app.run()
+
+    assert "Слабый контекст" in recording_console.text
+    assert "⏱" not in recording_console.text
+    # Текст самого ответа рендерится через Live/Markdown и проверяется в e2e на экране;
+    # здесь важно, что запроса ответа не было (только rewrite и rerank) и метрик запроса нет.
+    assert len(client.calls) == 2
+    assert len(app.agent.history.dialogues) == 1
+
+
+def test_unconfirmed_citation_is_retried_and_replaced_on_screen(
+    make_app, recording_console, monkeypatch, history
+):
+    result = rules_index.SearchResult(
+        "catan.pdf", "CATAN", "Road", "catan:structural:1",
+        "A road requires brick and lumber.", 0.8, "structural",
+    )
+    monkeypatch.setattr(rules_index, "index_exists", lambda _path: True)
+    monkeypatch.setattr(rules_index, "search", lambda *_args, **_kwargs: [result])
+    client = FakeClient(answers=["Просто ответ.", "Просто ответ."])
+    app = make_app(["Сколько стоит дорога?", "/exit"], client)
+    app.agent.config.retrieval = rules_retrieval.RetrievalSettings(mode="baseline")
+    app.agent.rag_enabled = True
+    app.run()
+
+    assert "не подтверждён источниками RAG" in recording_console.text
+    assert "Ответ заменён" in recording_console.text
+
+
+# --- /models: панель выбора модели ----------------------------------------------------------
 
 def _panel_keys(monkeypatch, keys) -> None:
     key_iter = iter(keys)

@@ -21,6 +21,7 @@ from . import (
     mcp_tools,
     memory_layers,
     prompts,
+    rules_citations,
     rules_index,
     rules_retrieval,
     task_pipeline,
@@ -400,6 +401,9 @@ class TabletopAgent:
         self._last_facts: Optional[FactsReport] = None
         self._last_result: Optional[AnswerMeta] = None
         self._last_invariants: Optional[InvariantsCheck] = None
+        # Проверка источников и цитат RAG-ответа: None — проверка не выполнялась (нет источников
+        # RAG либо формат со своим контрактом).
+        self._last_citations: Optional[rules_citations.CitationsCheck] = None
         # Учёт расхода сессии: каждый успешный запрос к API (вопрос и вспомогательные).
         self._ledger = SessionLedger()
         # Память агента — своя: контекст восстанавливается из файла истории сразу при
@@ -482,6 +486,11 @@ class TabletopAgent:
         return self._last_invariants
 
     @property
+    def last_citations(self) -> Optional[rules_citations.CitationsCheck]:
+        """Результат проверки источников и цитат последнего ответа; None — проверки не было."""
+        return self._last_citations
+
+    @property
     def last_routing(self) -> Tuple[memory_layers.MemoryRecord, ...]:
         """Записи, сделанные в слои памяти последней репликой пользователя (только чтение)."""
         return self._last_routing
@@ -525,6 +534,7 @@ class TabletopAgent:
         self._last_rules_sources = ()
         self._rules_context = None
         self._last_rules_report = None
+        self._last_citations = None
         user_prompt = prompts.build_user_prompt(question, self.config.settings)
         # Маршрут слоёв считается до сборки запроса: запись, сделанная текущей репликой, должна
         # быть видна модели уже в этом запросе. Запросов к модели маршрут не делает.
@@ -536,18 +546,102 @@ class TabletopAgent:
         )
         self._last_rules_report = self._retrieve_rules(question, on_phase)
         self._last_rules_sources = self._last_rules_report.selection.results
+        # Слабый контекст: в enhanced все кандидаты ниже порога — приложение честно отвечает
+        # «не знаю» и просит уточнить, не обращаясь к модели и не начисляя расход.
+        if self._low_relevance_without_context():
+            meta = AnswerMeta(
+                content=rules_citations.disclaimer_text(),
+                model=self.config.model,
+                elapsed_seconds=0.0,
+                prompt_tokens=0,
+                completion_tokens=0,
+                total_tokens=0,
+                cost_usd=0.0,
+            )
+            self._last_citations = rules_citations.CitationsCheck(replaced=True, no_context=True)
+            self._remember(user_prompt, meta.content)
+            self.history.add(question, meta.content, usage=None)
+            self._refresh_schedule()
+            return meta
         self._rules_context = rules_index.context_message(self._last_rules_sources)
         skip = self._prepare_context(question, user_prompt, on_phase)
         self._signal(on_phase, RequestPhase.REQUEST)
         messages = self._build_messages(user_prompt, skip)
         meta = self._ask_question(messages)
         meta = self._enforce_invariants(messages, meta, on_phase)
+        meta = self._enforce_citations(messages, meta, on_phase)
         self._remember(user_prompt, meta.content)
         # Долговременная память: пара «вопрос–ответ» с метриками — на диск сразу после ответа.
         self.history.add(question, meta.content, usage=self._usage_block(meta))
         # Ход завершён — можно посмотреть, что за это время сделал фоновый исполнитель.
         self._refresh_schedule()
         return meta
+
+    def _low_relevance_without_context(self) -> bool:
+        """Слабый контекст: enhanced отработал, но ни один кандидат не достиг порога."""
+        report = self._last_rules_report
+        if report is None or report.status != "no_matches":
+            return False
+        return report.settings.mode is rules_retrieval.RetrievalMode.ENHANCED
+
+    def _citations_enabled(self) -> bool:
+        """Проверка цитат имеет смысл только со свободным форматом и при непустых источниках.
+
+        JSON сохраняет машиночитаемый контракт, компактная карточка — свой STRICT «ничего
+        лишнего»: обязательные блоки цитат противоречили бы обоим, поэтому у этих форматов
+        источниками RAG остаётся строка «Источники правил:» терминального слоя.
+        """
+        return (
+            bool(self._last_rules_sources)
+            and self.config.format is AnswerFormat.FREE
+        )
+
+    def _enforce_citations(
+        self,
+        messages: List[Dict[str, str]],
+        meta: AnswerMeta,
+        on_phase: Optional[Callable[[RequestPhase], None]],
+    ) -> AnswerMeta:
+        """Проверка источников и цитат кодом: повтор с перечнем нарушений, затем замена ответа.
+
+        Как у инвариантов: повтор — продолжение того же диалога, а если повтор тоже не подтверждён,
+        до пользователя доходит только фиксированное «не знаю», и именно оно ложится в лог и
+        историю. Проверка выполняется лишь при непустых источниках и свободном формате.
+        """
+        if not self._citations_enabled():
+            return meta
+        check = rules_citations.check_answer(meta.content, self._last_rules_sources)
+        if check.confirmed:
+            self._last_citations = check
+            return meta
+        final = check.violations
+        for _ in range(config.CITATION_RETRIES):
+            self._signal(on_phase, RequestPhase.REQUEST)
+            retry = messages + [
+                {"role": "assistant", "content": meta.content},
+                {"role": "user", "content": rules_citations.retry_prompt(final)},
+            ]
+            meta = self._ask_question(retry)
+            repeated = rules_citations.check_answer(meta.content, self._last_rules_sources)
+            if repeated.confirmed:
+                self._last_citations = rules_citations.CitationsCheck(
+                    violations=check.violations, retried=True
+                )
+                return meta
+            final = repeated.violations
+        self._last_citations = rules_citations.CitationsCheck(
+            violations=check.violations, retried=True, replaced=True, final_violations=final
+        )
+        return AnswerMeta(
+            content=rules_citations.disclaimer_text(),
+            model=meta.model,
+            elapsed_seconds=meta.elapsed_seconds,
+            prompt_tokens=meta.prompt_tokens,
+            completion_tokens=meta.completion_tokens,
+            total_tokens=meta.total_tokens,
+            cost_usd=meta.cost_usd,
+            finish_reason=meta.finish_reason,
+        )
 
     def _ask_question(self, messages: List[Dict[str, str]]) -> AnswerMeta:
         """Запрос вопроса с настройками сессии; расход учтён, метрики — в `last_result`."""
@@ -1382,6 +1476,13 @@ class TabletopAgent:
             messages.append(tool_result)
         if self._rules_context is not None:
             messages.append({"role": "system", "content": self._rules_context})
+            # Инструкция цитат — сразу после контекста RAG и только со свободным форматом:
+            # форматы со своим контрактом цитат не требуют, но источники им всё равно печатает
+            # терминальный слой.
+            if self._citations_enabled():
+                messages.append(
+                    {"role": "system", "content": rules_citations.citations_message()}
+                )
         messages.extend(self._view_turns(skip))
         messages.append({"role": "user", "content": user_prompt})
         return messages
