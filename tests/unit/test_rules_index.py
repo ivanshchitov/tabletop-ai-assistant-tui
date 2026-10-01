@@ -121,6 +121,22 @@ def test_structural_parser_does_not_treat_body_words_as_headings():
     ]
 
 
+def test_context_message_names_file_section_and_chunk_id():
+    result = rules_index.SearchResult(
+        "catan.pdf", "CATAN", "Building", "catan.pdf:structural:2",
+        "A road costs one brick and one lumber.", 0.8, "structural",
+    )
+
+    message = rules_index.context_message([result])
+
+    assert "[catan.pdf | CATAN; Building; catan.pdf:structural:2]" in message
+    assert "A road costs one brick and one lumber." in message
+
+
+def test_context_message_of_empty_selection_is_none():
+    assert rules_index.context_message([]) is None
+
+
 def test_index_has_metadata_columns(tmp_path, monkeypatch):
     document = tmp_path / "rules.pdf"
     document.write_bytes(b"fixture")

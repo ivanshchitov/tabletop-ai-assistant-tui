@@ -379,7 +379,8 @@ def context_message(results: Iterable[SearchResult]) -> Optional[str]:
     if not matches:
         return None
     blocks = [
-        "[{title}; {section}; {chunk_id}]\n{text}".format(
+        "[{source} | {title}; {section}; {chunk_id}]\n{text}".format(
+            source=result.source,
             title=result.title,
             section=result.section,
             chunk_id=result.chunk_id,
