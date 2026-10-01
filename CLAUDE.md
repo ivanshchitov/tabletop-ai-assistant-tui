@@ -94,7 +94,7 @@ openspec archive <change-id> --yes        # non-interactive: without --yes the C
   `history-persistence`, `terminal-ui`, `settings-screen`, `configuration`, `context-strategies`,
   `memory-model`, `user-profile`, `task-state`, `agent-invariants`, `test-infrastructure`,
   `model-selection`, `mcp-integration`, `scheduled-jobs`, `tool-pipeline`,
-  `rules-document-index`, `rules-retrieval`.
+  `rules-document-index`, `rules-retrieval`, `rag-citations`.
   It records deliberate decisions worth knowing before touching related code: the JSON format's
   refusal reply is a machine-readable `{"error": ...}` object rather than the verbatim refusal
   phrase used by free/compact (not a bug to fix), and `AnswerSettings` is session-only by design —
@@ -180,7 +180,7 @@ parents up (`Path(__file__).resolve().parent.parent`) rather than one — it has
 entry point (the schedule's background runner, see the scheduler block) and repeats the same
 `os.execv` trick for the same reason.
 
-**Local rules retrieval (`core/rules_index.py`, `core/rules_retrieval.py`, `/rules`):** the index
+**Local rules retrieval (`core/rules_index.py`, `core/rules_retrieval.py`, `core/rules_citations.py`, `/rules`):** the index
 is built only by `/rules index`; startup never rebuilds it. `TabletopAgent.rag_enabled` defaults
 to `True`; `/rules mode off|on` disables/enables the whole retrieval path without changing the
 index or history. Off and missing-index paths make no auxiliary model requests. Every question
@@ -210,6 +210,28 @@ clears stale `last_rules_sources` and replaces the retrieval report before doing
   protocol is `docs/rag-reranking-questions.md`: same model/settings, `/clear` before every question,
   CATAN/Ticket to Ride plus absent-from-corpus Azul. Read actual passed text to evaluate relevance,
   context support and factual correctness independently; model scores are not quality proof.
+- Day 24 adds mandatory sources and citations (`add-rag-citations`). The fragment header and
+  `context_message` now carry `source` as well as title/section/chunk_id, and the TUI's
+  `Источники правил:` line prints `title — section (chunk_id) — source`.
+  - With non-empty RAG sources **and the free format**, the request gets `rules_citations`
+    instruction as an extra system message and the answer is checked client-side by
+    `rules_citations.check_answer`: the answer must name a delivered `chunk_id` or file and quote a
+    literal fragment (≥ `config.CITATION_MIN_CHARS` = 20 chars after whitespace/case normalization)
+    of a delivered chunk. A violation costs one retry (`config.CITATION_RETRIES`), then the answer
+    is **replaced** by `rules_citations.disclaimer_text()`; only what the user saw reaches the log
+    and `history.json`. `last_citations` is the snapshot. JSON keeps its machine-readable contract
+    and compact its card STRICT — neither gets the citation instruction (deliberate decision:
+    those formats' own contracts would otherwise contradict the required blocks).
+  - The "не знаю" gate: in `enhanced` a `no_matches` status (candidates found, all below threshold)
+    short-circuits `ask()` to the fixed disclaimer with **no** model request, no ledger entry and
+    no `⏱` line in the TUI (`CitationsCheck(no_context=True)`). `baseline`, RAG off, missing index
+    and `no_candidates` keep the old behavior.
+  - `docs/rag-citations-questions.md` is the day-24 control set: 10 questions (CATAN/Ticket to
+    Ride/D&D SRD plus absent-from-corpus Azul), each checked for sources, verbatim citations and
+    meaning; the `no_matches`/gate cases are questions 6 (truncated fragment) and 10 (Azul). The
+    known day-23 retrieval limitation holds: the reranker cannot recover a fragment the first
+    stage missed, so Ticket to Ride paraphrases that do not surface the `Train Car Cards` chunk
+    honestly fall to the "не знаю" gate.
 
 **Environment switches (`core/config.py`):** `OPENCODE_API_URL`, `TABLETOP_HISTORY_FILE`,
 `TABLETOP_MEMORY_FILE`, `TABLETOP_PROFILE_FILE`, `TABLETOP_TASK_FILE`, `TABLETOP_TASKS_DIR`,
@@ -1129,10 +1151,18 @@ saved: `dialogues` stays a flat list across branches.
   score boundaries, threshold selection and stable top-K. Rules cases in `test_tabletop_agent.py`
   cover both modes, auxiliary ledger spend, failures without raw fallback, unchanged source text,
   stale-source clearing and report lifetime; command/error cases are in `test_tui_app.py`.
+- `tests/unit/test_rules_citations.py` covers `rules_citations.check_answer`: verbatim citation
+  confirmed, case/whitespace normalization, too-short and undelivered-text citations rejected,
+  a missing source identifier rejected, an empty answer/source list handled as a violation rather
+  than a crash, and the retry/disclaimer helpers. Agent cases in `test_tabletop_agent.py` cover the
+  citation instruction, the retry→replacement path, `last_citations`, the free-format-only rule and
+  the `no_matches` "не знаю" gate without a model request; TUI journal lines live in `test_tui_app.py`.
 - `tests/e2e/test_rules_index.py` runs the real app in a PTY with a temporary PDF index and HTTP
   stub. It checks RAG off/on, actual baseline/enhanced request contexts, candidate exclusion,
   threshold/top-K dispositions, atomic invalid tuning, immutable trace after tuning, literal Rich
-  markup in external data, and original-question/final-answer-only history.
+  markup in external data, original-question/final-answer-only history, and the day-24 paths: a
+  citation-bearing answer accepted as is, an unconfirmed answer retried then replaced with the
+  disclaimer, and the `no_matches` "не знаю" gate with the trace showing no sources.
 - `tests/unit/test_keyboard.py` — the only unit file that needs a pty (see above).
 - `tests/unit/test_mcp_client.py` and `tests/fake_mcp_server.py` — the MCP client against a local
   stdio server run by the test interpreter: handshake, tool list with input schemas, an empty list

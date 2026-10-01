@@ -29,9 +29,9 @@
 
 ## 6. Контрольный прогон и документация
 
-- [ ] 6.1 Создать `docs/rag-citations-questions.md`: 10 вопросов (CATAN, Ticket to Ride, D&D SRD, Azul вне корпуса) с ожидаемыми `source`/`section`/`chunk_id`, ожидаемыми цитатами и колонками проверки (источники, цитаты, смысловая сверка)
-- [ ] 6.2 Прогнать 10 вопросов на живой модели с готовым индексом, заполнить таблицу фактическими результатами (включая режим «не знаю» на Azul)
-- [ ] 6.3 Сверить `CLAUDE.md` и `README.md` с реальностью: новый модуль, asset, capability `rag-citations`, `docs/rag-citations-questions.md`, поведение `no_matches`
+- [x] 6.1 Создать `docs/rag-citations-questions.md`: 10 вопросов (CATAN, Ticket to Ride, D&D SRD, Azul вне корпуса) с ожидаемыми `source`/`section`/`chunk_id`, ожидаемыми цитатами и колонками проверки (источники, цитаты, смысловая сверка)
+- [x] 6.2 Прогнать 10 вопросов на живой модели с готовым индексом, заполнить таблицу фактическими результатами (включая режим «не знаю» на Azul)
+- [x] 6.3 Сверить `CLAUDE.md` и `README.md` с реальностью: новый модуль, asset, capability `rag-citations`, `docs/rag-citations-questions.md`, поведение `no_matches`
 
 ## 7. Закрытие изменения
 
