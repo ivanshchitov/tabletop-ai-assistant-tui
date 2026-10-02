@@ -337,15 +337,6 @@ def _render(line, cols: int) -> str:
     return "".join(line[x].data for x in range(cols)).rstrip()
 
 
-# Порт stub-сервера выбирается операционной системой заново на каждый прогон и попадает на
-# экран внутри текста ошибки — в снапшоте он заменяется плейсхолдером.
-_VOLATILE_PATTERNS = [
-    (re.compile(r"127\.0\.0\.1:\d+"), "127.0.0.1:PORT"),
-    # Время ответа стаба зависит от машины (0.00с локально, 0.01с в CI).
-    (re.compile(r"⏱ \d+\.\d+с"), "⏱ 0.00с"),
-]
-
-
 _MARKDOWN_CHARS = re.compile(r"[*_`#>]")
 
 
@@ -357,18 +348,6 @@ def plain_tail(markdown_text: str, words: int = 5) -> str:
     """
     cleaned = _MARKDOWN_CHARS.sub("", markdown_text)
     return " ".join(cleaned.split()[-words:])
-
-
-def normalize_screen(text: str) -> str:
-    """Готовит экран к сравнению со снапшотом: гасит изменчивые фрагменты, убирает пустые края."""
-    for pattern, replacement in _VOLATILE_PATTERNS:
-        text = pattern.sub(replacement, text)
-    lines = [line.rstrip() for line in text.split("\n")]
-    while lines and not lines[0]:
-        lines.pop(0)
-    while lines and not lines[-1]:
-        lines.pop()
-    return "\n".join(lines)
 
 
 def wait_for_answers(
@@ -387,21 +366,6 @@ def wait_for_answers(
         time.sleep(0.02)
     raise AssertionError(
         f"Не дождались {number} обменов за {timeout} с.\n--- экран ---\n{session.scrollback()}"
-    )
-
-
-def assert_snapshot(actual: str, path: Path, update: bool) -> None:
-    """Сравнивает экран с сохранённым снапшотом (или обновляет его по флагу)."""
-    actual = normalize_screen(actual)
-    if update or not path.exists():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(actual + "\n", encoding="utf-8")
-        return
-    expected = path.read_text(encoding="utf-8").rstrip("\n")
-    assert actual == expected, (
-        f"Экран разошёлся со снапшотом {path.name}. "
-        f"Обновить: pytest --snapshot-update\n"
-        f"--- ожидалось ---\n{expected}\n--- получено ---\n{actual}"
     )
 
 

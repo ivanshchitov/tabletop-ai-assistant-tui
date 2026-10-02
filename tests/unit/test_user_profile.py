@@ -5,7 +5,6 @@ import json
 
 from core import config
 from core.user_profile import (
-    FIELD_GENRES,
     FIELD_NAME,
     FIELD_STYLE,
     FIELDS,

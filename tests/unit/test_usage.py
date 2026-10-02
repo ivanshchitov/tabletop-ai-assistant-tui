@@ -15,7 +15,6 @@ def test_estimate_cost_unknown_model_returns_none():
 
 """--- День 8: подсчёт токенов сессии и истории ---"""
 
-import math
 from types import SimpleNamespace
 
 from core.usage import SessionLedger, estimate_tokens, sum_usage

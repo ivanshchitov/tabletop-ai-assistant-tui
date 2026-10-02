@@ -9,8 +9,6 @@ import pytest
 from .harness import AppSession, FAKE_MCP_SERVER
 from .stub_api import StubAPI
 
-SNAPSHOT_DIR = Path(__file__).parent / "snapshots"
-
 
 @pytest.fixture
 def tui_display(request):

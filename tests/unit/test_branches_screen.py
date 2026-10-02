@@ -1,7 +1,7 @@
 """Редьюсер панели веток диалога для /branches."""
 
 from ui import branches_screen, keyboard
-from ui.branches_screen import BranchesScreenState, initial_state, apply_key
+from ui.branches_screen import initial_state, apply_key
 
 
 BRANCHES = (("ветка 1", 3), ("ветка 2", 1))

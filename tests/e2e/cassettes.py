@@ -12,7 +12,7 @@
 
 import json
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict
 
 CASSETTE_DIR = Path(__file__).parent / "cassettes"
 
@@ -49,6 +49,3 @@ def save(fmt: str, answers: Dict[str, str]) -> None:
         json.dumps(answers, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
 
-
-def available_formats() -> List[str]:
-    return sorted(p.stem for p in CASSETTE_DIR.glob("*.json"))

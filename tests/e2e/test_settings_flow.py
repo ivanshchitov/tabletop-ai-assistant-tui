@@ -21,7 +21,6 @@ from .harness import (
     KEY_LEFT,
     KEY_RIGHT,
     KEY_UP,
-    assert_snapshot,
 )
 from .stub_api import answer
 

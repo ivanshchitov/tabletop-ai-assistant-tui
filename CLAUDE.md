@@ -19,9 +19,8 @@ echo "OPENCODE_API_KEY=sk-ваш_ключ" > .env   # or set OPENCODE_API_KEY di
 
 .venv/bin/pip install -r requirements-dev.txt
 pytest                      # everything except the `network` marker
-pytest tests/unit -q        # fast layer, no subprocesses (~3s)
+pytest tests/unit -q        # fast in-process layer plus a few subprocess tests (~50s)
 pytest tests/e2e -q         # real app in a pty against a stub API (~130s)
-pytest --snapshot-update    # rewrite the e2e screen snapshots after a deliberate layout change
 
 pytest tests/e2e/test_live_api.py -m network -q   # drive the app against the real OpenCode Zen
 
@@ -434,7 +433,7 @@ shape every answer, deliberately kept apart from the memory layers. Deliberate d
 - The status bar shows the active profile's name right after the model, but **only when the profile
   is non-empty**: an empty profile never reaches the request, so a line about it would advertise
   personalization that isn't there — and the layout without a profile stays exactly as before
-  (several screen snapshots depend on it). Profile names and section values are user text, so every
+  (several e2e screen tests depend on it). Profile names and section values are user text, so every
   line that prints them goes through `rich.markup.escape` — a value like `[/dim]` otherwise raises
   `MarkupError` inside `console.print`. The same escaping was applied to the `/memory remember` line,
   which had the same latent crash.
@@ -682,7 +681,7 @@ session. Deliberate decisions baked in:
   from the cursor. Enter applies, Esc cancels with zero API calls.
 - No client-side model validation: the list is fixed so free-form input is impossible, and an
   unknown model surfaces as a regular API error through the existing `APIError` path.
-- The status bar shows `Модель: <имя>` right after "Готов" — several e2e snapshots assert on it.
+- The status bar shows `Модель: <имя>` right after "Готов" — `test_models_flow.py` asserts on it.
 - After every answer `TabletopAITUI._print_usage_meta()` prints a screen-only line with response
   time, token counts and cost (`"неизвестно"` when the model has no entry in `MODEL_PRICING`); the
   auxiliary calls of a strategy record their spend in the ledger without printing. This line is
@@ -745,9 +744,7 @@ baked in:
   fixture pass by default; that override replaces the **whole** registry with one entry, because a
   startup sweep would otherwise launch every real server in every e2e run. Unit tests of the TUI
   need the same guard for the same reason: the autouse `no_mcp_servers` fixture leaves the registry
-  empty unless a test sets it (without it the layer went from ~5s to minutes, hitting the network). The only test that touches the real registry is
-  `tests/e2e/test_mcp_registry.py` under the `network` marker, so a server disappearing from the
-  package registry cannot redden the default suite.
+  empty unless a test sets it (without it the layer went from ~5s to minutes, hitting the network).
 
 **Own MCP server and tool calls (`mcp_server/`, `core/mcp_tools.py`, `MCPClient.call_tool`,
 `/tool`):** the project ships its own MCP server over the public D&D 5e rules API
@@ -804,10 +801,11 @@ own choice (day 17). Deliberate decisions baked in:
   every printed line goes through `rich.markup.escape`.
 - **Tests:** `tests/dnd_api_stub.py` (a local HTTP stub of the external API) backs
   `tests/unit/test_dnd_api.py` and `tests/unit/test_dnd_tools.py`; `tests/unit/test_dnd_server.py`
-  runs the server as a real process through `MCPClient`; `tests/fake_mcp_server.py` gained a third
+  runs the server as a real process through `MCPClient` (the combined tool list, the `isError` mark
+  and the search → summarize → save chain — tool logic itself is covered without a process);
+  `tests/fake_mcp_server.py` gained a third
   tool (`fake_echo`, several parameters) and answers `tools/call`, which is why expectations of its
-  tool list grew by one and the startup-line snapshots went from "2 инструмента" to "3".
-  `tests/e2e/test_dnd_server_live.py` is the `network`-marked contract against the live API.
+  tool list grew by one and the startup summary line went from "2 инструмента" to "3".
 
 **Scheduler and background jobs (`mcp_server/scheduler.py`, `core/schedule_store.py`,
 `tabletop-scheduler.py`, `/schedule`):** the project's own MCP server also works on a schedule —
@@ -844,7 +842,7 @@ deferred and periodic calls of its own tools, with the aggregate the agent annou
   `schedule_run_due` pass records every due job with the *same* `now`, so a bare timestamp would
   swallow that pass's siblings.
 - **Two screen-only lines and one report.** The startup line (`🗓 Планировщик: N заданий, M прогонов`)
-  is printed right after the MCP summary — that is why four screen snapshots grew a line; the
+  is printed right after the MCP summary — that is why the startup screen assertions grew a line; the
   announcement line goes after the `⏱` metrics of an answer. Neither reaches `history.json`, same
   rule as the compression, facts and tool lines. During a `/task` run there are no agent turns, so
   the announcement defers by itself — no guard needed.
@@ -1173,8 +1171,9 @@ saved: `dialogues` stays a flat list across branches.
 - `tests/unit/test_dnd_api.py`, `test_dnd_tools.py`, `test_dnd_server.py` and `tests/dnd_api_stub.py`
   — the project's own MCP server: the HTTP layer against a local stub of the external API, the
   reference tools plus `dnd_digest` and the `details` search with their schemas and argument
-  validation, and the server itself as a real process (its scheduler tools, the `isError` mark and
-  the search → summarize → save chain included). `tests/unit/test_pipeline_tools.py` covers the
+  validation, and the server itself as a real process (the combined tool list, the `isError` mark
+  and the search → summarize → save chain through the protocol — tool logic itself is covered
+  without a process). `tests/unit/test_pipeline_tools.py` covers the
   summary and save tools (name fencing, no overwrite).
   `tests/unit/test_mcp_tools.py` covers the tool catalog, the choice and chain parsing, `$N`
   references and the result messages.
@@ -1192,8 +1191,6 @@ saved: `dialogues` stays a flat list across branches.
   for the same question).
   `_write_all` re-writes what a single `os.write` couldn't fit into the terminal buffer —
   without it a >2000-character question loses its tail along with the trailing Enter.
-- `tests/e2e/snapshots/` — whole-screen snapshots. The stub server's port is normalized away
-  (`_VOLATILE_PATTERNS` in `harness.py`) because it changes every run and appears inside error text.
 - `tests/e2e/test_live_api.py` — the same app driven against the **real** OpenCode Zen
   (`live_app` fixture: no stub, no `OPENCODE_API_URL`, key read from `.env` by the app itself;
   skips when there is no key). It is marked `network`, so it never runs by default. These tests
@@ -1235,8 +1232,7 @@ saved: `dialogues` stays a flat list across branches.
   server: the summary line before the prompt, the report with server, protocol and tools,
   `/mcp refresh` re-walking the registry, `/mcp` listed in the `/commands` panel, `/usage`
   confirming zero model requests, an unavailable server counted in the summary and printing its
-  reason with the session continuing, and the real registry server never being started. `tests/e2e/test_mcp_registry.py` is the opposite side: under
-  the `network` marker it connects to every registry entry for real.
+  reason with the session continuing, and the real registry server never being started.
 - `tests/e2e/test_profile.py` — the setup dialogue in a real pty: five questions answered line by
   line, the profile landing in the temp `profile.json`, the next question carrying the profile
   message, `/clear` and a restart keeping it, `Ctrl+C` cancelling without writing, and the repo's

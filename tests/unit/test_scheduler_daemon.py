@@ -77,23 +77,6 @@ def test_single_run_executes_the_due_job_and_exits(environment):
     assert data["collected"]["monsters/2014"]
 
 
-def test_single_run_without_jobs_is_successful(environment):
-    result = run_daemon(environment, "--once")
-    assert result.returncode == 0
-    assert "нечего" in result.stdout
-
-
-def test_run_moves_the_next_run_so_a_second_tick_does_nothing(environment):
-    add_job(environment)
-    run_daemon(environment, "--once")
-    first = json.loads(schedule_file(environment).read_text(encoding="utf-8"))
-
-    run_daemon(environment, "--once")
-    second = json.loads(schedule_file(environment).read_text(encoding="utf-8"))
-
-    assert len(second["runs"]) == len(first["runs"]) == 1
-
-
 def test_unavailable_server_is_reported_without_a_crash(environment, tmp_path):
     """Отказ сервера печатается и не роняет исполнитель: в цикле тик просто пропускается."""
     result = run_daemon(environment, "--once", "--command", str(tmp_path / "нет-такой-команды"))

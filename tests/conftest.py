@@ -109,12 +109,6 @@ def skip_on_windows():
 
 def pytest_addoption(parser):
     parser.addoption(
-        "--snapshot-update",
-        action="store_true",
-        default=False,
-        help="перезаписать снапшоты экранов e2e вместо сравнения с ними",
-    )
-    parser.addoption(
         "--show-tui",
         action="store",
         default="off",
@@ -133,7 +127,3 @@ def pytest_addoption(parser):
         help="перезаписать кассеты ответами живого OpenCode Zen (нужен ключ, тратит квоту)",
     )
 
-
-@pytest.fixture
-def snapshot_update(request) -> bool:
-    return request.config.getoption("--snapshot-update")

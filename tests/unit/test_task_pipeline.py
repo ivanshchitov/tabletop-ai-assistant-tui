@@ -3,7 +3,7 @@
 import json
 from types import SimpleNamespace
 
-from core import config, task_pipeline, task_state
+from core import config, task_state
 from core.api_client import APIError, AnswerMeta
 from core.task_pipeline import (
     PHASE_EXECUTE,
