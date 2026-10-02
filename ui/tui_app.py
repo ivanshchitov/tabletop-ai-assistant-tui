@@ -730,7 +730,9 @@ class TabletopAITUI:
 
     def _handle_question(self, question: str) -> None:
         self.last_error = None
-        self.console.print(f"[bold blue]Вы:[/bold blue] {question}")
+        # Реплика пользователя — его текст: скобочные последовательности печатаются как есть
+        # (иначе вопрос со «[/dim]» роняет отрисовку, а не только статус-бар).
+        self.console.print(f"[bold blue]Вы:[/bold blue] {escape(question)}")
 
         with self.console.status("[bold yellow]● Отправка...[/bold yellow]", spinner="dots") as status:
             def report_phase(phase: "RequestPhase") -> None:
@@ -905,7 +907,7 @@ class TabletopAITUI:
         argument = parts[2].strip() if len(parts) > 2 else ""
         if subcommand == "goal" and argument:
             self.agent.remember_goal(argument)
-            self.console.print(f"[dim]Рабочая память: цель — {argument}[/dim]")
+            self.console.print(f"[dim]Рабочая память: цель — {escape(argument)}[/dim]")
             return
         if subcommand == "remember" and argument:
             record = self.agent.remember(argument)
@@ -2053,8 +2055,15 @@ class TabletopAITUI:
                 f"«{escape(task.queue[task.active_number - 1].goal)}» — "
                 f"{task.active_stage} {escape(task.current_step)}{place}  |  "
             )
+        # Цель диалога из рабочей памяти — та же необязательная часть, что профиль и задача:
+        # пустая рабочая память оставляет раскладку статус-бара прежней.
+        goal_part = ""
+        for record in self.agent.memory_report().working:
+            if record.key == memory_layers.CATEGORY_GOAL:
+                goal_part = f"Цель: «{escape(record.value)}»  |  "
+                break
         return (
-            f"Статус: Готов ✅  |  Модель: {self.model}  |  {profile_part}{task_part}"
+            f"Статус: Готов ✅  |  Модель: {self.model}  |  {profile_part}{task_part}{goal_part}"
             f"Формат: {FORMAT_LABELS[self.settings.format]}  |  "
             f"Стратегия: {STRATEGY_LABELS[self.settings.context_strategy]}  |  "
             f"Объём: {self.settings.max_words} слов  |  Лимит списка: {self.settings.list_limit}  |  "

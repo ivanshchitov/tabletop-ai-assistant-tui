@@ -128,3 +128,17 @@ def test_commands_panel_lists_memory_command(app, stub):
     session.wait_until_gone("/memory")
     session.send_line("/exit")
     session.wait_exit()
+
+
+def test_dialogue_goal_is_visible_in_the_status_bar(app, stub):
+    """Цель диалога видна в статус-баре после каждого шага и уходит вместе с рабочим слоем."""
+    stub.always(answer("Ответ stub-модели."))
+    with app() as session:
+        session.ask("Хочу разобрать правила CATAN", "Ответ stub-модели.")
+        session.wait_on_screen("Цель: «Хочу разобрать правила CATAN»")
+        session.send_line("/clear")
+        session.wait_for("долговременная память и профиль пользователя сохранены")
+        # После `/clear` рабочий слой пуст: в последнем напечатанном статус-баре строки цели нет
+        # (берём последний, а не весь журнал: до `/clear` цель в статус-баре была видна).
+        status_bars = session.scrollback().split("Статус: Готов")
+        assert "Цель:" not in status_bars[-1]

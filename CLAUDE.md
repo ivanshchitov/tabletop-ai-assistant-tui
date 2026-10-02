@@ -397,6 +397,13 @@ between sessions). Deliberate decisions baked in:
   files the text as a note under its own sequential key, so notes don't evict each other.
 - Journal lines (routing decision after an answer, operation results after `/memory`) are
   screen-only, never written to `history.json` — the same rule as the compression and facts lines.
+- The status bar shows the working layer's goal (`Цель: «…»`) next to the task line, but **only while
+  a goal is recorded** — the same rule as the profile and the task queue, so a session without one
+  keeps the old layout. It reads the goal from `memory_report()` (never `_working`), so the isolation
+  boundary above is unchanged; constraints stay in `/memory` because the line is one string. The
+  value is user text and goes through `rich.markup.escape`, as does the echoed question itself —
+  a question containing `[/dim]` used to raise `MarkupError` inside `console.print` (the third
+  instance of that defect class, after the profile name and `/memory remember`).
 
 **User profile (`core/user_profile.py`, `/profile`):** personalization — declared preferences that
 shape every answer, deliberately kept apart from the memory layers. Deliberate decisions baked in:

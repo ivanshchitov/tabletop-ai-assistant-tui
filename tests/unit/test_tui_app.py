@@ -1754,6 +1754,57 @@ def test_status_bar_hides_the_task_without_a_queue(make_app, recording_console):
     assert not recording_console.contains("Задача:")
 
 
+def test_status_bar_shows_the_dialogue_goal(make_app, recording_console):
+    """Цель, зафиксированная репликой пользователя, видна в статус-баре после каждого шага."""
+    app = make_app(
+        ["хочу разобрать CATAN", "Кто строит первую дорогу?", "/exit"],
+        FakeClient(["Ответ"]),
+    )
+    app.run()
+
+    assert recording_console.contains("Цель: «хочу разобрать CATAN»")
+
+
+def test_status_bar_hides_the_goal_without_one(make_app, recording_console):
+    app = make_app(["/exit"], FakeClient(["Ответ"]))
+    app.run()
+
+    assert not recording_console.contains("Цель:")
+
+
+def test_status_bar_shows_the_goal_replaced_by_a_new_one(make_app, recording_console):
+    app = make_app(
+        ["хочу подобрать игру", "хочу разобрать правила D&D", "/exit"], FakeClient(["Ответ"])
+    )
+    app.run()
+
+    assert app.agent.memory_report().working[0].value == "хочу разобрать правила D&D"
+
+
+def test_status_bar_goal_survives_markup_in_its_text(make_app, recording_console):
+    """Цель — текст пользователя: скобочные последовательности печатаются как есть."""
+    make_app(["хочу [/dim] разобрать", "/exit"], FakeClient(["Ответ"])).run()
+
+    assert recording_console.contains("Цель: «хочу [/dim] разобрать»")
+
+
+def test_question_with_markup_is_echoed_as_text(make_app, recording_console):
+    """Реплика пользователя печатается как текст: «[/dim]» в вопросе не роняет отрисовку."""
+    make_app(["хочу [/dim] разобрать", "/exit"], FakeClient(["Ответ"])).run()
+
+    assert recording_console.contains("Вы: хочу [/dim] разобрать")
+
+
+def test_status_bar_drops_the_goal_after_clear(make_app, recording_console):
+    """`/clear` очищает рабочий слой — строка цели уходит из статус-бара."""
+    app = make_app(["хочу подобрать игру", "/clear", "/exit"], FakeClient(["Ответ"]))
+    app.run()
+
+    assert app.agent.memory_report().working == ()
+    # Проверяем текущую строку, а не весь журнал: до `/clear` цель в статус-баре была видна.
+    assert "Цель:" not in app._status_bar_line()
+
+
 def test_task_run_drives_the_whole_queue_to_done(make_app, recording_console, monkeypatch):
     client = FakeClient([PLAN_JSON_TUI, "Раздел 1", "Раздел 2", "Раздел 3", OK_JSON_TUI])
     app = _task_app(
