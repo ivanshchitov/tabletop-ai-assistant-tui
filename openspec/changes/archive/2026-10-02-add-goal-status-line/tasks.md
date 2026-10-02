@@ -10,10 +10,10 @@
 
 ## 3. Документация
 
-- [ ] 3.1 Сверить `CLAUDE.md` и `README.md` с реальностью: строка цели в описании статус-бара, экранирование реплики пользователя; списки команд/модулей/переменных окружения без изменений
+- [x] 3.1 Сверить `CLAUDE.md` и `README.md` с реальностью: строка цели в описании статус-бара, экранирование реплики пользователя; списки команд/модулей/переменных окружения без изменений
 
 ## 4. Закрытие изменения
 
-- [ ] 4.1 Полный `pytest -q` (с изоляцией `TABLETOP_RULES_INDEX_FILE`) зелёный; `openspec validate add-goal-status-line --strict` зелёный
-- [ ] 4.2 `openspec archive add-goal-status-line --yes`; `openspec validate --all --strict` зелёный
-- [ ] 4.3 Ветка влита в `main` через `git merge --ff-only`, тег `v0.25` запушен
+- [x] 4.1 Полный `pytest -q` (с изоляцией `TABLETOP_RULES_INDEX_FILE`) зелёный (1362 passed); `openspec validate add-goal-status-line --strict` зелёный
+- [x] 4.2 `openspec archive add-goal-status-line --yes`; `openspec validate --all --strict` зелёный
+- [x] 4.3 Ветка влита в `main` через `git merge --ff-only`, тег `v0.25` запушен
