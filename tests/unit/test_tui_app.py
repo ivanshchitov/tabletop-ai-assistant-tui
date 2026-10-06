@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import List, Optional
 
 import pytest
+import responses
 
 from core import config, context_compressor, context_strategies, rules_citations, rules_index, rules_retrieval
 from core.answer_settings import AnswerFormat, AnswerSettings, ContextStrategy
@@ -674,6 +675,50 @@ def test_invalid_rules_mode_preserves_disabled_retrieval(make_app):
 
     assert app.agent.rag_enabled is False
     assert client.calls == []
+
+
+@responses.activate
+def test_local_rules_commands_use_embeddings_and_show_embedding_error(
+    make_app, monkeypatch, tmp_path, recording_console,
+):
+    monkeypatch.setattr(config, "LOCAL_EMBEDDING_MODELS", ["Qwen/Qwen3-Embedding-0.6B-GGUF:Q8_0"])
+    documents = tmp_path / "rules"
+    documents.mkdir()
+    (documents / "catan.pdf").write_bytes(b"fixture")
+    monkeypatch.setattr(config, "RULES_DOCUMENTS_DIR", documents)
+    monkeypatch.setattr(config, "RULES_INDEX_FILE", tmp_path / "rules.sqlite3")
+    monkeypatch.setattr(rules_index, "read_pdf", lambda path: ("CATAN", [
+        rules_index.PageText(1, "Building\nA road costs one brick and one lumber."),
+    ]))
+    responses.post("http://127.0.0.1:9999/v1/embeddings", json={
+        "data": [{"index": 0, "embedding": [1, 0]}],
+    })
+    client = FakeClient()
+    app = make_app([], client)
+    app.agent.model = config.LOCAL_MODELS[0]
+    app._handle_rules("/rules index")
+    assert len(responses.calls) == 2
+    app._handle_rules("/rules compare стоимость дороги")
+    assert len(responses.calls) == 4
+    assert recording_console.contains("По разделам")
+    previous = (tmp_path / "rules.sqlite3").read_bytes()
+    responses.replace(responses.POST, "http://127.0.0.1:9999/v1/embeddings", status=503)
+    app._handle_rules("/rules compare стоимость дороги")
+    assert recording_console.contains("embedding")
+    app._handle_rules("/rules index")
+    assert recording_console.contains("Индекс не создан")
+    assert (tmp_path / "rules.sqlite3").read_bytes() == previous
+    assert client.calls == []
+
+
+def test_rules_trace_displays_embedding_failure(make_app, recording_console):
+    app = make_app([])
+    app.agent._last_rules_report = rules_retrieval.RetrievalReport(
+        "question", "query", rules_retrieval.RetrievalSettings(), "embedding_failed", error="offline",
+    )
+    app._handle_rules("/rules trace")
+    assert recording_console.contains("embedding")
+    assert recording_console.contains("offline")
 
 
 def test_rules_retrieval_commands_change_only_session_settings(make_app, history):

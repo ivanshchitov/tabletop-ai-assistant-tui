@@ -6,6 +6,105 @@ import pytest
 from core import rules_index
 
 
+class SemanticEmbeddings:
+    model = "semantic-test"
+
+    def __init__(self):
+        self.documents = []
+        self.queries = []
+
+    def embed(self, text):
+        self.documents.append(text)
+        return [1.0, 0.0] if "brick" in text else [0.0, 1.0]
+
+    def embed_query(self, query):
+        self.queries.append(query)
+        return [1.0, 0.0]
+
+
+@pytest.fixture
+def old_hash_index(tmp_path, monkeypatch):
+    (tmp_path / "rules.pdf").write_bytes(b"fixture")
+    monkeypatch.setattr(rules_index, "read_pdf", lambda _path: ("Rules", [
+        rules_index.PageText(1, "Building\nA road costs one brick and one lumber."),
+        rules_index.PageText(2, "Turn\nDraw a card."),
+    ]))
+    database = tmp_path / "index.sqlite3"
+    rules_index.build_index(tmp_path, database)
+    return database
+
+
+def test_local_search_migrates_old_index_and_reuses_vectors(old_hash_index):
+    provider = SemanticEmbeddings()
+    original = rules_index.search(old_hash_index, "Draw a card", minimum_score=-1)
+    results = rules_index.search(old_hash_index, "construction materials", embeddings=provider)
+    assert results[0].section == "Building"
+    assert results[0].score == pytest.approx(1)
+    assert len(provider.documents) == 3  # Both strategies, once.
+    rules_index.search(old_hash_index, "another question", embeddings=provider)
+    assert len(provider.documents) == 3
+    assert provider.queries == ["construction materials", "another question"]
+    assert rules_index.search(old_hash_index, "Draw a card", minimum_score=-1) == original
+    provider.model = "another-model"
+    rules_index.compare(old_hash_index, "materials", embeddings=provider)
+    assert len(provider.documents) == 6
+
+
+def test_failed_local_vector_preparation_is_atomic(old_hash_index):
+    class Broken(SemanticEmbeddings):
+        def embed(self, text):
+            if self.documents:
+                raise rules_index.RulesIndexError("offline")
+            return super().embed(text)
+
+    with pytest.raises(rules_index.RulesIndexError, match="offline"):
+        rules_index.search(old_hash_index, "cost", embeddings=Broken())
+    provider = SemanticEmbeddings()
+    rules_index.search(old_hash_index, "cost", embeddings=provider)
+    assert len(provider.documents) == 3
+
+
+def test_local_rebuild_failure_keeps_previous_index(old_hash_index):
+    previous = old_hash_index.read_bytes()
+    class Broken(SemanticEmbeddings):
+        def embed(self, text):
+            raise rules_index.RulesIndexError("offline")
+
+    with pytest.raises(rules_index.RulesIndexError, match="offline"):
+        rules_index.build_index(old_hash_index.parent, old_hash_index, embeddings=Broken())
+    assert old_hash_index.read_bytes() == previous
+
+
+def test_local_rebuild_prepares_vectors_before_search(old_hash_index):
+    provider = SemanticEmbeddings()
+    rules_index.build_index(old_hash_index.parent, old_hash_index, embeddings=provider)
+    assert len(provider.documents) == 3
+    assert rules_index.search(old_hash_index, "materials", embeddings=provider)[0].section == "Building"
+    assert len(provider.documents) == 3
+
+
+def test_local_search_rejects_query_dimension_mismatch(old_hash_index):
+    provider = SemanticEmbeddings()
+    provider.embed_query = lambda query: [1, 0, 0]
+    with pytest.raises(rules_index.RulesIndexError, match="размерност"):
+        rules_index.search(old_hash_index, "cost", embeddings=provider)
+
+
+def test_local_search_rejects_document_dimension_mismatch(old_hash_index):
+    class Uneven(SemanticEmbeddings):
+        def embed(self, text):
+            return super().embed(text) if not self.documents else [1, 0, 0]
+
+    with pytest.raises(rules_index.RulesIndexError, match="размерност"):
+        rules_index.search(old_hash_index, "cost", embeddings=Uneven())
+
+
+def test_missing_index_makes_no_embedding_requests(tmp_path):
+    provider = SemanticEmbeddings()
+    assert rules_index.search(tmp_path / "missing", "cost", embeddings=provider) == []
+    assert not provider.documents and not provider.queries
+
+
 def test_fixed_chunking_overlaps_and_keeps_all_text():
     text = "0123456789" * 5
 

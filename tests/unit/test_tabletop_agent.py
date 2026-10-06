@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import List, Optional
 
 import pytest
+import responses
 from core import config, context_compressor, context_strategies, prompts, tabletop_agent
 from core import context_strategies as strategies
 from core.usage import estimate_tokens
@@ -213,6 +214,75 @@ def small_rules_corpus(tmp_path, monkeypatch):
     database = rules_index.index_path()
     rules_index.build_index(documents, database)
     return database
+
+
+@responses.activate
+@pytest.mark.parametrize("mode", ["baseline", "enhanced"])
+def test_local_rag_uses_embedding_model_and_cloud_switch_uses_hash(small_rules_corpus, mode, monkeypatch):
+    monkeypatch.setattr(config, "LOCAL_EMBEDDING_MODELS", ["Qwen/Qwen3-Embedding-0.6B-GGUF:Q8_0"])
+    payloads = []
+    def reply(request):
+        payload = json.loads(request.body)
+        payloads.append(payload)
+        vector = [1, 0] if "brick" in payload["input"] or "Query:" in payload["input"] else [0, 1]
+        return 200, {}, json.dumps({"data": [{"index": 0, "embedding": vector}]})
+
+    responses.add_callback(responses.POST, "http://127.0.0.1:9999/v1/embeddings", callback=reply)
+    ratings = json.dumps({"results": [
+        {"id": i, "score": 0.9 if i == 1 else 0.1, "reason": "relevance"} for i in range(1, 4)
+    ]})
+    answers = [json.dumps({"query": "construction materials"}), ratings, '{"answer":"brick"}'] if mode == "enhanced" else ['{"answer":"brick"}']
+    agent, client = make_agent(answers=answers)
+    retrieval_only(agent)
+    agent.model = config.LOCAL_MODELS[0]
+    agent.config.retrieval = rules_retrieval.RetrievalSettings(mode=mode, after=1)
+    assert payloads == []  # Constructing the agent does not request embeddings.
+    agent.ask("Сколько стоит дорога?")
+    assert agent.last_rules_sources[0].source == "catan.pdf"
+    assert agent.rules_report().status == "ok"
+    assert len(payloads) == 7  # Six chunks (both strategies) and one query.
+    assert {p["model"] for p in payloads} == {"Qwen/Qwen3-Embedding-0.6B-GGUF:Q8_0"}
+    query = next(p["input"] for p in payloads if "Query:" in p["input"])
+    assert query.endswith("construction materials" if mode == "enhanced" else "Сколько стоит дорога?")
+    assert "one brick" in " ".join(m["content"] for m in client.calls[-1]["messages"])
+
+    agent.model = config.DEFAULT_MODEL
+    agent.config.retrieval = rules_retrieval.RetrievalSettings(mode="baseline")
+    agent.ask("CATAN road costs brick")
+    assert len(payloads) == 7
+    assert agent.rules_report().status == "ok"
+
+
+@responses.activate
+def test_local_embedding_failure_is_reported_without_hash_fallback(small_rules_corpus, monkeypatch):
+    monkeypatch.setattr(config, "LOCAL_EMBEDDING_MODELS", ["Qwen/Qwen3-Embedding-0.6B-GGUF:Q8_0"])
+    responses.post("http://127.0.0.1:9999/v1/embeddings", status=503)
+    agent, client = make_agent()
+    retrieval_only(agent)
+    agent.model = config.LOCAL_MODELS[0]
+    agent.config.retrieval = rules_retrieval.RetrievalSettings(mode="baseline")
+    agent.ask("CATAN road costs brick")
+    assert agent.rules_report().status == "embedding_failed"
+    assert "embedding" in agent.rules_report().error
+    assert agent.last_rules_sources == ()
+    assert len(client.calls) == 1
+    assert not any("one brick" in m["content"] for m in client.calls[0]["messages"])
+
+
+@responses.activate
+@pytest.mark.parametrize("disabled", ["off", "missing"])
+def test_local_rag_skips_embeddings_when_disabled_or_missing(small_rules_corpus, disabled, monkeypatch):
+    monkeypatch.setattr(config, "LOCAL_EMBEDDING_MODELS", [])
+    agent, _client = make_agent()
+    retrieval_only(agent)
+    agent.model = config.LOCAL_MODELS[0]
+    if disabled == "off":
+        agent.rag_enabled = False
+    else:
+        small_rules_corpus.unlink()
+    agent.ask("CATAN road costs brick")
+    assert agent.rules_report().status == ("disabled" if disabled == "off" else "no_index")
+    assert len(responses.calls) == 0
 
 
 RULES_QUERY = "CATAN road building resource cost"

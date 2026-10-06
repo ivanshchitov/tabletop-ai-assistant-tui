@@ -23,6 +23,7 @@ from . import (
     prompts,
     rules_citations,
     rules_index,
+    rules_embeddings,
     rules_retrieval,
     task_pipeline,
     task_state,
@@ -700,9 +701,14 @@ class TabletopAgent:
                 return replace(report, status="rewrite_failed", error=str(exc))
         else:
             report = replace(report, query=question)
-        candidates = tuple(rules_index.search(
-            database, report.query, limit=settings.before, minimum_score=-1.0
-        ))
+        try:
+            embeddings = rules_embeddings.for_model(self.config.model)
+            candidates = tuple(rules_index.search(
+                database, report.query, limit=settings.before, minimum_score=-1.0,
+                embeddings=embeddings,
+            ))
+        except rules_index.RulesIndexError as exc:
+            return replace(report, status="embedding_failed", error=str(exc))
         if not candidates:
             return replace(report, status="no_candidates")
         if settings.mode is rules_retrieval.RetrievalMode.BASELINE:

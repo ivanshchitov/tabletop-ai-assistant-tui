@@ -95,7 +95,7 @@ openspec archive <change-id> --yes        # non-interactive: without --yes the C
   `history-persistence`, `terminal-ui`, `settings-screen`, `configuration`, `context-strategies`,
   `memory-model`, `user-profile`, `task-state`, `agent-invariants`, `test-infrastructure`,
   `model-selection`, `local-llm`, `mcp-integration`, `scheduled-jobs`, `tool-pipeline`,
-  `rules-document-index`, `rules-retrieval`, `rag-citations`.
+  `rules-document-index`, `rules-retrieval`, `rag-citations`, `local-rag-embeddings`.
   It records deliberate decisions worth knowing before touching related code: the JSON format's
   refusal reply is a machine-readable `{"error": ...}` object rather than the verbatim refusal
   phrase used by free/compact (not a bug to fix), and `AnswerSettings` is session-only by design —
@@ -204,17 +204,27 @@ shown without disabling cloud models; logs stay in gitignored `llama_server/serv
 - `docs/local-llm-questions.md` covers rule recall, resource counting and expected dice income.
   Validate actual answers; token generation alone is not correctness evidence.
 
-**Local rules retrieval (`core/rules_index.py`, `core/rules_retrieval.py`, `core/rules_citations.py`, `/rules`):** the index
+**Local rules retrieval (`core/rules_index.py`, `core/rules_embeddings.py`, `core/rules_retrieval.py`, `core/rules_citations.py`, `/rules`):** the index
 is built only by `/rules index`; startup never rebuilds it. `TabletopAgent.rag_enabled` defaults
 to `True`; `/rules mode off|on` disables/enables the whole retrieval path without changing the
 index or history. Off and missing-index paths make no auxiliary model requests. Every question
 clears stale `last_rules_sources` and replaces the retrieval report before doing any work.
+- Local chat models use the single INI preset with `embedding = true` through llama-server's
+  `/v1/embeddings`, without a cloud key. Embedding presets are excluded from `/models`.
+  Cloud chat models keep the original hash vectors. Additional vectors live in `model_embeddings`
+  in the same SQLite database, keyed by model, strategy and chunk ID. First local search prepares
+  missing vectors from stored chunk text (no PDF reread); `/rules index` prepares them before
+  replacing the index. Startup, RAG off and missing-index questions make no embedding requests.
+  Query vectors use a retrieval instruction for Qwen3-Embedding; all vectors are normalized and
+  dimensions are checked. Errors produce `embedding_failed`, a visible diagnostic and an answer
+  without RAG, never hash fallback. Replacing weights under the same preset requires `/rules index`.
+  `/rules index` and `/rules compare` can call the embedding API, but never the chat API.
 - Session-only `AgentConfig.retrieval` holds immutable `RetrievalSettings`: mode `enhanced`,
   `before=20` (1..30), `after=3` (1..10 and no greater than before), finite `threshold=0.6` (0..1).
   `/rules retrieval baseline|enhanced` changes the mode; `/rules tune` applies partial parameters
   atomically. An invalid field preserves the whole previous settings object.
 - `baseline` searches the original question, keeps the first `after` results and never uses the
-  relevance threshold or an auxiliary request. `enhanced` rewrites the query into English,
+  relevance threshold or an auxiliary chat request. `enhanced` rewrites the query into English,
   searches up to `before` candidates and asks the selected session model to rate every candidate.
   Both paths deliberately disable the index's cosine cutoff: the second-stage threshold is a
   model relevance score, not cosine similarity. Stable descending score order, score >= threshold,
@@ -258,7 +268,8 @@ clears stale `last_rules_sources` and replaces the retrieval report before doing
     honestly fall to the "не знаю" gate.
 
 **Environment switches (`core/config.py`):** `OPENCODE_API_URL`, `TABLETOP_HISTORY_FILE`,
-`TABLETOP_LOCAL_API_URL` (full local chat-completions URL, default `http://127.0.0.1:9999/v1/chat/completions`),
+`TABLETOP_LOCAL_API_URL` (full local chat-completions URL, default `http://127.0.0.1:9999/v1/chat/completions`;
+embeddings use `/v1/embeddings` on the same server),
 `TABLETOP_LLAMA_AUTOSTART` (`0` disables server lifecycle), `TABLETOP_LLAMA_START_TIMEOUT`
 (startup wait in seconds, default 120),
 `TABLETOP_MEMORY_FILE`, `TABLETOP_PROFILE_FILE`, `TABLETOP_TASK_FILE`, `TABLETOP_TASKS_DIR`,
@@ -1164,7 +1175,11 @@ saved: `dialogues` stays a flat list across branches.
 
 ## Test layout
 
-- `tests/unit/` — no subprocesses, ~3s for the whole layer. `core/` logic (including the memory
+- `tests/unit/test_rules_embeddings.py` verifies INI embedding selection and HTTP payloads,
+  query instructions, normalization, malformed vectors and transport errors. Index tests cover
+  lazy preparation, reuse, model isolation, dimensions and failed-build preservation; agent/TUI
+  tests cover both retrieval modes, model switching, disabled/missing index and visible errors.
+- `tests/unit/` — mostly in-process tests, with selected subprocess and PTY checks. `core/` logic (including the memory
   routing table, the long-term store, the profile store and the setup dialogue automaton, the
   invariants table with a positive and a negative example per rule plus the retry/rejection path
   against a fake client, the task

@@ -23,16 +23,30 @@ LOCAL_API_URL = "http://127.0.0.1:9999/v1/chat/completions"
 LLAMA_MODELS_FILE = BASE_DIR / "llama_server" / "models.ini"
 
 
-def local_models(path: Path = LLAMA_MODELS_FILE) -> list[str]:
-    """Имена пресетов llama.cpp; version до первой секции — настройки сервера."""
-    if not path.is_file():
-        return []
+def _local_presets(path: Path) -> ConfigParser:
+    """version до первой секции — настройки сервера."""
     parser = ConfigParser(interpolation=None, inline_comment_prefixes=(";",))
+    if not path.is_file():
+        return parser
     parser.read_string("[server]\n" + path.read_text(encoding="utf-8"))
-    return [name for name in parser.sections() if name not in ("server", "*")]
+    return parser
+
+
+def local_models(path: Path = LLAMA_MODELS_FILE) -> list[str]:
+    """Пресеты чата без embedding-моделей."""
+    parser = _local_presets(path)
+    return [name for name in parser.sections() if name not in ("server", "*")
+            and not parser.getboolean(name, "embedding", fallback=False)]
+
+
+def local_embedding_models(path: Path = LLAMA_MODELS_FILE) -> list[str]:
+    parser = _local_presets(path)
+    return [name for name in parser.sections() if name not in ("server", "*")
+            and parser.getboolean(name, "embedding", fallback=False)]
 
 
 LOCAL_MODELS = local_models()
+LOCAL_EMBEDDING_MODELS = local_embedding_models()
 
 
 def api_url_for_model(model: str) -> str:

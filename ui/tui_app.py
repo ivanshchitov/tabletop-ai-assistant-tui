@@ -20,7 +20,7 @@ from rich.panel import Panel
 from rich.rule import Rule
 from rich.text import Text
 
-from core import config, mcp_tools, memory_layers, rules_index, rules_retrieval, user_profile
+from core import config, mcp_tools, memory_layers, rules_embeddings, rules_index, rules_retrieval, user_profile
 from core.answer_settings import AnswerFormat, AnswerSettings, ContextStrategy
 from core.api_client import (
     API_KEY_CHARSET_ERROR,
@@ -414,7 +414,9 @@ class TabletopAITUI:
         if subcommand == "index":
             self.console.print("[bold cyan]Индексация документов правил...[/bold cyan]")
             try:
-                report = rules_index.build_index(documents, database)
+                report = rules_index.build_index(
+                    documents, database, embeddings=rules_embeddings.for_model(self.agent.model),
+                )
             except rules_index.RulesIndexError as exc:
                 self.console.print("[bold red]Индекс не создан: {}[/bold red]".format(escape(str(exc))))
                 return
@@ -438,7 +440,13 @@ class TabletopAITUI:
             if not rules_index.index_exists(database):
                 self.console.print("Индекс ещё не создан. Сначала выполните /rules index.")
                 return
-            results = rules_index.compare(database, query, limit=2)
+            try:
+                results = rules_index.compare(
+                    database, query, limit=2, embeddings=rules_embeddings.for_model(self.agent.model),
+                )
+            except rules_index.RulesIndexError as exc:
+                self.console.print("[bold red]Поиск правил не удался: {}[/bold red]".format(escape(str(exc))))
+                return
             stats = rules_index.strategy_stats(database)
             labels = {"fixed": "Фиксированный размер", "structural": "По разделам"}
             for strategy in ("fixed", "structural"):
@@ -501,6 +509,7 @@ class TabletopAITUI:
             "no_candidates": "кандидатов нет",
             "rewrite_failed": "переписывание не удалось",
             "rerank_failed": "оценка не удалась",
+            "embedding_failed": "embedding-поиск не удался",
             "no_matches": "все кандидаты ниже порога",
             "ok": "поиск выполнен",
         }

@@ -7,9 +7,12 @@ import re
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
 from . import config
+
+if TYPE_CHECKING:
+    from .rules_embeddings import LocalEmbeddings
 
 EMBEDDING_DIMENSIONS = 384
 FIXED_CHUNK_SIZE = 1400
@@ -262,7 +265,33 @@ def _create_schema(connection: sqlite3.Connection) -> None:
     connection.execute("CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
 
 
-def build_index(documents: Path, database: Path) -> IndexReport:
+def _prepare_embeddings(connection: sqlite3.Connection, embeddings: "LocalEmbeddings") -> None:
+    """Добавить полный набор векторов, не меняя исходные хеш-векторы."""
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS model_embeddings ("
+        "model TEXT NOT NULL, strategy TEXT NOT NULL, chunk_id TEXT NOT NULL, "
+        "embedding TEXT NOT NULL, PRIMARY KEY(model, strategy, chunk_id))"
+    )
+    rows = connection.execute(
+        "SELECT c.strategy, c.chunk_id, c.content, e.embedding FROM chunks c "
+        "LEFT JOIN model_embeddings e ON e.strategy=c.strategy AND e.chunk_id=c.chunk_id AND e.model=?",
+        (embeddings.model,),
+    ).fetchall()
+    pending = []
+    dimensions = None
+    for strategy, chunk_id, content, stored in rows:
+        vector = json.loads(stored) if stored is not None else embeddings.embed(content)
+        if dimensions is not None and len(vector) != dimensions:
+            raise RulesIndexError("Несовместимые размерности embedding-векторов документов.")
+        dimensions = len(vector)
+        if stored is None:
+            pending.append((embeddings.model, strategy, chunk_id, json.dumps(vector)))
+    connection.executemany("INSERT INTO model_embeddings VALUES (?, ?, ?, ?)", pending)
+
+
+def build_index(
+    documents: Path, database: Path, embeddings: Optional["LocalEmbeddings"] = None,
+) -> IndexReport:
     files = sorted(path for path in documents.glob("*.pdf") if path.is_file())
     if not files:
         raise RulesIndexError("В каталоге нет PDF-документов: {}".format(documents))
@@ -305,6 +334,8 @@ def build_index(documents: Path, database: Path) -> IndexReport:
                         )
                         counts[strategy] += 1
             connection.execute("INSERT INTO metadata VALUES ('files', ?)", (str(len(files)),))
+            if embeddings is not None:
+                _prepare_embeddings(connection, embeddings)
             connection.commit()
         temporary.replace(database)
     except Exception as exc:
@@ -321,20 +352,37 @@ def search(
     strategy: str = "structural",
     limit: int = DEFAULT_RESULT_LIMIT,
     minimum_score: float = MIN_RELEVANCE,
+    embeddings: Optional["LocalEmbeddings"] = None,
 ) -> List[SearchResult]:
     if strategy not in ("fixed", "structural"):
         raise ValueError("Неизвестная стратегия: {}".format(strategy))
     if not database.is_file():
         return []
-    query_vector = embed(query)
+    query_vector = None
     try:
         with sqlite3.connect(str(database)) as connection:
-            rows = connection.execute(
-                "SELECT source, title, section, chunk_id, content, embedding "
-                "FROM chunks WHERE strategy=?",
-                (strategy,),
-            ).fetchall()
-    except sqlite3.Error:
+            if embeddings is None:
+                rows = connection.execute(
+                    "SELECT source, title, section, chunk_id, content, embedding "
+                    "FROM chunks WHERE strategy=?", (strategy,),
+                ).fetchall()
+                query_vector = embed(query)
+            else:
+                if not connection.execute("SELECT 1 FROM chunks LIMIT 1").fetchone():
+                    return []
+                _prepare_embeddings(connection, embeddings)
+                rows = connection.execute(
+                    "SELECT c.source, c.title, c.section, c.chunk_id, c.content, e.embedding "
+                    "FROM chunks c JOIN model_embeddings e "
+                    "ON e.strategy=c.strategy AND e.chunk_id=c.chunk_id "
+                    "WHERE c.strategy=? AND e.model=?", (strategy, embeddings.model),
+                ).fetchall()
+                query_vector = embeddings.embed_query(query)
+                if any(len(json.loads(row[-1])) != len(query_vector) for row in rows):
+                    raise RulesIndexError("Несовместимые размерности embedding-векторов запроса и документов.")
+    except (sqlite3.Error, ValueError, TypeError) as exc:
+        if embeddings is not None:
+            raise RulesIndexError("Не удалось прочитать embedding-индекс: {}".format(exc)) from exc
         return []
     results = []
     for source, title, section, chunk_id, content, vector_text in rows:
@@ -344,9 +392,13 @@ def search(
     return sorted(results, key=lambda result: result.score, reverse=True)[:limit]
 
 
-def compare(database: Path, query: str, limit: int = DEFAULT_RESULT_LIMIT) -> Dict[str, List[SearchResult]]:
+def compare(
+    database: Path, query: str, limit: int = DEFAULT_RESULT_LIMIT,
+    embeddings: Optional["LocalEmbeddings"] = None,
+) -> Dict[str, List[SearchResult]]:
     return {
-        strategy: search(database, query, strategy=strategy, limit=limit, minimum_score=0.0)
+        strategy: search(database, query, strategy=strategy, limit=limit, minimum_score=0.0,
+                         embeddings=embeddings)
         for strategy in ("fixed", "structural")
     }
 
