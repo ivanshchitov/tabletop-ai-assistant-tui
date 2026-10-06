@@ -64,3 +64,21 @@ def test_local_address_override_is_used(monkeypatch):
 def test_cloud_request_without_key_reports_how_to_configure_it():
     with pytest.raises(APIError, match="OPENCODE_API_KEY"):
         APIClient("").ask("s", "u")
+
+
+@responses.activate
+def test_local_qwen_receives_one_leading_system_message_with_all_instructions():
+    responses.add(responses.POST, config.LOCAL_API_URL, json={"choices": [{"message": {"content": "ok"}}]})
+    messages = [
+        {"role": "system", "content": "Настройки ответа"},
+        {"role": "system", "content": "Инварианты"},
+        {"role": "system", "content": "Память"},
+        {"role": "user", "content": "Вопрос"},
+    ]
+    APIClient("").ask_with_usage_messages(messages, model=QWEN)
+    sent = json.loads(responses.calls[0].request.body)["messages"]
+    assert sent == [
+        {"role": "system", "content": "Настройки ответа\n\nИнварианты\n\nПамять"},
+        {"role": "user", "content": "Вопрос"},
+    ]
+    assert len(messages) == 4  # исходный стек агента не меняется

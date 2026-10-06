@@ -113,10 +113,19 @@ class LlamaServer:
                 os.kill(pid, signal.SIGTERM)
                 deadline = time.monotonic() + 10
                 while time.monotonic() < deadline:
-                    if not self._ready():
+                    state = subprocess.run(
+                        ["ps", "-p", str(pid), "-o", "stat="],
+                        capture_output=True, text=True, timeout=2,
+                    ).stdout.strip()
+                    if not state or state.startswith("Z"):
                         return
                     time.sleep(0.1)
-                if self._listener_pid() == pid:
+                # Сервер мог перестать слушать порт, но остаться в процессе выхода.
+                command = subprocess.run(
+                    ["ps", "-p", str(pid), "-o", "comm="],
+                    capture_output=True, text=True, timeout=2,
+                ).stdout.strip()
+                if Path(command).name == "llama-server":
                     os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass

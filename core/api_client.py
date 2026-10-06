@@ -79,6 +79,14 @@ class APIClient:
         if not local and not is_valid_api_key(self.api_key):
             raise APIError(API_KEY_CHARSET_ERROR + " Добавьте OPENCODE_API_KEY в .env для облачных моделей.")
 
+        if local:
+            # Шаблон Qwen разрешает system только в начале. Стек агента содержит
+            # несколько system-блоков: сохраняем их текст и порядок в одном блоке.
+            instructions = [item["content"] for item in messages if item["role"] == "system"]
+            conversation = [item for item in messages if item["role"] != "system"]
+            messages = ([{"role": "system", "content": "\n\n".join(instructions)}]
+                        if instructions else []) + conversation
+
         payload = {
             "model": model,
             "messages": messages,

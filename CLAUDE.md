@@ -7,6 +7,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 A console TUI (Python + `rich`) that answers board-game questions via a model picked with the
 `/models` command (default `deepseek-v4.1-flash`), an OpenAI-compatible chat-completions model
 served at OpenCode Zen (`https://opencode.ai/zen/v1/chat/completions`).
+Local Qwen presets from `llama_server/models.ini` also appear in `/models`; their requests go to
+llama.cpp at `http://127.0.0.1:9999/v1/chat/completions` without the cloud key.
 Off-topic questions get a fixed refusal phrase instead of being answered.
 
 ## Commands
@@ -179,6 +181,25 @@ parents up (`Path(__file__).resolve().parent.parent`) rather than one — it has
 entry point (the schedule's background runner, see the scheduler block) and repeats the same
 `os.execv` trick for the same reason.
 
+**Local LLM (`core/llama_server.py`, `llama_server/`, day 26):** the entry point starts or reuses
+llama-server on 127.0.0.1:9999 and stops it in `finally`, including a pre-existing server
+(explicit user decision). `lsof`/`ps` identify the listener before taking control; an unrelated
+process is never stopped. Managed router/model processes run in their own process group.
+SIGTERM/SIGHUP also trigger cleanup; SIGKILL cannot run Python cleanup. Startup failures are
+shown without disabling cloud models; logs stay in gitignored `llama_server/server.log`.
+- `/models` appends INI preset names to the cloud list; 2B uses reasoning=auto with a 256-token
+  thinking budget; 4B uses auto without an additional budget. Disabling thinking on 2B caused
+  false topic refusals and factual errors in the dry run.
+- All local requests merge system blocks into one leading system message for Qwen's Jinja
+  template. Text/order and the agent's original message stack are preserved; cloud messages
+  are not merged. No cloud Authorization header is sent locally; API cost is zero.
+- Startup does not require a cloud key. Before a cloud question the TUI validates/asks for it.
+- `tests/e2e/harness.AppSession` disables autostart by default. A live demo must override
+  TABLETOP_LLAMA_AUTOSTART and use isolated state. Its `close()` uses SIGKILL: send SIGTERM
+  and wait for cleanup BEFORE close when the app manages a real local server.
+- `docs/local-llm-questions.md` covers rule recall, resource counting and expected dice income.
+  Validate actual answers; token generation alone is not correctness evidence.
+
 **Local rules retrieval (`core/rules_index.py`, `core/rules_retrieval.py`, `core/rules_citations.py`, `/rules`):** the index
 is built only by `/rules index`; startup never rebuilds it. `TabletopAgent.rag_enabled` defaults
 to `True`; `/rules mode off|on` disables/enables the whole retrieval path without changing the
@@ -233,6 +254,9 @@ clears stale `last_rules_sources` and replaces the retrieval report before doing
     honestly fall to the "не знаю" gate.
 
 **Environment switches (`core/config.py`):** `OPENCODE_API_URL`, `TABLETOP_HISTORY_FILE`,
+`TABLETOP_LOCAL_API_URL` (full local chat-completions URL, default `http://127.0.0.1:9999/v1/chat/completions`),
+`TABLETOP_LLAMA_AUTOSTART` (`0` disables server lifecycle), `TABLETOP_LLAMA_START_TIMEOUT`
+(startup wait in seconds, default 120),
 `TABLETOP_MEMORY_FILE`, `TABLETOP_PROFILE_FILE`, `TABLETOP_TASK_FILE`, `TABLETOP_TASKS_DIR`,
 `TABLETOP_SCHEDULE_FILE`, `TABLETOP_EXPORTS_DIR` (the directory the own server's save-to-file tool
 writes into, default `exports/`), `TABLETOP_RULES_DOCUMENTS_DIR` (PDF corpus directory, default

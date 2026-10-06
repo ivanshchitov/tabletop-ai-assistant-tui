@@ -264,9 +264,9 @@ class TabletopAITUI:
 
                 self._handle_question(user_input)
                 self._print_status_bar()
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, EOFError):
             # Ctrl+C может прийти как во время input(), так и во время ожидания
-            # ответа API или анимации печати — ловим его на уровне всего цикла.
+            # ответа API; EOF также возможен при отложенном вводе облачного ключа.
             self.console.print()
             self._exit()
             return

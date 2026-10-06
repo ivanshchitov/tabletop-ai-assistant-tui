@@ -95,6 +95,29 @@ def test_existing_server_is_reused_and_stopped(server_script, tmp_path, monkeypa
     assert first.process.poll() is not None
 
 
+def test_existing_server_stop_waits_for_exit_even_when_health_fails(server_script, tmp_path, monkeypatch):
+    script, _ = server_script
+    worker = script.parent / "worker.py"
+    worker.write_text(
+        "import signal, time, sys\n"
+        "def stop(signum, frame):\n"
+        " time.sleep(0.4)\n"
+        " sys.exit(0)\n"
+        "signal.signal(signal.SIGTERM, stop)\n" + worker.read_text()
+    )
+    first = manager(server_script, tmp_path)
+    second = manager(server_script, tmp_path)
+    try:
+        first.start()
+        monkeypatch.setattr(second, "_listener_pid", lambda: first.process.pid)
+        second.start()
+        monkeypatch.setattr(second, "_ready", lambda: False)
+        second.stop()
+        assert first.process.poll() is not None
+    finally:
+        first.stop()
+
+
 def test_unrelated_listener_is_not_stopped(server_script, tmp_path):
     first = manager(server_script, tmp_path)
     second = manager(server_script, tmp_path)

@@ -308,6 +308,17 @@ def test_ctrl_c_while_waiting_for_the_key_exits_cleanly(app):
         assert "Traceback" not in session.scrollback()
 
 
+def test_ctrl_d_while_waiting_for_deferred_cloud_key_exits_cleanly(app):
+    with app(api_key="") as session:
+        session.wait_for_prompt()
+        session.send_line("Вопрос")
+        session.wait_for("API-ключ не найден")
+        session.send_key(CTRL_D)
+        session.wait_for("До встречи!")
+        assert session.wait_exit() == 0
+        assert "Traceback" not in session.scrollback()
+
+
 # --- автодополнение ------------------------------------------------------------------------------
 
 
