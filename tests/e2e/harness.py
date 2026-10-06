@@ -106,6 +106,8 @@ class AppSession:
             # прогон. Таймаут сжимается только для stub-сервера — живой модели нужны десятки
             # секунд, поэтому там остаётся значение приложения по умолчанию.
             "TABLETOP_TYPING_DELAY": "0",
+            # Тесты против заглушки не запускают и не завершают настоящий llama-server.
+            "TABLETOP_LLAMA_AUTOSTART": "0",
         }
         if api_key is not None:
             env["OPENCODE_API_KEY"] = api_key

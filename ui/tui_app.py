@@ -732,6 +732,9 @@ class TabletopAITUI:
 
     def _handle_question(self, question: str) -> None:
         self.last_error = None
+        if (isinstance(self.client, APIClient) and self.model not in config.LOCAL_MODELS
+                and not is_valid_api_key(self.client.api_key)):
+            self.client.api_key = self._ensure_api_key()
         # Реплика пользователя — его текст: скобочные последовательности печатаются как есть
         # (иначе вопрос со «[/dim]» роняет отрисовку, а не только статус-бар).
         self.console.print(f"[bold blue]Вы:[/bold blue] {escape(question)}")

@@ -1,6 +1,7 @@
 """Команда /models против stub API: панель выбора модели и её применение к запросам."""
 
 import json
+import time
 
 from . import harness
 
@@ -95,3 +96,26 @@ def test_commands_panel_lists_models_row(app, stub):
 
     session.send_line("/exit")
     session.wait_exit()
+
+
+def test_local_selection_routes_question_without_cloud_key(app, stub):
+    # Локальный API подменён заглушкой; настоящий llama-server не запускается.
+    with app(api_key="", extra_env={"TABLETOP_LOCAL_API_URL": stub.url}) as session:
+        session.wait_for_prompt()
+        session.send_line("/models")
+        _wait_panel_open(session)
+        session.wait_on_screen("unsloth/Qwen3.5-2B-GGUF:Q4_K_M")
+        session.wait_on_screen("локальная")
+        session.send_key(harness.KEY_UP)
+        time.sleep(0.15)
+        session.send_key(harness.KEY_UP)
+        time.sleep(0.15)
+        session.send_key(harness.KEY_ENTER)
+        _wait_panel_closed(session)
+        session.wait_for("Модель: unsloth/Qwen3.5-2B-GGUF:Q4_K_M")
+        session.send_line("Как ходит конь в шахматах?")
+        session.wait_for("Ответ stub-сервера")
+        assert stub.last_payload()["model"] == "unsloth/Qwen3.5-2B-GGUF:Q4_K_M"
+        assert "Authorization" not in stub.requests[0]["headers"]
+        session.send_line("/exit")
+        assert session.wait_exit() == 0

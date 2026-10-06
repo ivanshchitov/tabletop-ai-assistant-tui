@@ -26,14 +26,15 @@ def test_greets_on_first_launch(app):
         assert session.contains("Статус: Готов")
 
 
-def test_asks_for_key_when_environment_has_none(app, stub):
-    """Первый запуск без ключа: приложение просит его ввести и продолжает работать."""
+def test_asks_for_key_on_cloud_question_when_environment_has_none(app, stub):
+    """День 26: ключ нужен при облачном вопросе, локальный запуск обходится без него."""
     stub.always(answer("Ответ после ввода ключа."))
     with app(api_key="") as session:
+        session.wait_for_prompt()
+        session.send_line("Вопрос")
         session.wait_for("API-ключ не найден")
         session.send_line("sk-manual-key-12345")
         session.wait_for_prompt()
-        session.send_line("Вопрос")
         session.wait_for("Ответ после ввода ключа")
 
     assert stub.requests[0]["headers"]["Authorization"] == "Bearer sk-manual-key-12345"
@@ -43,6 +44,8 @@ def test_empty_key_input_is_asked_again(app, stub):
     """Пустой ввод не принимается за ключ — приложение спрашивает снова."""
     stub.always(answer("Ответ."))
     with app(api_key="") as session:
+        session.wait_for_prompt()
+        session.send_line("Вопрос")
         session.wait_for("API-ключ не найден")
         session.send_line("")
         session.send_line("   ")
@@ -55,26 +58,28 @@ def test_empty_key_input_is_asked_again(app, stub):
 def test_non_ascii_key_is_rejected_at_input(app, stub):
     """Ключ, набранный в русской раскладке, отсекается сразу — без падения с traceback."""
     with app(api_key="") as session:
+        session.wait_for_prompt()
+        session.send_line("Вопрос")
         session.wait_for("API-ключ не найден")
         session.send_line("sk-введён-вручную")
         session.wait_for("проверьте раскладку клавиатуры")
 
         session.send_line("sk-manual-key-12345")
         session.wait_for_prompt()
-        session.send_line("Вопрос")
         session.wait_for("Ответ stub-сервера")
         assert "Traceback" not in session.scrollback()
 
     assert stub.requests[0]["headers"]["Authorization"] == "Bearer sk-manual-key-12345"
 
 
-def test_non_ascii_key_from_environment_is_reported_at_startup(app, stub):
-    """Непригодный ключ из .env тоже отсекается на старте, а не после первого вопроса."""
+def test_non_ascii_key_from_environment_is_reported_before_cloud_request(app, stub):
+    """День 26: непригодный ключ не мешает локальному режиму; облако просит заменить его."""
     with app(api_key="sk-ключ-из-окружения") as session:
+        session.wait_for_prompt()
+        session.send_line("Вопрос")
         session.wait_for("проверьте раскладку клавиатуры")
         session.send_line("sk-manual-key-12345")
         session.wait_for_prompt()
-        session.send_line("Вопрос")
         session.wait_for("Ответ stub-сервера")
         assert "Traceback" not in session.scrollback()
 
@@ -294,6 +299,8 @@ def test_ctrl_c_at_the_prompt_exits_cleanly(app):
 
 def test_ctrl_c_while_waiting_for_the_key_exits_cleanly(app):
     with app(api_key="") as session:
+        session.wait_for_prompt()
+        session.send_line("Вопрос")
         session.wait_for("API-ключ не найден")
         session.send_key(CTRL_C)
         session.wait_for("До встречи!")
