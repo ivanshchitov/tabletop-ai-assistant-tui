@@ -116,14 +116,15 @@ def test_model_name_is_the_reasoning_model():
     assert config.DEFAULT_MODEL == "deepseek-v4.1-flash"
 
 
-def test_available_models_is_the_fixed_list():
+def test_available_models_include_cloud_list_then_local_presets():
+    # День 26: прежний фиксированный список дополнен локальными пресетами.
     assert config.AVAILABLE_MODELS == [
         "deepseek-v4.1-flash",
         "deepseek-v4-pro",
         "glm-5.3-flash",
         "mimo-v2.5-free",
         "kimi-k3",
-    ]
+    ] + config.LOCAL_MODELS
 
 
 def test_default_model_is_first_available():

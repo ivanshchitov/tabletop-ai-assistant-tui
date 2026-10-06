@@ -75,8 +75,9 @@ class APIClient:
         model: str,
     ) -> tuple[Dict[str, Any], float]:
         """Единый HTTP-путь: messages — готовый список ролей; None-температура = дефолт."""
-        if not is_valid_api_key(self.api_key):
-            raise APIError(API_KEY_CHARSET_ERROR)
+        local = model in config.LOCAL_MODELS
+        if not local and not is_valid_api_key(self.api_key):
+            raise APIError(API_KEY_CHARSET_ERROR + " Добавьте OPENCODE_API_KEY в .env для облачных моделей.")
 
         payload = {
             "model": model,
@@ -84,10 +85,9 @@ class APIClient:
             "temperature": temperature if temperature is not None else config.TEMPERATURE,
             "max_tokens": max_tokens,
         }
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
+        headers = {"Content-Type": "application/json"}
+        if not local:
+            headers["Authorization"] = f"Bearer {self.api_key}"
 
         last_timeout: Optional[Exception] = None
         start = time.perf_counter()
@@ -95,7 +95,8 @@ class APIClient:
         for attempt in range(config.MAX_RETRIES):
             try:
                 response = requests.post(
-                    config.API_URL, json=payload, headers=headers, timeout=config.REQUEST_TIMEOUT
+                    config.api_url_for_model(model), json=payload, headers=headers,
+                    timeout=config.REQUEST_TIMEOUT
                 )
             except requests.exceptions.Timeout as exc:
                 last_timeout = exc
@@ -107,7 +108,8 @@ class APIClient:
                 ) from last_timeout
             except requests.exceptions.ConnectionError as exc:
                 raise APIError(
-                    "Ошибка соединения с API. Проверьте интернет-соединение."
+                    "Ошибка соединения с локальным API. Проверьте llama-server на порту 9999."
+                    if local else "Ошибка соединения с API. Проверьте интернет-соединение."
                 ) from exc
 
             if response.status_code == 401:

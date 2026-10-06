@@ -610,6 +610,8 @@ class TabletopAITUI:
             highlight = "[reverse bold]" if index == state.selected_index else ""
             reset = "[/reverse bold]" if index == state.selected_index else ""
             suffix = " (текущая)" if model == state.current else ""
+            if model in config.LOCAL_MODELS:
+                suffix += " (локальная)"
             lines.append(f"{marker}{highlight}{model}{reset}{suffix}")
         body = "\n".join(lines) + "\n\n[dim]↑/↓ — выбор, Enter — применить, Esc — отмена[/dim]"
         return Panel(body, title="Модель", style="cyan")

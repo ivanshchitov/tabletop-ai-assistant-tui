@@ -2,6 +2,7 @@
 
 import os
 import sys
+from configparser import ConfigParser
 from pathlib import Path
 from typing import NamedTuple, Optional, Tuple
 
@@ -18,6 +19,27 @@ load_dotenv(dotenv_path=ENV_PATH)
 # локальный stub-сервер вместо обращения к реальному OpenCode Zen.
 DEFAULT_API_URL = "https://opencode.ai/zen/v1/chat/completions"
 API_URL = os.getenv("OPENCODE_API_URL", DEFAULT_API_URL)
+LOCAL_API_URL = "http://127.0.0.1:9999/v1/chat/completions"
+LLAMA_MODELS_FILE = BASE_DIR / "llama_server" / "models.ini"
+
+
+def local_models(path: Path = LLAMA_MODELS_FILE) -> list[str]:
+    """Имена пресетов llama.cpp; version до первой секции — настройки сервера."""
+    if not path.is_file():
+        return []
+    parser = ConfigParser(interpolation=None, inline_comment_prefixes=(";",))
+    parser.read_string("[server]\n" + path.read_text(encoding="utf-8"))
+    return [name for name in parser.sections() if name not in ("server", "*")]
+
+
+LOCAL_MODELS = local_models()
+
+
+def api_url_for_model(model: str) -> str:
+    if model in LOCAL_MODELS:
+        return os.getenv("TABLETOP_LOCAL_API_URL", LOCAL_API_URL)
+    return API_URL
+
 # Список моделей, которые пользователь может выбрать через /models; первая — модель
 # по умолчанию. Панель и клиент читают отсюда, имена моделей не зашиваются нигде больше.
 AVAILABLE_MODELS = [
@@ -26,7 +48,7 @@ AVAILABLE_MODELS = [
     "glm-5.3-flash",
     "mimo-v2.5-free",
     "kimi-k3",
-]
+] + LOCAL_MODELS
 DEFAULT_MODEL = AVAILABLE_MODELS[0]
 # Цена входных/выходных токенов (доллары за 1 млн токенов) по действующему прайсу OpenCode Zen.
 # Точность сравнительная, не бухгалтерская (см.
@@ -39,6 +61,7 @@ MODEL_PRICING = {
     "mimo-v2.5-free": (0.0, 0.0),
     "kimi-k3": (3.00, 15.00),
 }
+MODEL_PRICING.update({model: (0.0, 0.0) for model in LOCAL_MODELS})
 TEMPERATURE = 0.7
 MIN_TEMPERATURE = 0.0
 MAX_TEMPERATURE = 2.0
