@@ -756,5 +756,5 @@ openspec/
 `openspec/specs/` уже содержит основную спецификацию проекта — возможности, зафиксированные
 реверс-инжинирингом действующего кода: `question-answering`, `answer-settings`,
 `api-integration`, `history-persistence`, `terminal-ui`, `settings-screen`, `configuration`,
-`context-strategies`, `test-infrastructure`, `model-selection`, `memory-model`, `user-profile`,
+`context-strategies`, `test-infrastructure`, `model-selection`, `local-llm`, `memory-model`, `user-profile`,
 `agent`, `agent-invariants` и `task-state`. Она — эталон для будущих `MODIFIED`-дельт.

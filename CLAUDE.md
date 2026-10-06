@@ -94,7 +94,7 @@ openspec archive <change-id> --yes        # non-interactive: without --yes the C
   deltas: `agent`, `question-answering`, `answer-settings`, `api-integration`,
   `history-persistence`, `terminal-ui`, `settings-screen`, `configuration`, `context-strategies`,
   `memory-model`, `user-profile`, `task-state`, `agent-invariants`, `test-infrastructure`,
-  `model-selection`, `mcp-integration`, `scheduled-jobs`, `tool-pipeline`,
+  `model-selection`, `local-llm`, `mcp-integration`, `scheduled-jobs`, `tool-pipeline`,
   `rules-document-index`, `rules-retrieval`, `rag-citations`.
   It records deliberate decisions worth knowing before touching related code: the JSON format's
   refusal reply is a machine-readable `{"error": ...}` object rather than the verbatim refusal
