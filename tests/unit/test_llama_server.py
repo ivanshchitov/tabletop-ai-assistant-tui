@@ -19,12 +19,21 @@ def server_script(tmp_path):
         port = sock.getsockname()[1]
     worker = tmp_path / "worker.py"
     worker.write_text(
+        "import socketserver\n"
         "from http.server import BaseHTTPRequestHandler, HTTPServer\n"
+        "# HTTPServer.server_bind зовёт socket.getfqdn(host) — обратный DNS-запрос — уже после\n"
+        "# bind(), но до listen(). На Linux 127.0.0.1 отвечает /etc/hosts, на macOS PTR идёт к\n"
+        "# внешнему резолверу, и на раннере он не отвечает за бюджет готовности: порт занят, но\n"
+        "# никто его не слушает, и старт падает по таймауту. Имя сервера тесту не нужно.\n"
+        "class Server(HTTPServer):\n"
+        " def server_bind(self):\n"
+        "  socketserver.TCPServer.server_bind(self)\n"
+        "  self.server_name, self.server_port = self.server_address[:2]\n"
         "class Handler(BaseHTTPRequestHandler):\n"
         " def do_GET(self):\n"
         "  self.send_response(200); self.end_headers(); self.wfile.write(b'{\"status\":\"ok\"}')\n"
         " def log_message(self, *args): pass\n"
-        f"HTTPServer(('127.0.0.1', {port}), Handler).serve_forever()\n",
+        f"Server(('127.0.0.1', {port}), Handler).serve_forever()\n",
         encoding="utf-8",
     )
     script = tmp_path / "server.sh"
@@ -36,7 +45,9 @@ def server_script(tmp_path):
 def manager(server_script, tmp_path):
     from core.llama_server import LlamaServer
     script, url = server_script
-    return LlamaServer(script=script, base_url=url, log_path=tmp_path / "server.log", timeout=3)
+    # Бюджет готовности — только тестовый потолок против зависания: bash и python на общем
+    # раннере стартуют заметно медленнее, чем на рабочей машине.
+    return LlamaServer(script=script, base_url=url, log_path=tmp_path / "server.log", timeout=15)
 
 
 def test_start_waits_for_health_and_stop_releases_listener(server_script, tmp_path):
