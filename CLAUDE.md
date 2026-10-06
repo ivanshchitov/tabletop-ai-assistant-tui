@@ -157,6 +157,10 @@ real file in the repo root (`history.json`, `memory.json`, `.rules-index.sqlite3
 
 ## Architecture
 
+The shared request metrics line displays average output throughput in ток/сек:
+completion_tokens / elapsed_seconds (full HTTP request time, including prompt processing
+and waiting; output tokens may include reasoning). Nonpositive time or output tokens show н/д.
+
 Three packages: `core/` (agent, settings, prompts, API client, memory layers and stores, the user
 profile, the invariants table and its answer check, the task state machine and its pipeline, context
 strategies and the compression logic, the MCP client and the pure part of the tool choice, local

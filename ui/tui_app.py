@@ -1521,11 +1521,13 @@ class TabletopAITUI:
 
     def _print_usage_meta(self, meta: AnswerMeta, label: str = "") -> None:
         cost = f"${meta.cost_usd:.6f}" if meta.cost_usd is not None else "неизвестно"
+        speed = (f"{meta.completion_tokens / meta.elapsed_seconds:.2f} ток/сек"
+                 if meta.elapsed_seconds > 0 and meta.completion_tokens > 0 else "н/д")
         where = f"{escape(label)}  |  " if label else ""
         self.console.print(
             f"[dim]⏱ {where}{meta.elapsed_seconds:.2f}с  |  "
             f"Токены: {meta.prompt_tokens}+{meta.completion_tokens}={meta.total_tokens}  |  "
-            f"Стоимость: {cost}[/dim]"
+            f"Стоимость: {cost}  |  Средняя скорость: {speed}[/dim]"
         )
 
     def _print_compression_line(self) -> None:

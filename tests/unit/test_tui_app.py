@@ -1927,6 +1927,22 @@ def test_unknown_task_subcommand_prints_the_hint(make_app, recording_console):
     assert recording_console.contains("/task add <цель>")
 
 
+@pytest.mark.parametrize("model", [config.DEFAULT_MODEL, config.LOCAL_MODELS[0]])
+@pytest.mark.parametrize("elapsed,completion,expected", [
+    (12.5, 200, "16.00 ток/сек"),
+    (0, 200, "н/д"),
+    (-1, 200, "н/д"),
+    (12.5, 0, "н/д"),
+])
+def test_usage_meta_shows_generation_speed(make_app, recording_console, model, elapsed, completion, expected):
+    app = make_app([], FakeClient())
+    meta = AnswerMeta("", model, elapsed, 100, completion, 100 + completion, 0.0)
+    app._print_usage_meta(meta)
+    assert recording_console.contains(f"Средняя скорость: {expected}")
+    assert recording_console.contains(f"Токены: 100+{completion}={100 + completion}")
+    assert recording_console.contains("Стоимость: $0.000000")
+
+
 def test_task_panel_shows_what_the_spend_was_for(make_app, recording_console):
     """Траты прогона — в панели, с пометкой, на какой запрос они ушли."""
     app = _app_with_plan(make_app)
