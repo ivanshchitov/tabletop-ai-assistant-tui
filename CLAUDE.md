@@ -94,7 +94,7 @@ openspec archive <change-id> --yes        # non-interactive: without --yes the C
   deltas: `agent`, `question-answering`, `answer-settings`, `api-integration`,
   `history-persistence`, `terminal-ui`, `settings-screen`, `configuration`, `context-strategies`,
   `memory-model`, `user-profile`, `task-state`, `agent-invariants`, `test-infrastructure`,
-  `model-selection`, `local-llm`, `mcp-integration`, `scheduled-jobs`, `tool-pipeline`,
+  `model-selection`, `local-llm`, `local-llm-optimization`, `mcp-integration`, `scheduled-jobs`, `tool-pipeline`,
   `rules-document-index`, `rules-retrieval`, `rag-citations`, `local-rag-embeddings`.
   It records deliberate decisions worth knowing before touching related code: the JSON format's
   refusal reply is a machine-readable `{"error": ...}` object rather than the verbatim refusal
@@ -203,6 +203,26 @@ shown without disabling cloud models; logs stay in gitignored `llama_server/serv
   and wait for cleanup BEFORE close when the app manages a real local server.
 - `docs/local-llm-questions.md` covers rule recall, resource counting and expected dice income.
   Validate actual answers; token generation alone is not correctness evidence.
+
+**Local optimization (`core/local_llm.py`, `/local`, day 29):** baseline Qwen3.5-2B
+Q4_K_M/Q4_K_XL ids remain available. Named optimized aliases map to the same cached GGUF via
+`hf-repo`, with server context 8192, reasoning=auto, budget=256. Main answers and validation
+retries use temperature 0.3 and max_tokens=1024; baseline restores session temperature and
+existing token budgeting (minimum 2000), context 32000. Optimized temperature takes precedence
+over `/settings` and appears in the status bar. Helper requests keep their own parameters.
+- `/local` reports main-answer policy; it does not query the running server. `/local
+  baseline|optimized` preserves quantization. Unsupported models/arguments preserve state.
+- `assets/local_system_prompt.md` replaces only the base system template; format, profile,
+  invariants, task state, memories and RAG context keep their ordering and behavior.
+- `scripts/benchmark_local_llm.py` defaults to three questions and seed=42 (9 requests across
+  baseline M, optimized M and optimized XL); `--seeds` permits larger runs. It uses a separate
+  offline router on a free port, isolated state per question, RAG/tools off, cache_prompt=false.
+  Never run the full tests concurrently with CPU benchmarking. Record full visible/raw answers;
+  API success is not a quality score. Judge content against the predefined criteria.
+- `/props` verifies actual context and GGUF path; load/warmup is separate from question timings.
+  Sampled process-group RSS is not total device memory or energy. Cleanup signals only the
+  owned process group. JSON checkpoints survive interruptions; partial reports are not final
+  comparisons. `docs/local-llm-optimization.md` explains protocol/results and limitations.
 
 **Local rules retrieval (`core/rules_index.py`, `core/rules_embeddings.py`, `core/rules_retrieval.py`, `core/rules_citations.py`, `/rules`):** the index
 is built only by `/rules index`; startup never rebuilds it. `TabletopAgent.rag_enabled` defaults
