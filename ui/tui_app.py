@@ -329,6 +329,29 @@ class TabletopAITUI:
         if command == "/models":
             self._open_models_screen()
             return True
+        if command == "/local":
+            parts = user_input.split()
+            try:
+                if len(parts) > 2:
+                    raise ValueError("Использование: /local baseline|optimized")
+                if len(parts) == 2:
+                    self.agent.switch_local_profile(parts[1])
+                report = self.agent.local_report()
+            except ValueError as exc:
+                self.console.print(escape(str(exc)))
+                return True
+            self.console.print(Panel(
+                f"Профиль локальной LLM: {report.profile}\n"
+                f"Модель: {escape(report.model)}\nКвантование: {report.quantization}\n"
+                f"Температура ответа: {report.temperature:.1f}\n"
+                f"Генерация: {report.max_tokens} ток.\n"
+                f"Контекст сервера: {report.context_window} ток.\n"
+                + ("Параметры профиля имеют приоритет над температурой /settings.\n"
+                   if report.profile == "optimized" else "")
+                + "Переключить: /local baseline|optimized. После правок INI перезапустите сервер.",
+                title="Локальная LLM",
+            ))
+            return True
         if command == "/clear":
             self.agent.reset()
             self.console.print(
@@ -2083,7 +2106,7 @@ class TabletopAITUI:
             f"Формат: {FORMAT_LABELS[self.settings.format]}  |  "
             f"Стратегия: {STRATEGY_LABELS[self.settings.context_strategy]}  |  "
             f"Объём: {self.settings.max_words} слов  |  Лимит списка: {self.settings.list_limit}  |  "
-            f"Температура: {self.settings.temperature:.1f}  |  "
+            f"Температура: {self.agent.answer_temperature:.1f}  |  "
             f"Команды: {commands_hint}  |  "
             f"Сессия: {session.total_tokens} ток., {session_cost}"
         )

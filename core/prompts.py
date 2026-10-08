@@ -27,7 +27,7 @@ def get_format_instruction(fmt: AnswerFormat) -> str:
 
 
 @lru_cache(maxsize=None)
-def build_system_message(fmt: AnswerFormat) -> str:
+def build_system_message(fmt: AnswerFormat, optimized_local: bool = False) -> str:
     """Системное сообщение для API: базовый промпт + инструкция активного формата.
 
     Формат живёт в системном сообщении, а не в каждом user-промпте: он не меняется от вопроса
@@ -35,10 +35,12 @@ def build_system_message(fmt: AnswerFormat) -> str:
     чем user-turn — это дополнительно усиливает анти-переопределение формата (см. STRICT-блок
     внутри answer_format_*.md), а не только экономит токены на повторной отправке.
     """
+    base = ((config.ASSETS_DIR / "local_system_prompt.md").read_text(encoding="utf-8").strip()
+            if optimized_local else _get_base_system_prompt())
     format_instruction = get_format_instruction(fmt)
     if not format_instruction:
-        return _get_base_system_prompt()
-    return f"{_get_base_system_prompt()}\n\n{format_instruction}"
+        return base
+    return f"{base}\n\n{format_instruction}"
 
 
 def build_user_prompt(question: str, settings: AnswerSettings) -> str:

@@ -23,7 +23,8 @@ def test_qwen_models_follow_cloud_models_in_panel():
     from ui.models_screen import initial_state
     state = initial_state(QWEN)
     assert state.selected == QWEN
-    assert state.available[-2:] == [QWEN, "unsloth/Qwen3.5-4B-GGUF:Q4_K_M"]
+    # День 29 добавляет второе квантование и два профиля, прежний порядок сохраняется.
+    assert state.available[5:7] == [QWEN, "unsloth/Qwen3.5-4B-GGUF:Q4_K_M"]
     assert config.MODEL_PRICING[QWEN] == (0.0, 0.0)
 
 

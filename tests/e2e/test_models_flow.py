@@ -106,10 +106,9 @@ def test_local_selection_routes_question_without_cloud_key(app, stub):
         _wait_panel_open(session)
         session.wait_on_screen("unsloth/Qwen3.5-2B-GGUF:Q4_K_M")
         session.wait_on_screen("локальная")
-        session.send_key(harness.KEY_UP)
-        time.sleep(0.15)
-        session.send_key(harness.KEY_UP)
-        time.sleep(0.15)
+        # День 29 добавил три пресета после прежних моделей. Исходная 2B
+        # остаётся первой локальной: пять шагов вниз от облачной модели по умолчанию.
+        session.send_key(harness.KEY_DOWN, 5)
         session.send_key(harness.KEY_ENTER)
         _wait_panel_closed(session)
         session.wait_for("Модель: unsloth/Qwen3.5-2B-GGUF:Q4_K_M")

@@ -64,8 +64,11 @@ class AnswerMeta:
 
 
 class APIClient:
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, *, seed: Optional[int] = None,
+                 cache_prompt: Optional[bool] = None):
         self.api_key = api_key
+        self.seed = seed
+        self.cache_prompt = cache_prompt
 
     def _request(
         self,
@@ -93,6 +96,11 @@ class APIClient:
             "temperature": temperature if temperature is not None else config.TEMPERATURE,
             "max_tokens": max_tokens,
         }
+        if local:
+            if self.seed is not None:
+                payload["seed"] = self.seed
+            if self.cache_prompt is not None:
+                payload["cache_prompt"] = self.cache_prompt
         headers = {"Content-Type": "application/json"}
         if not local:
             headers["Authorization"] = f"Bearer {self.api_key}"

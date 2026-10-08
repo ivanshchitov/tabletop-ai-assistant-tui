@@ -18,6 +18,7 @@ from . import (
     context_compressor,
     context_strategies,
     invariants,
+    local_llm,
     mcp_tools,
     memory_layers,
     prompts,
@@ -428,6 +429,16 @@ class TabletopAgent:
     def model(self, value: str) -> None:
         self.config.model = value
 
+    def switch_local_profile(self, profile: str) -> None:
+        self.model = local_llm.switch_model(self.model, profile)
+
+    def local_report(self) -> local_llm.LocalReport:
+        return local_llm.report(self.model, self.settings)
+
+    @property
+    def answer_temperature(self) -> float:
+        return self.local_report().temperature if local_llm.is_optimized(self.model) else self.settings.temperature
+
     @property
     def last_result(self) -> Optional[AnswerMeta]:
         """Метрики последнего запроса к API: время, токены, стоимость (только чтение)."""
@@ -646,10 +657,11 @@ class TabletopAgent:
 
     def _ask_question(self, messages: List[Dict[str, str]]) -> AnswerMeta:
         """Запрос вопроса с настройками сессии; расход учтён, метрики — в `last_result`."""
+        parameters = self.local_report() if local_llm.is_optimized(self.model) else None
         meta = self.client.ask_with_usage_messages(
             messages,
-            max_tokens=config.max_tokens_for_words(self.config.max_words),
-            temperature=self.config.temperature,
+            max_tokens=parameters.max_tokens if parameters else config.max_tokens_for_words(self.config.max_words),
+            temperature=parameters.temperature if parameters else self.config.temperature,
             model=self.config.model,
         )
         self._last_result = meta
@@ -1460,7 +1472,9 @@ class TabletopAgent:
     def _build_messages(self, user_prompt: str, skip: int = 0) -> List[Dict[str, str]]:
         """Сборка запроса: system настроек, профиль, инварианты, задача, память слоёв, память стратегии, ходы, новый ход."""
         messages: List[Dict[str, str]] = [
-            {"role": "system", "content": prompts.build_system_message(self.config.format)}
+            {"role": "system", "content": prompts.build_system_message(
+                self.config.format, optimized_local=True
+            ) if local_llm.is_optimized(self.model) else prompts.build_system_message(self.config.format)}
         ]
         profile = self._profile_message()
         if profile is not None:

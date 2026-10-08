@@ -177,6 +177,30 @@ def scripted_input(monkeypatch):
 # --- запуск и завершение ------------------------------------------------------------------
 
 
+def test_local_report_and_switch_never_ask_model(make_app, recording_console):
+    client = FakeClient()
+    app = make_app(["/local optimized", "/local", "/local baseline", "/exit"], client)
+    app.model = "unsloth/Qwen3.5-2B-GGUF:Q4_K_XL"
+    app.run()
+    assert client.calls == []
+    assert recording_console.contains("Профиль локальной LLM: optimized")
+    assert recording_console.contains("Квантование: Q4_K_XL")
+    assert recording_console.contains("Генерация: 1024 ток.")
+    assert recording_console.contains("Контекст сервера: 8192 ток.")
+    assert app.model == "unsloth/Qwen3.5-2B-GGUF:Q4_K_XL"
+
+
+def test_invalid_local_command_preserves_model(make_app, recording_console):
+    client = FakeClient()
+    app = make_app(["/local optimized", "/local wrong", "/exit"], client)
+    before = app.model
+    app.run()
+    assert app.model == before
+    assert client.calls == []
+    assert recording_console.contains("Выберите её через /models")
+    assert recording_console.contains("/local baseline|optimized")
+
+
 def test_welcome_is_shown_on_empty_history(make_app, recording_console):
     make_app(["/exit"]).run()
     assert recording_console.contains("Tabletop AI Assistant запущен")
