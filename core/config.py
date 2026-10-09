@@ -54,6 +54,11 @@ def api_url_for_model(model: str) -> str:
         return os.getenv("TABLETOP_LOCAL_API_URL", LOCAL_API_URL)
     return API_URL
 
+
+def local_api_key() -> str:
+    """Отдельный ключ приватного сервиса; пустой сохраняет локальный режим без ключа."""
+    return os.getenv("TABLETOP_LOCAL_API_KEY", "")
+
 # Список моделей, которые пользователь может выбрать через /models; первая — модель
 # по умолчанию. Панель и клиент читают отсюда, имена моделей не зашиваются нигде больше.
 AVAILABLE_MODELS = [

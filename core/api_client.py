@@ -104,6 +104,12 @@ class APIClient:
         headers = {"Content-Type": "application/json"}
         if not local:
             headers["Authorization"] = f"Bearer {self.api_key}"
+        else:
+            local_key = config.local_api_key()
+            if local_key:
+                if any(ord(char) < 33 or ord(char) > 126 for char in local_key):
+                    raise APIError("TABLETOP_LOCAL_API_KEY должен быть ASCII-ключом без пробелов.")
+                headers["Authorization"] = f"Bearer {local_key}"
 
         last_timeout: Optional[Exception] = None
         start = time.perf_counter()

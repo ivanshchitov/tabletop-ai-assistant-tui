@@ -157,16 +157,32 @@ real file in the repo root (`history.json`, `memory.json`, `.rules-index.sqlite3
 
 ## Architecture
 
+**Private LLM service (`llm_service/`, `tabletop-llm-service.py`, day 30):** standalone
+single-model Qwen3.5-2B Q4_K_M process on loopback :10099 plus HTTP gateway (default :8080).
+`TABLETOP_SERVICE_API_KEY` is required; `--host` opts into LAN access. Supports health,
+authenticated model listing and non-streaming chat only. Sliding limit 10/60s, 128 KiB body,
+1024 output tokens, 8192 context including template/tokenizer preflight and 2-token reserve;
+one running and one queued generation, at most 8 HTTP handlers. Errors release the queue;
+no context shifting. Child output is disabled; gateway logs status/time/request id only.
+Client uses optional `TABLETOP_LOCAL_API_KEY` separately from cloud credentials and
+`TABLETOP_LLAMA_AUTOSTART=0`; select `/local optimized`, disable tools/RAG and use window
+strategy for service chat (embeddings/helper budgets >1024 are outside this API).
+CLI owns only its own model process; occupied backend port is refused, never taken over.
+SIGINT/SIGTERM/SIGHUP clean up the child; dedicated Linux unit uses control-group cleanup.
+`docs/private-llm-service.md` documents deployment and `deploy/tabletop-llm.service` is an example.
+Real SSH addresses live only in gitignored videos/; passwords must never be persisted or echoed.
+
 The shared request metrics line displays average output throughput in ток/сек:
 completion_tokens / elapsed_seconds (full HTTP request time, including prompt processing
 and waiting; output tokens may include reasoning). Nonpositive time or output tokens show н/д.
 
-Three packages: `core/` (agent, settings, prompts, API client, memory layers and stores, the user
+Four packages: `core/` (agent, settings, prompts, API client, memory layers and stores, the user
 profile, the invariants table and its answer check, the task state machine and its pipeline, context
 strategies and the compression logic, the MCP client and the pure part of the tool choice, local
 PDF rules indexing and retrieval — no
 `rich`/terminal dependency), `mcp_server/` (the project's **own** MCP server — a separate process,
-outside `core/` and `ui/`, see the MCP block below) and `ui/`
+outside `core/` and `ui/`, see the MCP block below), `llm_service/` (standalone private HTTP
+gateway and its own model process), and `ui/`
 (`tui_app.py`, `keyboard.py`, `commands_screen.py`, `settings_screen.py`, `branches_screen.py`,
 `models_screen.py` — everything that touches the terminal). Modules inside `core/`
 import each other with relative imports (`from . import config`, `from .answer_settings import
@@ -292,6 +308,8 @@ clears stale `last_rules_sources` and replaces the retrieval report before doing
 embeddings use `/v1/embeddings` on the same server),
 `TABLETOP_LLAMA_AUTOSTART` (`0` disables server lifecycle), `TABLETOP_LLAMA_START_TIMEOUT`
 (startup wait in seconds, default 120),
+`TABLETOP_LOCAL_API_KEY` (optional independent local-service key), `TABLETOP_SERVICE_API_KEY`
+(required by the standalone gateway; not forwarded to the model),
 `TABLETOP_MEMORY_FILE`, `TABLETOP_PROFILE_FILE`, `TABLETOP_TASK_FILE`, `TABLETOP_TASKS_DIR`,
 `TABLETOP_SCHEDULE_FILE`, `TABLETOP_EXPORTS_DIR` (the directory the own server's save-to-file tool
 writes into, default `exports/`), `TABLETOP_RULES_DOCUMENTS_DIR` (PDF corpus directory, default
@@ -1194,6 +1212,10 @@ the verbatim records. `working` is written by memory routing and by `/memory goa
 saved: `dialogues` stays a flat list across branches.
 
 ## Test layout
+
+- `test_private_llm_service.py` unit tests cover authentication, validation, sliding limits,
+  context reservation, queue recovery and model-process ownership; HTTP/e2e tests exercise a
+  real gateway against a local backend stub, concurrency, errors and two TUI chat turns.
 
 - `tests/unit/test_rules_embeddings.py` verifies INI embedding selection and HTTP payloads,
   query instructions, normalization, malformed vectors and transport errors. Index tests cover

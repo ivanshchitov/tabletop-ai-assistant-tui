@@ -100,6 +100,34 @@ def test_authorization_header_carries_key(client):
 
 
 @responses.activate
+def test_local_service_key_is_separate_from_cloud_key(client, monkeypatch):
+    monkeypatch.setenv("TABLETOP_LOCAL_API_KEY", "local-test-secret")
+    model = "tabletop-qwen-2b-q4-k-m-optimized"
+    responses.add(responses.POST, config.api_url_for_model(model), json=_completion("local"))
+    responses.add(responses.POST, config.API_URL, json=_completion("cloud"))
+    assert client.ask("system", "user", max_tokens=1024, model=model) == "local"
+    assert responses.calls[0].request.headers["Authorization"] == "Bearer local-test-secret"
+    assert client.ask("system", "user") == "cloud"
+    assert responses.calls[1].request.headers["Authorization"] == "Bearer sk-test"
+
+
+@responses.activate
+def test_local_service_key_is_optional(client, monkeypatch):
+    monkeypatch.delenv("TABLETOP_LOCAL_API_KEY", raising=False)
+    model = "tabletop-qwen-2b-q4-k-m-optimized"
+    responses.add(responses.POST, config.api_url_for_model(model), json=_completion("local"))
+    client.ask("system", "user", max_tokens=1024, model=model)
+    assert "Authorization" not in responses.calls[0].request.headers
+
+
+@pytest.mark.parametrize("key", ["секрет", "secret\r\nheader", "secret value"])
+def test_invalid_local_key_reports_error_before_http(client, monkeypatch, key):
+    monkeypatch.setenv("TABLETOP_LOCAL_API_KEY", key)
+    with pytest.raises(APIError, match="TABLETOP_LOCAL_API_KEY"):
+        client.ask("system", "user", max_tokens=1024, model="tabletop-qwen-2b-q4-k-m-optimized")
+
+
+@responses.activate
 def test_default_max_tokens_matches_default_word_limit(client):
     responses.add(responses.POST, config.API_URL, json=_completion("ok"), status=200)
     client.ask("system", "user")

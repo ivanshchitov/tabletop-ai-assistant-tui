@@ -5,7 +5,7 @@
 ## Технические требования
 
 - Python 3.10+
-- Зависимости из `requirements.txt`: `rich`, `requests`, `python-dotenv`, `mcp`
+- Зависимости из `requirements.txt`: `rich`, `requests`, `python-dotenv`, `mcp`, `pypdf`, `fonttools`
 - Для облачных моделей: API-ключ `OPENCODE_API_KEY` в `.env` (см. `.env.example`) и доступ к OpenCode Zen `https://opencode.ai/zen/v1/chat/completions`. Локальным моделям ключ не нужен.
 - Терминал с поддержкой ANSI-цветов и Unicode/emoji
 - Интернет-соединение для облачного API; для локальных моделей — установленный llama.cpp и скачанные GGUF
@@ -51,6 +51,14 @@ TABLETOP_LLAMA_START_TIMEOUT=180 ./tabletop-ai-assistant.py # ожидание �
 `TABLETOP_LOCAL_API_URL` с полным адресом `/v1/chat/completions`; embeddings отправляются
 на `/v1/embeddings` того же сервера. Для медленной генерации
 можно увеличить `TABLETOP_REQUEST_TIMEOUT` (по умолчанию 90 секунд).
+
+Для отдельного приватного сервиса дня 30 используйте
+[инструкцию развёртывания](docs/private-llm-service.md):
+`python tabletop-llm-service.py --host <SERVER_LAN_IP>`. Сервис работает независимо
+от TUI и требует `TABLETOP_SERVICE_API_KEY`; клиенту задаются `TABLETOP_LOCAL_API_KEY`,
+`TABLETOP_LOCAL_API_URL` и `TABLETOP_LLAMA_AUTOSTART=0`. Лимиты: 10 запросов за 60 секунд,
+контекст 8192, ответ до 1024 токенов, одно исполнение и одно ожидание.
+Для этого сервиса выбирайте `/local optimized`; embeddings он не обслуживает.
 
 Для демонстрации самой модели: `/tool auto off`, `/rules mode off`, объём ответа 70 слов
 в `/settings`, `/clear` перед каждым вопросом. Это исключает вспомогательные запросы
@@ -548,6 +556,10 @@ Execution → Planning»), недопустимый отклоняется ст�
 ```
 tabletop-ai-assistant.py  # Точка входа: python tabletop-ai-assistant.py
 tabletop-scheduler.py     # Фоновый исполнитель расписания: ./tabletop-scheduler.py [--once]
+tabletop-llm-service.py   # Самостоятельный приватный HTTP-сервис Qwen
+llm_service/             # HTTP-шлюз, ограничения, клиент backend и запуск модели
+deploy/tabletop-llm.service # Пример systemd-службы домашнего сервера
+docs/private-llm-service.md # Развёртывание, API, лимиты и проверка дня 30
 core/                      # Настройки, промпты, API-клиент, история — без rich/терминала
   config.py                 # Переменные окружения, константы (порог/потолок сжатия, стратегии, лимиты блока фактов и памяти)
   answer_settings.py         # AnswerFormat, ContextStrategy, AnswerSettings — формат/объём/лимит/температура + порог сжатия, потолок контекста, стратегия
@@ -636,6 +648,11 @@ exports/                   # Выгрузки цепочки инструмен�
 ```
 
 Переменные окружения (`.env` или оболочка): `OPENCODE_API_KEY`, `OPENCODE_API_URL`,
+`TABLETOP_LOCAL_API_URL` (полный адрес локального chat API), `TABLETOP_LOCAL_API_KEY`
+(отдельный опциональный ключ локального сервиса), `TABLETOP_LLAMA_AUTOSTART`
+(`0` отключает управление локальным сервером), `TABLETOP_LLAMA_START_TIMEOUT`
+(ожидание запуска, по умолчанию 120 с), `TABLETOP_SERVICE_API_KEY`
+(обязательный ключ отдельного сервиса),
 `TABLETOP_HISTORY_FILE`, `TABLETOP_MEMORY_FILE` (файл долговременной памяти, по умолчанию
 `memory.json`), `TABLETOP_PROFILE_FILE` (файл профилей пользователя, по умолчанию
 `profile.json`), `TABLETOP_TASK_FILE` (файл состояния задачи, по умолчанию `task.json`),
@@ -809,7 +826,7 @@ openspec/
 `openspec/specs/` уже содержит основную спецификацию проекта — возможности, зафиксированные
 реверс-инжинирингом действующего кода: `question-answering`, `answer-settings`,
 `api-integration`, `history-persistence`, `terminal-ui`, `settings-screen`, `configuration`,
-`context-strategies`, `test-infrastructure`, `model-selection`, `local-llm`, `memory-model`, `user-profile`,
+`context-strategies`, `test-infrastructure`, `model-selection`, `local-llm`, `local-llm-optimization`, `memory-model`, `user-profile`,
 `agent`, `agent-invariants`, `task-state`, `mcp-integration`, `scheduled-jobs`,
 `tool-pipeline`, `rules-document-index`, `rules-retrieval`, `rag-citations`
 и `local-rag-embeddings`. Она — эталон для будущих `MODIFIED`-дельт.

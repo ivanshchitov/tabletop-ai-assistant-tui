@@ -1,0 +1,20 @@
+[Unit]
+Description=Tabletop private local LLM service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tabletop
+WorkingDirectory=/opt/tabletop-ai-assistant-tui
+EnvironmentFile=/etc/tabletop-llm.env
+ExecStart=/opt/tabletop-ai-assistant-tui/.venv/bin/python /opt/tabletop-ai-assistant-tui/tabletop-llm-service.py --host ${TABLETOP_SERVICE_HOST} --llama-command /usr/local/bin/llama-server --model-file /srv/tabletop/models/qwen-2b-q4-k-m.gguf
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+KillMode=control-group
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
